@@ -62,7 +62,9 @@ class _StandaloneEngineBase:
         """Never request compression."""
         return False
 
-    def should_compress_info(self, prompt_tokens: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+    def should_compress_info(
+        self, prompt_tokens: Optional[int] = None
+    ) -> Tuple[bool, Optional[str]]:
         """Never request compression."""
         return False, None
 
@@ -85,7 +87,9 @@ class _StandaloneEngineBase:
     def on_turn_complete(self, messages, usage=None, **kwargs: Any) -> None:
         """Observe a finished turn (accounting rides on usage updates)."""
 
-    def get_automatic_compaction_status_message(self, *, phase: str, default_message: str, **context: Any):
+    def get_automatic_compaction_status_message(
+        self, *, phase: str, default_message: str, **context: Any
+    ):
         """This engine never compacts automatically, so it never reports doing so."""
         return default_message if self.emit_automatic_compaction_status else None
 
@@ -194,7 +198,9 @@ class EngineConfig:
             archive_redact=bool(_config_value(source, "archive_redact", True)),
             retention_sessions=int(_config_value(source, "retention_sessions", 32)),
             max_retrieve_bytes=int(_config_value(source, "max_retrieve_bytes", 32_768)),
-            max_rewrite_bytes=int(_config_value(source, "max_rewrite_bytes", DEFAULT_MAX_REWRITE_BYTES)),
+            max_rewrite_bytes=int(
+                _config_value(source, "max_rewrite_bytes", DEFAULT_MAX_REWRITE_BYTES)
+            ),
             max_aux_spans=int(_config_value(source, "max_aux_spans", 8)),
             hermes_home=_config_value(source, "hermes_home", None),
         )
@@ -329,7 +335,12 @@ class ToolService:
         self._require_store().discard(txn_id=txn_id)
 
     def revert(
-        self, *, target_revision: int, expected_revision: int, txn_id: str, actor_origin: str = "operator"
+        self,
+        *,
+        target_revision: int,
+        expected_revision: int,
+        txn_id: str,
+        actor_origin: str = "operator",
     ) -> Any:
         """Create a new head revision restoring an earlier projection."""
         return self._require_store().revert(
@@ -339,7 +350,9 @@ class ToolService:
             actor_origin=actor_origin,
         )
 
-    def search(self, query: str, *, cursor: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
+    def search(
+        self, query: str, *, cursor: Optional[str] = None, limit: int = 20
+    ) -> Dict[str, Any]:
         """Bounded archive search, current session only."""
         return self._require_store().search(query, cursor=cursor, limit=limit)
 
@@ -586,7 +599,9 @@ class CLMEngine(_EngineBase):
         nothing is committed, nothing applies, or the projection refuses.
         """
         try:
-            if not request_messages or not all(isinstance(row, Mapping) for row in request_messages):
+            if not request_messages or not all(
+                isinstance(row, Mapping) for row in request_messages
+            ):
                 return None
             if budget_tokens and not self.context_length:
                 self.context_length = int(budget_tokens)
@@ -626,7 +641,9 @@ class CLMEngine(_EngineBase):
         """Never: CLM edits are agent decisions, not a threshold reaction."""
         return False
 
-    def should_compress_info(self, prompt_tokens: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+    def should_compress_info(
+        self, prompt_tokens: Optional[int] = None
+    ) -> Tuple[bool, Optional[str]]:
         """No automatic compression, so no block reason either."""
         return False, None
 
@@ -676,7 +693,9 @@ class CLMEngine(_EngineBase):
             self._record_error(exc)
             return self._identity_copy(messages)
 
-    def _abort_compress(self, reason: str, messages: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    def _abort_compress(
+        self, reason: str, messages: Sequence[Mapping[str, Any]]
+    ) -> List[Dict[str, Any]]:
         self._last_compress_aborted = True
         self._last_summary_error = reason
         self._record_error(RuntimeError(reason))
@@ -707,7 +726,12 @@ class CLMEngine(_EngineBase):
         plan = _budget.plan_offload(candidates, need_tokens=state.overflow_tokens)
         if not plan:
             self._receipt(
-                {"stage": "overflow", "needed": state.overflow_tokens, "offloaded": [], "budget": state.to_dict()}
+                {
+                    "stage": "overflow",
+                    "needed": state.overflow_tokens,
+                    "offloaded": [],
+                    "budget": state.to_dict(),
+                }
             )
             return projected
 
@@ -810,12 +834,15 @@ class CLMEngine(_EngineBase):
             )
             clipped = any(
                 uid == newest_tool_uid
-                or is_protected_message(uid_rows.get(uid, {}), pinned=uid in pin_ids, newest_tool_result=uid == newest_tool_uid)
+                or is_protected_message(
+                    uid_rows.get(uid, {}),
+                    pinned=uid in pin_ids,
+                    newest_tool_result=uid == newest_tool_uid,
+                )
                 for uid in members
             )
             pinned = any(
-                uid in pin_ids
-                or getattr(by_uid.get(uid), "span_id", None) in pin_ids
+                uid in pin_ids or getattr(by_uid.get(uid), "span_id", None) in pin_ids
                 for uid in members
             )
             tokens = sum(_budget.estimate_message_tokens(uid_rows.get(uid, {})) for uid in members)
@@ -905,7 +932,9 @@ class CLMEngine(_EngineBase):
         if len(self._usage_receipts) > RECEIPT_LIMIT:
             del self._usage_receipts[: len(self._usage_receipts) - RECEIPT_LIMIT]
 
-    def budget_state(self, messages: Optional[Sequence[Mapping[str, Any]]] = None) -> Dict[str, Any]:
+    def budget_state(
+        self, messages: Optional[Sequence[Mapping[str, Any]]] = None
+    ) -> Dict[str, Any]:
         """The budget number used for edit validation, for status/tool receipts."""
         estimated = (
             _budget.estimate_messages_tokens(messages)

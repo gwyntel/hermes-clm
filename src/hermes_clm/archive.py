@@ -69,8 +69,12 @@ class RedactionRule:
         return new_text, count
 
 
-def _rule(name: str, pattern: str, replacement: str, group: int | None = None, flags: int = 0) -> RedactionRule:
-    return RedactionRule(name=name, pattern=re.compile(pattern, flags), replacement=replacement, group=group)
+def _rule(
+    name: str, pattern: str, replacement: str, group: int | None = None, flags: int = 0
+) -> RedactionRule:
+    return RedactionRule(
+        name=name, pattern=re.compile(pattern, flags), replacement=replacement, group=group
+    )
 
 
 #: Ordered, conservative secret scrubbers.  Order matters: compound rules run
@@ -89,7 +93,9 @@ DEFAULT_RULES: tuple[RedactionRule, ...] = (
     _rule("slack_token", r"\bxox[abpros]-[A-Za-z0-9\-]{10,}", "[REDACTED:slack_token]"),
     _rule("aws_access_key_id", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "[REDACTED:aws_access_key_id]"),
     _rule("google_api_key", r"\bAIza[0-9A-Za-z_\-]{35}\b", "[REDACTED:google_api_key]"),
-    _rule("jwt", r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}", "[REDACTED:jwt]"),
+    _rule(
+        "jwt", r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}", "[REDACTED:jwt]"
+    ),
     _rule("bearer", r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=\-]{16,}", r"\1 [REDACTED:bearer]"),
     _rule(
         "conn_string",

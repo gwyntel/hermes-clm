@@ -64,7 +64,8 @@ class ProposalTests(kit.StoreTestCase):
         committed = self.store.commit(txn_id="txn-accept", expected_revision=1)
         self.assertEqual(committed.revision, 2)
         self.assertEqual(
-            self.store.snapshot().span(self.ids["u-a2"]).rewrite_text, f"summary of {self.ids['u-a2']}"
+            self.store.snapshot().span(self.ids["u-a2"]).rewrite_text,
+            f"summary of {self.ids['u-a2']}",
         )
 
     def test_accept_records_aux_provenance_and_agent_authority(self) -> None:
@@ -146,7 +147,11 @@ class ProposalTests(kit.StoreTestCase):
     def test_proposal_requires_aux_actor(self) -> None:
         with self.assertRaises(ValidationError):
             self.store.create_proposal(
-                [EditOperation(kind=EditKind.PIN, span_ids=(self.ids["u-a2"],), actor_origin="agent")],
+                [
+                    EditOperation(
+                        kind=EditKind.PIN, span_ids=(self.ids["u-a2"],), actor_origin="agent"
+                    )
+                ],
                 base_revision=1,
             )
 

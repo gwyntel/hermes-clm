@@ -37,7 +37,9 @@ class JsonSurfaceTests(kit.StoreTestCase):
         snapshot = store.snapshot()
         target = kit.StoreTestCase.span_ids(store)["u-a2"]
         op = kit.EditOperation(kind=kit.EditKind.DROP, span_ids=(target,), actor_origin="agent")
-        staged = store.stage([op], expected_revision=snapshot.revision, txn_id="txn-json", actor_origin="agent")
+        staged = store.stage(
+            [op], expected_revision=snapshot.revision, txn_id="txn-json", actor_origin="agent"
+        )
         commit = store.commit(txn_id="txn-json", expected_revision=snapshot.revision)
 
         for payload in (
@@ -92,7 +94,9 @@ class EditOperationTests(unittest.TestCase):
 
     def test_rewrite_rejects_multimodal_replacement(self) -> None:
         with self.assertRaises(ValidationError):
-            EditOperation(kind=EditKind.REWRITE, span_ids=("sp_1",), replacement={"type": "image_url"})
+            EditOperation(
+                kind=EditKind.REWRITE, span_ids=("sp_1",), replacement={"type": "image_url"}
+            )
 
     def test_non_rewrite_rejects_replacement(self) -> None:
         with self.assertRaises(ValidationError):
@@ -107,7 +111,9 @@ class EditOperationTests(unittest.TestCase):
 
     def test_unknown_fields_rejected(self) -> None:
         with self.assertRaises(ValidationError) as ctx:
-            EditOperation.from_mapping({"kind": "drop", "span_ids": ["sp_1"], "session_id": "other"})
+            EditOperation.from_mapping(
+                {"kind": "drop", "span_ids": ["sp_1"], "session_id": "other"}
+            )
         self.assertEqual(ctx.exception.code, "unknown_field")
 
     def test_provenance_is_read_only(self) -> None:
@@ -126,7 +132,9 @@ class EditOperationTests(unittest.TestCase):
         self.assertNotEqual(a.sha256, c.sha256)
 
     def test_actor_origin_coerced_from_string(self) -> None:
-        op = EditOperation.from_mapping({"kind": "drop", "span_ids": ["sp_1"], "actor_origin": "operator"})
+        op = EditOperation.from_mapping(
+            {"kind": "drop", "span_ids": ["sp_1"], "actor_origin": "operator"}
+        )
         self.assertIs(op.actor_origin, ActorOrigin.OPERATOR)
 
 
@@ -264,7 +272,13 @@ class ResultTypeTests(unittest.TestCase):
 
     def test_proposal_origin_is_aux_only(self) -> None:
         with self.assertRaises(ValidationError):
-            Proposal(proposal_id="p", proposal_sha256="0" * 64, base_revision=1, operations=(), origin="agent")
+            Proposal(
+                proposal_id="p",
+                proposal_sha256="0" * 64,
+                base_revision=1,
+                operations=(),
+                origin="agent",
+            )
 
     def test_role_origin_mapping(self) -> None:
         self.assertIs(origin_for_role("user"), SpanOrigin.USER)

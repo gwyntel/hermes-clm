@@ -86,9 +86,13 @@ def build_host(history):
     return FakeHost(engine, history), factory
 
 
-def stage_and_commit(engine: CLMEngine, operations, *, revision: int, txn_id: str = "txn-1") -> None:
+def stage_and_commit(
+    engine: CLMEngine, operations, *, revision: int, txn_id: str = "txn-1"
+) -> None:
     service = engine.tool_service()
-    staged = service.stage(operations, expected_revision=revision, txn_id=txn_id, actor_origin="agent")
+    staged = service.stage(
+        operations, expected_revision=revision, txn_id=txn_id, actor_origin="agent"
+    )
     assert staged.ok
     committed = service.commit(txn_id=txn_id, expected_revision=revision)
     assert committed.ok

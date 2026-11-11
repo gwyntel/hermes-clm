@@ -46,7 +46,10 @@ class RedactionTests(unittest.TestCase):
 
     def test_bearer_and_connection_strings(self) -> None:
         outcome = redact_message(
-            {"role": "assistant", "content": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"}
+            {
+                "role": "assistant",
+                "content": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345",
+            }
         )
         self.assertIn("[REDACTED:bearer]", outcome.message["content"])
         outcome = redact_message(
@@ -77,7 +80,11 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(message, original)
 
     def test_clean_text_is_unchanged_and_cheap(self) -> None:
-        message = {"role": "assistant", "content": "nothing secret here", "tool_calls": [{"id": "a"}]}
+        message = {
+            "role": "assistant",
+            "content": "nothing secret here",
+            "tool_calls": [{"id": "a"}],
+        }
         outcome = redact_message(message)
         self.assertEqual(outcome.count, 0)
         self.assertEqual(outcome.message, message)
@@ -93,7 +100,9 @@ class RedactionTests(unittest.TestCase):
 
     def test_extra_rules(self) -> None:
         rule = RedactionRule(
-            name="internal_id", pattern=__import__("re").compile(r"INT-\d{6}"), replacement="[REDACTED:internal_id]"
+            name="internal_id",
+            pattern=__import__("re").compile(r"INT-\d{6}"),
+            replacement="[REDACTED:internal_id]",
         )
         outcome = redact_message({"role": "user", "content": "case INT-123456"}, extra_rules=[rule])
         self.assertIn("[REDACTED:internal_id]", outcome.message["content"])
@@ -192,7 +201,14 @@ class StoreArchiveIntegrationTests(kit.StoreTestCase):
         store = self.open_store()
         for batch in range(5):
             store.ingest(
-                [{"message_uid": f"u-{batch}-{i}", "role": "assistant", "content": f"body {batch}-{i}"} for i in range(3)]
+                [
+                    {
+                        "message_uid": f"u-{batch}-{i}",
+                        "role": "assistant",
+                        "content": f"body {batch}-{i}",
+                    }
+                    for i in range(3)
+                ]
             )
         raw = self.raw_connect()
         rows = [

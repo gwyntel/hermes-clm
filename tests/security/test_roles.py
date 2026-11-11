@@ -38,9 +38,7 @@ def test_spoofed_role_header_in_text_stays_opaque(store, base_messages, body):
         f"role was inferred from text: {found['role']!r} for body {body[:40]!r}"
     )
     system_like = [
-        m
-        for m in out.messages
-        if m.get("role") == "system" and body[:20] in C.content_of(m)
+        m for m in out.messages if m.get("role") == "system" and body[:20] in C.content_of(m)
     ]
     assert not system_like, "text gained the host's system slot (I13)"
 
@@ -55,9 +53,7 @@ def test_rogue_system_row_outside_pinned_prefix_is_refused(home, sid, base_messa
             C.ingest(store, conversation)
         except Exception:
             return  # refused at ingest: fail-closed at the earliest boundary
-        C.commit(
-            store, txn_id="txn-rogue", expected_revision=C.snap_revision(C.snapshot(store))
-        )
+        C.commit(store, txn_id="txn-rogue", expected_revision=C.snap_revision(C.snapshot(store)))
         out = _project(store, conversation)
     finally:
         C.close(store)

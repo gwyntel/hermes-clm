@@ -217,7 +217,9 @@ def pressure_state(
     last_prompt_tokens: int = 0,
 ) -> PressureState:
     """Build a :class:`PressureState` from a raw estimate plus live model state."""
-    calibrated = calibration.adjust(estimated_tokens) if calibration is not None else estimated_tokens
+    calibrated = (
+        calibration.adjust(estimated_tokens) if calibration is not None else estimated_tokens
+    )
     return PressureState(
         estimated_tokens=max(0, int(calibrated)),
         context_length=max(0, int(context_length or 0)),

@@ -32,7 +32,9 @@ def engine_for(snapshot=None, *, supports_commit: bool = True, **kwargs):
     return engine, factory
 
 
-def started_engine(snapshot=None, *, supports_commit: bool = True, session_id: str = "sess-1", **kwargs):
+def started_engine(
+    snapshot=None, *, supports_commit: bool = True, session_id: str = "sess-1", **kwargs
+):
     engine, factory = engine_for(snapshot, supports_commit=supports_commit, **kwargs)
     engine.on_session_start(session_id, hermes_home="/tmp/hermes-home")
     return engine, factory
@@ -104,13 +106,20 @@ def test_engine_subclasses_the_real_host_abc_when_a_checkout_is_available(monkey
         print("ok")
         """
     )
-    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=".")
+    completed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd="."
+    )
     assert completed.returncode == 0, completed.stderr
     assert "ok" in completed.stdout
 
 
 def test_importing_the_package_does_not_import_hermes():
-    for name in ("hermes_clm.engine", "hermes_clm.projection", "hermes_clm.identity", "hermes_clm.budget"):
+    for name in (
+        "hermes_clm.engine",
+        "hermes_clm.projection",
+        "hermes_clm.identity",
+        "hermes_clm.budget",
+    ):
         __import__(name)
     assert "agent" not in sys.modules
 
@@ -174,12 +183,26 @@ def test_engine_implements_the_full_host_engine_surface():
     """The ABC is complete: every hook the host reads exists and is callable."""
     engine, _ = started_engine()
     surface = [
-        "select_context", "compress", "update_from_response", "should_compress",
-        "should_compress_info", "should_compress_preflight", "should_defer_preflight_to_real_usage",
-        "prune_tool_results_only", "has_content_to_compress", "on_turn_complete",
-        "get_automatic_compaction_status_message", "on_session_start", "on_session_end",
-        "on_session_reset", "get_tool_schemas", "handle_tool_call", "get_status",
-        "clone_for_agent", "update_model", "name",
+        "select_context",
+        "compress",
+        "update_from_response",
+        "should_compress",
+        "should_compress_info",
+        "should_compress_preflight",
+        "should_defer_preflight_to_real_usage",
+        "prune_tool_results_only",
+        "has_content_to_compress",
+        "on_turn_complete",
+        "get_automatic_compaction_status_message",
+        "on_session_start",
+        "on_session_end",
+        "on_session_reset",
+        "get_tool_schemas",
+        "handle_tool_call",
+        "get_status",
+        "clone_for_agent",
+        "update_model",
+        "name",
     ]
     for attribute in surface:
         assert hasattr(engine, attribute), attribute
@@ -204,12 +227,16 @@ def test_should_compress_and_preflight_stay_disabled():
 
 
 def test_compress_is_identity_by_default():
-    engine, factory = started_engine(snapshot_for(coding_turns(), [OperationSpec(kind="drop", span_ids=("a1", "t1"))]))
+    engine, factory = started_engine(
+        snapshot_for(coding_turns(), [OperationSpec(kind="drop", span_ids=("a1", "t1"))])
+    )
     messages = coding_turns()
     result = engine.compress(messages)
     assert result == messages
     assert result is not messages
-    assert all(produced is not original for produced, original in zip(result, messages, strict=True))
+    assert all(
+        produced is not original for produced, original in zip(result, messages, strict=True)
+    )
     assert factory.store.ingest_calls == []
     assert engine.compression_count == 0
 
@@ -300,7 +327,9 @@ def test_usage_receipts_are_bounded():
 
 def test_get_status_reports_revision_budget_and_no_paths():
     history = coding_turns()
-    engine, _ = started_engine(snapshot_for(history, [OperationSpec(kind="drop", span_ids=("a1", "t1"))], revision=4))
+    engine, _ = started_engine(
+        snapshot_for(history, [OperationSpec(kind="drop", span_ids=("a1", "t1"))], revision=4)
+    )
     engine.context_length = 100_000
     engine.select_context(assemble(history), conversation_messages=history)
 
@@ -402,7 +431,10 @@ def test_engine_degrades_when_the_store_factory_raises():
     engine = CLMEngine(store_factory=exploding_factory)
     engine.on_session_start("sess-1")
     assert engine.store is None
-    assert engine.select_context(assemble(coding_turns()), conversation_messages=coding_turns()) is None
+    assert (
+        engine.select_context(assemble(coding_turns()), conversation_messages=coding_turns())
+        is None
+    )
     assert "OSError" in engine.get_status()["last_error"]
 
 

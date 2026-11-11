@@ -47,8 +47,11 @@ def test_proposal_byte_change_after_display_is_rejected(home, sid):
         tampered = "f" * len(str(phash))
     failure = expect_refusal(
         lambda: C.accept_proposal(
-            store, proposal_id=pid, proposal_sha256=tampered,
-            base_revision=revision, txn_id="t44-bad",
+            store,
+            proposal_id=pid,
+            proposal_sha256=tampered,
+            base_revision=revision,
+            txn_id="t44-bad",
         )
     )
     assert failure, "accept did not bind proposal_sha256 (I26)"
@@ -58,7 +61,9 @@ def test_proposal_byte_change_after_display_is_rejected(home, sid):
         store, proposal_id=pid, proposal_sha256=phash, base_revision=revision, txn_id="t44-good"
     )
     assert C.res_ok(ok), C.res_errors(ok)
-    assert C.snap_revision(C.snapshot(store)) == revision, "accept_proposal committed (it must stage only)"
+    assert C.snap_revision(C.snapshot(store)) == revision, (
+        "accept_proposal committed (it must stage only)"
+    )
     C.close(store)
 
 
@@ -70,14 +75,20 @@ def test_proposal_with_stale_base_revision_is_rejected(home, sid):
     phash = C._res_get(proposal, "proposal_sha256")
 
     assert C.res_ok(
-        C.stage(store, [C.make_op("drop", [spans[1]])], expected_revision=revision, txn_id="t45-move")
+        C.stage(
+            store, [C.make_op("drop", [spans[1]])], expected_revision=revision, txn_id="t45-move"
+        )
     )
     assert C.res_ok(C.commit(store, txn_id="t45-move", expected_revision=revision))
     head = C.snap_revision(C.snapshot(store))
 
     failure = expect_refusal(
         lambda: C.accept_proposal(
-            store, proposal_id=pid, proposal_sha256=phash, base_revision=revision, txn_id="t45-stale"
+            store,
+            proposal_id=pid,
+            proposal_sha256=phash,
+            base_revision=revision,
+            txn_id="t45-stale",
         )
     )
     assert failure, "stale base_revision accepted: TOCTOU on the proposal span set (I26)"
@@ -114,9 +125,7 @@ def test_proposal_cannot_reference_foreign_or_pinned_spans(home, sid, other_home
             return f"accept: {type(exc).__name__}: {exc}"
         if not C.res_ok(accepted):
             return "; ".join(C.res_errors(accepted))
-        raise AssertionError(
-            f"proposal over span {span_id!r} was accepted into the store (I27)"
-        )
+        raise AssertionError(f"proposal over span {span_id!r} was accepted into the store (I27)")
 
     failure = _refused_at_create_or_accept(foreign_span, revision, "t46-foreign")
     assert failure, "proposal referenced a span in another session (I27)"

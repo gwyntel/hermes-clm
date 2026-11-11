@@ -33,9 +33,12 @@ class CrashRecoveryTests(kit.StoreTestCase):
         self._run_child("txn-crash")
         store = self.open_store()
         raw = self.raw_connect()
-        self.assertEqual(raw.execute("SELECT COUNT(*) FROM audit WHERE event = 'phantom'").fetchone()[0], 0)
         self.assertEqual(
-            raw.execute("SELECT value FROM meta WHERE key = 'session_id'").fetchone()[0], self.session_id
+            raw.execute("SELECT COUNT(*) FROM audit WHERE event = 'phantom'").fetchone()[0], 0
+        )
+        self.assertEqual(
+            raw.execute("SELECT value FROM meta WHERE key = 'session_id'").fetchone()[0],
+            self.session_id,
         )
         report = store.verify()
         self.assertTrue(report["ok"], report)
@@ -81,7 +84,9 @@ class CrashRecoveryTests(kit.StoreTestCase):
 
     def test_recovery_expires_stale_staged_txn(self) -> None:
         self._run_child("stage-crash")
-        report = recover_session(self.home, self.session_id, config=kit.StoreConfig(stale_txn_ttl_seconds=0))
+        report = recover_session(
+            self.home, self.session_id, config=kit.StoreConfig(stale_txn_ttl_seconds=0)
+        )
         self.assertIn("txn-crash", report.discarded_txns)
         self.assertIn("expired_staged_transactions", report.actions)
         store = self.open_store()
@@ -103,7 +108,9 @@ class CrashRecoveryTests(kit.StoreTestCase):
         snapshot = reopened.snapshot()
         self.assertEqual(snapshot.revision, 2)
         self.assertIs(snapshot.span(ids["u-a2"]).state, kit.SpanState.OFFLOADED)
-        self.assertEqual(reopened.retrieve(ids["u-a2"])["message"]["content"], "The file looks fine.")
+        self.assertEqual(
+            reopened.retrieve(ids["u-a2"])["message"]["content"], "The file looks fine."
+        )
         self.assertTrue(reopened.verify()["ok"])
 
     def test_stale_txn_from_previous_process_does_not_block_new_work(self) -> None:

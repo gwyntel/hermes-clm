@@ -88,7 +88,9 @@ def test_sibling_and_parent_sessions_are_unreachable(home, sid, other_home):
         C.commit(child, txn_id="c1", expected_revision=C.snap_revision(C.snapshot(child)))
         assert expect_refusal(lambda: C.retrieve(child, parent_span))
         assert_strings_absent(C.inspect_(child), ["PARENT-SECRET-c41d"], where="child inspect")
-        assert_strings_absent(C.search(child, "PARENT-SECRET"), ["PARENT-SECRET-c41d"], where="child search")
+        assert_strings_absent(
+            C.search(child, "PARENT-SECRET"), ["PARENT-SECRET-c41d"], where="child search"
+        )
         assert_strings_absent(C.status(child), ["PARENT-SECRET-c41d"], where="child status")
         # the child cannot ask for the parent by session id either
         assert expect_refusal(lambda: C.retrieve(child, "parent-sess"))

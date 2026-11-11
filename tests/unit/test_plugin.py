@@ -24,7 +24,15 @@ from hermes_clm.tools import TOOLSET
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_YAML = REPO_ROOT / "plugin.yaml"
 
-FORBIDDEN_SCHEMA_KEYS = {"provider", "model", "base_url", "api_key", "fallback", "route", "api_mode"}
+FORBIDDEN_SCHEMA_KEYS = {
+    "provider",
+    "model",
+    "base_url",
+    "api_key",
+    "fallback",
+    "route",
+    "api_mode",
+}
 
 
 class FakeEngine:
@@ -263,7 +271,6 @@ def test_plugin_module_does_not_import_hermes():
         assert name not in sys.modules or sys.modules[name] is None
 
 
-
 # --------------------------------------------------------------------------- #
 # Packaging artifacts: manifest, skill frontmatter, entry point
 # --------------------------------------------------------------------------- #
@@ -306,7 +313,9 @@ def test_docs_carry_no_upstream_markers():
 def test_repo_entrypoint_delegates_to_the_plugin_module():
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("hermes_clm_entrypoint", REPO_ROOT / "__init__.py")
+    spec = importlib.util.spec_from_file_location(
+        "hermes_clm_entrypoint", REPO_ROOT / "__init__.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -163,7 +163,9 @@ def _span_uid(span: Any, fallback: str = "") -> str:
     return uid if isinstance(uid, str) and uid else fallback
 
 
-def _conflict(code: str, *, kind: str = "", span_id: str = "", uid: str = "", detail: str = "") -> Dict[str, Any]:
+def _conflict(
+    code: str, *, kind: str = "", span_id: str = "", uid: str = "", detail: str = ""
+) -> Dict[str, Any]:
     """Build a refusal receipt."""
     receipt = {"code": code, "kind": kind}
     if span_id:
@@ -175,7 +177,9 @@ def _conflict(code: str, *, kind: str = "", span_id: str = "", uid: str = "", de
     return receipt
 
 
-def _applied(kind: str, *, span_id: str, uid: str, request_index: Optional[int] = None) -> Dict[str, Any]:
+def _applied(
+    kind: str, *, span_id: str, uid: str, request_index: Optional[int] = None
+) -> Dict[str, Any]:
     """Build an applied receipt."""
     receipt: Dict[str, Any] = {"kind": kind, "span_id": span_id, "uid": uid}
     if request_index is not None:
@@ -214,7 +218,9 @@ def project(
     if not requests or not all(isinstance(row, Mapping) for row in requests):
         return ProjectionResult(
             ok=False,
-            conflicts=(_conflict("invalid_request", detail="request rows must be non-empty mappings"),),
+            conflicts=(
+                _conflict("invalid_request", detail="request rows must be non-empty mappings"),
+            ),
         )
 
     history = list(conversation_messages or ())
@@ -239,7 +245,9 @@ def project(
     for position, row in enumerate(requests):
         if role_of(row) == "tool":
             newest_tool_index = position
-    incoming_signature = row_signature(incoming_message) if isinstance(incoming_message, Mapping) else None
+    incoming_signature = (
+        row_signature(incoming_message) if isinstance(incoming_message, Mapping) else None
+    )
     incoming_indices: List[int] = []
     if incoming_signature is not None:
         for position, row in enumerate(requests):
@@ -251,8 +259,7 @@ def project(
         uid = alignment.uid_for(position)
         span = index.get(uid) if uid else None
         span_pinned = bool(
-            span is not None
-            and (_field(span, "span_id") in pinned or uid in pinned)
+            span is not None and (_field(span, "span_id") in pinned or uid in pinned)
         )
         if is_protected_message(
             row,
@@ -292,8 +299,13 @@ def project(
             uid = _span_uid(span, span_id)
             if alignment.is_ambiguous(uid):
                 conflicts.append(
-                    _conflict("ambiguous_identity", kind=kind, span_id=span_id, uid=uid,
-                              detail="row identity is not unique in this request")
+                    _conflict(
+                        "ambiguous_identity",
+                        kind=kind,
+                        span_id=span_id,
+                        uid=uid,
+                        detail="row identity is not unique in this request",
+                    )
                 )
                 continue
             if uid not in alignment.uid_to_request:
@@ -302,27 +314,51 @@ def project(
             request_index = alignment.uid_to_request[uid]
             if request_index in protected_indices:
                 conflicts.append(
-                    _conflict("protected_row", kind=kind, span_id=span_id, uid=uid,
-                              detail="row is host-owned in this request")
+                    _conflict(
+                        "protected_row",
+                        kind=kind,
+                        span_id=span_id,
+                        uid=uid,
+                        detail="row is host-owned in this request",
+                    )
                 )
                 continue
-            if bool(_field(span, "protected", False)) or _span_role(span) in ("system", "developer", "user"):
+            if bool(_field(span, "protected", False)) or _span_role(span) in (
+                "system",
+                "developer",
+                "user",
+            ):
                 conflicts.append(
-                    _conflict("protected_span", kind=kind, span_id=span_id, uid=uid,
-                              detail="archived span is marked protected")
+                    _conflict(
+                        "protected_span",
+                        kind=kind,
+                        span_id=span_id,
+                        uid=uid,
+                        detail="archived span is marked protected",
+                    )
                 )
                 continue
             if _field(span, "span_id") in pinned or uid in pinned:
                 conflicts.append(
-                    _conflict("pinned_span", kind=kind, span_id=span_id, uid=uid,
-                              detail="pinned spans are immutable until an operator unpins")
+                    _conflict(
+                        "pinned_span",
+                        kind=kind,
+                        span_id=span_id,
+                        uid=uid,
+                        detail="pinned spans are immutable until an operator unpins",
+                    )
                 )
                 continue
             archived_content = _span_content(span)
             if not is_editable_content(archived_content):
                 conflicts.append(
-                    _conflict("non_text_content", kind=kind, span_id=span_id, uid=uid,
-                              detail="multimodal or unknown content parts are never flattened")
+                    _conflict(
+                        "non_text_content",
+                        kind=kind,
+                        span_id=span_id,
+                        uid=uid,
+                        detail="multimodal or unknown content parts are never flattened",
+                    )
                 )
                 continue
             if kind == "rewrite":
@@ -331,19 +367,33 @@ def project(
                         _conflict("replacement_not_text", kind=kind, span_id=span_id, uid=uid)
                     )
                     continue
-                if max_rewrite_bytes is not None and _byte_length(replacement) > int(max_rewrite_bytes):
+                if max_rewrite_bytes is not None and _byte_length(replacement) > int(
+                    max_rewrite_bytes
+                ):
                     conflicts.append(
-                        _conflict("replacement_too_large", kind=kind, span_id=span_id, uid=uid,
-                                  detail=f"limit={int(max_rewrite_bytes)} bytes")
+                        _conflict(
+                            "replacement_too_large",
+                            kind=kind,
+                            span_id=span_id,
+                            uid=uid,
+                            detail=f"limit={int(max_rewrite_bytes)} bytes",
+                        )
                     )
                     continue
                 states[uid] = _SpanState(kind=kind, span_id=span_id, uid=uid, content=replacement)
             elif kind == "restore":
                 restored = archived_content if isinstance(archived_content, str) else ""
-                if max_rewrite_bytes is not None and _byte_length(restored) > int(max_rewrite_bytes):
+                if max_rewrite_bytes is not None and _byte_length(restored) > int(
+                    max_rewrite_bytes
+                ):
                     conflicts.append(
-                        _conflict("restore_too_large", kind=kind, span_id=span_id, uid=uid,
-                                  detail=f"limit={int(max_rewrite_bytes)} bytes")
+                        _conflict(
+                            "restore_too_large",
+                            kind=kind,
+                            span_id=span_id,
+                            uid=uid,
+                            detail=f"limit={int(max_rewrite_bytes)} bytes",
+                        )
                     )
                     continue
                 states[uid] = _SpanState(kind=kind, span_id=span_id, uid=uid, content=restored)
@@ -373,9 +423,7 @@ def project(
             # A member the request no longer shows cannot be dropped, which is
             # exactly the partial-coverage case: refuse rather than orphan a call.
             if not group_covered(members, dropped):
-                conflicts.append(
-                    _conflict("partial_tool_group", kind="drop", detail=group_id)
-                )
+                conflicts.append(_conflict("partial_tool_group", kind="drop", detail=group_id))
 
     if conflicts:
         result.ok = False

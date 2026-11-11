@@ -29,14 +29,18 @@ EMPTY = inspect.Parameter.empty
 class SignatureTests(unittest.TestCase):
     def test_for_session(self) -> None:
         found = params(store.ContextStore.for_session)
-        self.assertEqual([name for name, _, _ in found][:3], ["hermes_home", "session_id", "read_only"])
+        self.assertEqual(
+            [name for name, _, _ in found][:3], ["hermes_home", "session_id", "read_only"]
+        )
         self.assertEqual(found[2][1], "KEYWORD_ONLY")
         self.assertIs(found[2][2], False)
         # additive config keyword is documented; nothing else may appear
         self.assertEqual([name for name, _, _ in found][3:], ["config"])
 
     def test_ingest(self) -> None:
-        self.assertEqual(params(store.ContextStore.ingest), [("messages", "POSITIONAL_OR_KEYWORD", EMPTY)])
+        self.assertEqual(
+            params(store.ContextStore.ingest), [("messages", "POSITIONAL_OR_KEYWORD", EMPTY)]
+        )
 
     def test_snapshot_and_status(self) -> None:
         self.assertEqual(params(store.ContextStore.snapshot), [])
@@ -77,9 +81,15 @@ class SignatureTests(unittest.TestCase):
         )
         self.assertEqual(
             [(name, kind) for name, kind, _ in params(store.ContextStore.search)],
-            [("query", "POSITIONAL_OR_KEYWORD"), ("cursor", "KEYWORD_ONLY"), ("limit", "KEYWORD_ONLY")],
+            [
+                ("query", "POSITIONAL_OR_KEYWORD"),
+                ("cursor", "KEYWORD_ONLY"),
+                ("limit", "KEYWORD_ONLY"),
+            ],
         )
-        self.assertEqual(params(store.ContextStore.retrieve), [("span_id", "POSITIONAL_OR_KEYWORD", EMPTY)])
+        self.assertEqual(
+            params(store.ContextStore.retrieve), [("span_id", "POSITIONAL_OR_KEYWORD", EMPTY)]
+        )
         self.assertEqual(params(store.ContextStore.close), [])
 
     def test_proposal_surface(self) -> None:
@@ -151,7 +161,9 @@ class ClosedHandleTests(kit.StoreTestCase):
             lambda: store.retrieve("sp_x"),
             lambda: store.commit(txn_id="t", expected_revision=1),
             lambda: store.discard(txn_id="t"),
-            lambda: store.revert(target_revision=1, expected_revision=1, txn_id="t", actor_origin="agent"),
+            lambda: store.revert(
+                target_revision=1, expected_revision=1, txn_id="t", actor_origin="agent"
+            ),
             store.verify,
         ):
             with self.assertRaises(StoreClosedError):
@@ -188,11 +200,15 @@ class EdgeCaseTests(kit.StoreTestCase):
 
     def test_revert_txn_id_reuse_with_different_target_refused(self) -> None:
         self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
-        self.store.revert(target_revision=1, expected_revision=2, txn_id="txn-r", actor_origin="agent")
+        self.store.revert(
+            target_revision=1, expected_revision=2, txn_id="txn-r", actor_origin="agent"
+        )
         from hermes_clm.errors import IdempotencyConflictError
 
         with self.assertRaises(IdempotencyConflictError):
-            self.store.revert(target_revision=2, expected_revision=3, txn_id="txn-r", actor_origin="agent")
+            self.store.revert(
+                target_revision=2, expected_revision=3, txn_id="txn-r", actor_origin="agent"
+            )
 
     def test_ingest_tolerates_odd_uid_types(self) -> None:
         result = self.store.ingest([{"message_uid": 42, "role": "assistant", "content": "x"}])

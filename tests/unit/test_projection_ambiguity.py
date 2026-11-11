@@ -41,7 +41,10 @@ def test_an_op_on_the_other_ambiguous_candidate_also_aborts():
 
 
 def test_unrelated_edits_still_project_when_a_different_row_is_ambiguous():
-    history = _ambiguous_history() + [message("user", "third", "u2"), message("assistant", "fourth", "a3")]
+    history = _ambiguous_history() + [
+        message("user", "third", "u2"),
+        message("assistant", "fourth", "a3"),
+    ]
     # One duplicate row is missing (a1/a2 ambiguous), but the target is elsewhere.
     request = assemble([history[0], history[1], history[3], history[4], history[5]])
     snapshot = snapshot_for(history, [FakeOperation(kind="drop", span_ids=("a3",))])
@@ -49,7 +52,13 @@ def test_unrelated_edits_still_project_when_a_different_row_is_ambiguous():
     result = project(request, conversation_messages=history, snapshot=snapshot)
 
     assert result.ok
-    assert [row["content"] for row in result.messages] == ["SYSTEM PROMPT", "start", "ok", "next", "third"]
+    assert [row["content"] for row in result.messages] == [
+        "SYSTEM PROMPT",
+        "start",
+        "ok",
+        "next",
+        "third",
+    ]
 
 
 def test_alignment_diagnostics_expose_the_ambiguous_uids():

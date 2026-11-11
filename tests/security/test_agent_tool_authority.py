@@ -74,8 +74,10 @@ def test_closed_operation_kinds_are_pin_inclusive_and_unpin_free():
     kinds = None
     for name in dir(models):
         obj = getattr(models, name)
-        if isinstance(obj, (frozenset, set, tuple, list)) and obj and all(
-            isinstance(item, str) for item in obj
+        if (
+            isinstance(obj, (frozenset, set, tuple, list))
+            and obj
+            and all(isinstance(item, str) for item in obj)
         ):
             lowered = {item.lower() for item in obj}
             if "drop" in lowered and "pin" in lowered:
@@ -108,8 +110,6 @@ def test_exposed_json_schemas_forbid_additional_properties():
             "unknown-field rejection is then only exercised through the store (T47)"
         )
     permissive = [
-        name
-        for name, schema in schemas
-        if schema.get("additionalProperties") is not False
+        name for name, schema in schemas if schema.get("additionalProperties") is not False
     ]
     assert not permissive, f"permissive tool schemas accept unknown fields: {permissive}"

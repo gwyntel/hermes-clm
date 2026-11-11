@@ -31,9 +31,17 @@ def project(snapshot, request_messages, conversation_messages=None, incoming_mes
         ids = by_content.get(_content(message), set())
         if ids and ids <= dropped:
             continue
-        if D.active("M7") and isinstance(message.get("content"), str) and "role=system" in message["content"]:
+        if (
+            D.active("M7")
+            and isinstance(message.get("content"), str)
+            and "role=system" in message["content"]
+        ):
             message["role"] = "system"
-        if D.active("M10") and isinstance(message.get("content"), str) and '"tool_calls"' in message["content"]:
+        if (
+            D.active("M10")
+            and isinstance(message.get("content"), str)
+            and '"tool_calls"' in message["content"]
+        ):
             try:
                 parsed = json.loads(message["content"])
             except json.JSONDecodeError:

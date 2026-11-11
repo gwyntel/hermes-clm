@@ -250,9 +250,7 @@ class Alignment:
         }
 
 
-def align(
-    request_messages: Sequence[Any], history_messages: Sequence[Any]
-) -> Alignment:
+def align(request_messages: Sequence[Any], history_messages: Sequence[Any]) -> Alignment:
     """Align request rows to history rows as an ordered, unique subsequence.
 
     The request is the assembled provider request (system prompt, prefill,

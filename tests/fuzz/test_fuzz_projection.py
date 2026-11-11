@@ -38,7 +38,12 @@ def _random_conversation(rng: random.Random) -> list[dict]:
         role = rng.choice(ROLES)
         if role == "tool":
             conversation.append(
-                msg("tool", f"result {rng.random()}", tool_call_id=f"call_{rng.randint(0, 3)}", name="bash")
+                msg(
+                    "tool",
+                    f"result {rng.random()}",
+                    tool_call_id=f"call_{rng.randint(0, 3)}",
+                    name="bash",
+                )
             )
         elif role == "assistant" and rng.random() < 0.3:
             conversation.append(

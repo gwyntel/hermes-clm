@@ -22,7 +22,9 @@ class InspectTests(kit.StoreTestCase):
         self.assertIsNotNone(first["next_cursor"])
         second = self.store.inspect(limit=2, cursor=first["next_cursor"])
         self.assertEqual(len(second["items"]), 2)
-        ids = {item["span_id"] for item in first["items"]} | {item["span_id"] for item in second["items"]}
+        ids = {item["span_id"] for item in first["items"]} | {
+            item["span_id"] for item in second["items"]
+        }
         self.assertEqual(len(ids), 4)
 
     def test_inspect_limit_is_clamped(self) -> None:
@@ -113,12 +115,16 @@ class RetrieveTests(kit.StoreTestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["message"]["content"], "content of a.py")
         self.assertEqual(payload["role"], "tool")
-        self.assertEqual(payload["content_sha256"], self.store.snapshot().span(self.ids["u-t1"]).content_sha256)
+        self.assertEqual(
+            payload["content_sha256"], self.store.snapshot().span(self.ids["u-t1"]).content_sha256
+        )
         self.assertEqual(payload["session_id"], self.session_id)
 
     def test_retrieve_rejects_foreign_and_unknown_ids(self) -> None:
         other = self.open_store("other-session")
-        other_ids = self.ingest(other, [{"message_uid": "u-x", "role": "assistant", "content": "x"}])
+        other_ids = self.ingest(
+            other, [{"message_uid": "u-x", "role": "assistant", "content": "x"}]
+        )
         with self.assertRaises(NotFoundError):
             self.store.retrieve(other_ids["u-x"])
         with self.assertRaises(NotFoundError):
@@ -127,9 +133,7 @@ class RetrieveTests(kit.StoreTestCase):
             self.store.retrieve("")
 
     def test_retrieve_enforces_byte_budget(self) -> None:
-        big = self.open_store(
-            "budget-session", config=StoreConfig(max_retrieve_bytes=64)
-        )
+        big = self.open_store("budget-session", config=StoreConfig(max_retrieve_bytes=64))
         big.ingest([{"message_uid": "u-big", "role": "assistant", "content": "y" * 500}])
         span_id = next(iter(big.snapshot().spans))
         payload = big.retrieve(span_id)
@@ -159,7 +163,9 @@ class RetrieveTests(kit.StoreTestCase):
             "UPDATE spans SET message_json = ? WHERE span_id = ?",
             (kit.canonical_json({"role": "assistant", "content": "tampered"}), ids["u-a2"]),
         )
-        reopened = self.open_store("verify-session", config=StoreConfig(snapshot_verify_hashes=True))
+        reopened = self.open_store(
+            "verify-session", config=StoreConfig(snapshot_verify_hashes=True)
+        )
         with self.assertRaises(CorruptStoreError):
             reopened.snapshot()
 

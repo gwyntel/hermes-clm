@@ -216,13 +216,21 @@ def _assert_plain(path: Path, *, kind: str) -> None:
     try:
         st = os.lstat(path)
     except FileNotFoundError:
-        raise NotFoundError(f"{kind} does not exist", code="not_found", details={"path": path.name}) from None
+        raise NotFoundError(
+            f"{kind} does not exist", code="not_found", details={"path": path.name}
+        ) from None
     if stat.S_ISLNK(st.st_mode):
-        raise PathSafetyError(f"{kind} is a symlink", code="symlink_refused", details={"path": path.name})
+        raise PathSafetyError(
+            f"{kind} is a symlink", code="symlink_refused", details={"path": path.name}
+        )
     if kind == "directory" and not stat.S_ISDIR(st.st_mode):
-        raise PathSafetyError(f"{kind} is not a directory", code="not_a_directory", details={"path": path.name})
+        raise PathSafetyError(
+            f"{kind} is not a directory", code="not_a_directory", details={"path": path.name}
+        )
     if kind == "file" and not stat.S_ISREG(st.st_mode):
-        raise PathSafetyError(f"{kind} is not a regular file", code="not_a_file", details={"path": path.name})
+        raise PathSafetyError(
+            f"{kind} is not a regular file", code="not_a_file", details={"path": path.name}
+        )
 
 
 def _ensure_private_dir(path: Path, *, root: Path) -> None:
@@ -250,7 +258,9 @@ def _harden_file(path: Path) -> None:
     except FileNotFoundError:
         return
     if stat.S_ISLNK(st.st_mode):
-        raise PathSafetyError("store file is a symlink", code="symlink_refused", details={"path": path.name})
+        raise PathSafetyError(
+            "store file is a symlink", code="symlink_refused", details={"path": path.name}
+        )
     if stat.S_IMODE(st.st_mode) != 0o600:
         os.chmod(path, 0o600)
 
@@ -320,7 +330,9 @@ class _Planned:
         )
 
 
-_STATE_CHANGING_KINDS = frozenset({EditKind.KEEP, EditKind.DROP, EditKind.OFFLOAD, EditKind.RESTORE})
+_STATE_CHANGING_KINDS = frozenset(
+    {EditKind.KEEP, EditKind.DROP, EditKind.OFFLOAD, EditKind.RESTORE}
+)
 _REFUSE_PROTECTED_KINDS = frozenset({EditKind.DROP, EditKind.OFFLOAD, EditKind.REWRITE})
 
 
@@ -470,7 +482,9 @@ class ContextStore:
         self._generation = 0
         self._snapshot_cache: StoreSnapshot | None = None
         self._snapshot_generation = -1
-        self._redactor = Redactor(enabled=config.archive_redact, extra_rules=config.extra_redactions)
+        self._redactor = Redactor(
+            enabled=config.archive_redact, extra_rules=config.extra_redactions
+        )
         self.index_state = "unknown"
         self.index_error: str | None = None
 
@@ -501,7 +515,9 @@ class ContextStore:
         else:
             if not directory.exists():
                 raise NotFoundError(
-                    "no store for this session", code="store_not_found", details={"session": session_key(sid)}
+                    "no store for this session",
+                    code="store_not_found",
+                    details={"session": session_key(sid)},
                 )
             _assert_plain(directory, kind="directory")
         _assert_contained(root, directory)
@@ -573,7 +589,9 @@ class ContextStore:
             fresh = version == 0 or not tables
             if fresh:
                 if "meta" in tables:
-                    session_row = cur.execute("SELECT value FROM meta WHERE key = 'session_id'").fetchone()
+                    session_row = cur.execute(
+                        "SELECT value FROM meta WHERE key = 'session_id'"
+                    ).fetchone()
                     if session_row is not None and session_row[0] != self._session_id:
                         raise CorruptStoreError(
                             "store belongs to a different session",
@@ -785,13 +803,17 @@ class ContextStore:
                     current = live
                     continue
                 return current
-            alias = cur.execute("SELECT span_id FROM span_aliases WHERE alias = ?", (current,)).fetchone()
+            alias = cur.execute(
+                "SELECT span_id FROM span_aliases WHERE alias = ?", (current,)
+            ).fetchone()
             if alias is None:
                 return None
             current = str(alias[0])
         return None
 
-    def _load_span(self, cur: sqlite3.Cursor, span_id: str, *, pins: set[str] | None = None) -> ArchivedSpan | None:
+    def _load_span(
+        self, cur: sqlite3.Cursor, span_id: str, *, pins: set[str] | None = None
+    ) -> ArchivedSpan | None:
         resolved = self._resolve_span_id(cur, span_id)
         if resolved is None:
             return None
@@ -808,7 +830,9 @@ class ContextStore:
             pins = self._pin_ids(cur)
         return self._span_from_row(row, pinned=resolved in pins, current=True)
 
-    def _span_from_row(self, row: Mapping[str, Any], *, pinned: bool, current: bool) -> ArchivedSpan:
+    def _span_from_row(
+        self, row: Mapping[str, Any], *, pinned: bool, current: bool
+    ) -> ArchivedSpan:
         message = json.loads(row["message_json"])
         state = SpanState(row["state"] or SpanState.ACTIVE.value)
         rewrite = row["rewrite_text"]
@@ -860,7 +884,9 @@ class ContextStore:
                 out[str(row["alias"])] = resolved
         return out
 
-    def _load_current_spans(self, cur: sqlite3.Cursor, *, verify_hashes: bool | None = None) -> dict[str, ArchivedSpan]:
+    def _load_current_spans(
+        self, cur: sqlite3.Cursor, *, verify_hashes: bool | None = None
+    ) -> dict[str, ArchivedSpan]:
         pins = self._pin_ids(cur)
         verify = self._config.snapshot_verify_hashes if verify_hashes is None else verify_hashes
         spans: dict[str, ArchivedSpan] = {}
@@ -883,7 +909,11 @@ class ContextStore:
             raise CorruptStoreError(
                 "archived payload hash mismatch",
                 code="payload_hash_mismatch",
-                details={"span_id": row["span_id"], "expected": row["content_sha256"], "computed": computed},
+                details={
+                    "span_id": row["span_id"],
+                    "expected": row["content_sha256"],
+                    "computed": computed,
+                },
             )
 
     # -- revision chain ---------------------------------------------------
@@ -895,7 +925,9 @@ class ContextStore:
         current = revision
         while current and current not in seen:
             seen.add(current)
-            row = cur.execute("SELECT base_revision FROM revisions WHERE revision = ?", (current,)).fetchone()
+            row = cur.execute(
+                "SELECT base_revision FROM revisions WHERE revision = ?", (current,)
+            ).fetchone()
             if row is None:
                 break
             chain.append(current)
@@ -937,7 +969,9 @@ class ContextStore:
             prev_hash = str(parent[0])
         ops = [
             _op_payload_from_row(row)
-            for row in cur.execute("SELECT * FROM operations WHERE revision = ? ORDER BY ord", (revision,))
+            for row in cur.execute(
+                "SELECT * FROM operations WHERE revision = ? ORDER BY ord", (revision,)
+            )
         ]
         computed = revision_hash(
             prev_hash=prev_hash,
@@ -953,7 +987,11 @@ class ContextStore:
             raise CorruptStoreError(
                 "revision hash mismatch",
                 code="revision_hash_mismatch",
-                details={"revision": revision, "expected": rev_row["head_hash"], "computed": computed},
+                details={
+                    "revision": revision,
+                    "expected": rev_row["head_hash"],
+                    "computed": computed,
+                },
             )
 
     # -- snapshot ---------------------------------------------------------
@@ -988,9 +1026,7 @@ class ContextStore:
                     "pinned": len(pins),
                     "spans": len(spans),
                 }
-                est = sum(
-                    s.est_tokens for s in spans.values() if s.state is SpanState.ACTIVE
-                )
+                est = sum(s.est_tokens for s in spans.values() if s.state is SpanState.ACTIVE)
                 snap = StoreSnapshot(
                     session_id=self._session_id,
                     db_id=self._db_id,
@@ -1053,7 +1089,9 @@ class ContextStore:
             seen: list[str] = []
             group_map: dict[str, str] = {}
             now = self._now()
-            chain_row = cur.execute("SELECT entry_hash FROM archive ORDER BY archive_id DESC LIMIT 1").fetchone()
+            chain_row = cur.execute(
+                "SELECT entry_hash FROM archive ORDER BY archive_id DESC LIMIT 1"
+            ).fetchone()
             prev_hash = GENESIS_HASH if chain_row is None else str(chain_row[0])
 
             for uid, outcome, raw in prepared:
@@ -1180,7 +1218,9 @@ class ContextStore:
             if self._config.assume_full_history and seen:
                 cur.execute("CREATE TEMP TABLE IF NOT EXISTS _clm_seen (uid TEXT PRIMARY KEY)")
                 cur.execute("DELETE FROM _clm_seen")
-                cur.executemany("INSERT OR IGNORE INTO _clm_seen (uid) VALUES (?)", [(u,) for u in seen])
+                cur.executemany(
+                    "INSERT OR IGNORE INTO _clm_seen (uid) VALUES (?)", [(u,) for u in seen]
+                )
                 cur.execute(
                     "UPDATE current_spans SET present = 0 "
                     "WHERE present = 1 AND uid NOT IN (SELECT uid FROM _clm_seen)"
@@ -1270,7 +1310,11 @@ class ContextStore:
                         raise ProtectedSpanError(
                             "span is protected (system/user/prefill/multimodal/unknown role)",
                             code="protected_span",
-                            details={"span_id": span.span_id, "kind": op.kind.value, "origin": span.origin.value},
+                            details={
+                                "span_id": span.span_id,
+                                "kind": op.kind.value,
+                                "origin": span.origin.value,
+                            },
                         )
                     if span.pinned:
                         raise ConflictError(
@@ -1319,7 +1363,9 @@ class ContextStore:
             return "applied", ""
         return "inert", "not_active"
 
-    def _check_groups(self, cur: sqlite3.Cursor, planned: Sequence[_Planned], *, pins: set[str]) -> None:
+    def _check_groups(
+        self, cur: sqlite3.Cursor, planned: Sequence[_Planned], *, pins: set[str]
+    ) -> None:
         """Refuse operations that would split an atomic tool group."""
 
         targeted: dict[str, EditKind] = {}
@@ -1376,7 +1422,11 @@ class ContextStore:
         expected = self._validate_revision(expected_revision)
         with self._write() as cur:
             result = self._stage_locked(
-                cur, ops, expected_revision=expected, txn_id=txn_id, actor_origin=ActorOrigin(actor_origin)
+                cur,
+                ops,
+                expected_revision=expected,
+                txn_id=txn_id,
+                actor_origin=ActorOrigin(actor_origin),
             )
         return result
 
@@ -1417,7 +1467,9 @@ class ContextStore:
                     details={"txn_id": txn_id},
                 )
             planned = self._plan(cur, ops)
-            return self._stage_result(planned, txn_id=txn_id, staged_sha=staged_sha, ops=ops, replayed=True)
+            return self._stage_result(
+                planned, txn_id=txn_id, staged_sha=staged_sha, ops=ops, replayed=True
+            )
         if expected_revision != head:
             raise StaleRevisionError(
                 "expected_revision does not match the current head",
@@ -1429,7 +1481,15 @@ class ContextStore:
         cur.execute(
             "INSERT INTO txns (txn_id, state, base_revision, staged_sha256, operations_json, actor_origin, "
             "created_at, updated_at, committed_revision, result_json) VALUES (?, 'staged', ?, ?, ?, ?, ?, ?, NULL, NULL)",
-            (txn_id, head, staged_sha, canonical_json([op.to_payload() for op in ops]), actor_origin.value, now, now),
+            (
+                txn_id,
+                head,
+                staged_sha,
+                canonical_json([op.to_payload() for op in ops]),
+                actor_origin.value,
+                now,
+                now,
+            ),
         )
         cur.execute(
             "INSERT INTO audit (revision, event, actor_origin, detail_json, created_at) "
@@ -1448,7 +1508,9 @@ class ContextStore:
                 now,
             ),
         )
-        return self._stage_result(planned, txn_id=txn_id, staged_sha=staged_sha, ops=ops, replayed=False)
+        return self._stage_result(
+            planned, txn_id=txn_id, staged_sha=staged_sha, ops=ops, replayed=False
+        )
 
     def _stage_result(
         self,
@@ -1474,7 +1536,9 @@ class ContextStore:
 
     @staticmethod
     def _receipts(planned: Sequence[_Planned], effect: str) -> tuple[Receipt, ...]:
-        return tuple(item.receipt for item in planned if item.effect == effect and item.span is not None)
+        return tuple(
+            item.receipt for item in planned if item.effect == effect and item.span is not None
+        )
 
     def commit(self, *, txn_id: str, expected_revision: int) -> CommitResult:
         """Apply a staged transaction atomically; replay is idempotent."""
@@ -1486,7 +1550,9 @@ class ContextStore:
             txn = self._txn_row(cur, txn_id)
             if txn is None:
                 raise NotFoundError(
-                    "unknown transaction; stage it first", code="unknown_txn", details={"txn_id": txn_id}
+                    "unknown transaction; stage it first",
+                    code="unknown_txn",
+                    details={"txn_id": txn_id},
                 )
             state = str(txn["state"])
             if state == "committed":
@@ -1611,7 +1677,12 @@ class ContextStore:
             cur.execute(
                 "INSERT INTO audit (revision, event, actor_origin, detail_json, created_at) "
                 "VALUES (?, 'discard', ?, ?, ?)",
-                (self._head(cur), str(txn["actor_origin"]), canonical_json({"txn_id": txn_id}), now),
+                (
+                    self._head(cur),
+                    str(txn["actor_origin"]),
+                    canonical_json({"txn_id": txn_id}),
+                    now,
+                ),
             )
         self._write_index()
 
@@ -1715,10 +1786,13 @@ class ContextStore:
                     txn_id,
                 ),
             )
-        active_ids = [str(r[0]) for r in cur.execute(
-            "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
-            "WHERE st.state = 'active' ORDER BY s.seq"
-        )]
+        active_ids = [
+            str(r[0])
+            for r in cur.execute(
+                "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
+                "WHERE st.state = 'active' ORDER BY s.seq"
+            )
+        ]
         cur.execute(
             "INSERT INTO snapshots (revision, head_hash, active_span_count, dropped_span_count, "
             "offloaded_span_count, pinned_span_count, est_tokens, active_set_sha256, created_at) "
@@ -1787,7 +1861,13 @@ class ContextStore:
         cur.execute(
             "UPDATE span_state SET state = ?, rewrite_text = ?, rewrite_sha256 = ?, updated_revision = ? "
             "WHERE span_id = ?",
-            (state.value, rewrite_text, rewrite_sha256 if rewrite_text is not None else None, revision, span_id),
+            (
+                state.value,
+                rewrite_text,
+                rewrite_sha256 if rewrite_text is not None else None,
+                revision,
+                span_id,
+            ),
         )
 
     def _est_active_tokens(self, cur: sqlite3.Cursor) -> int:
@@ -1840,7 +1920,10 @@ class ContextStore:
                 delta = _tokens_for_text(item.op.replacement) - item.span.est_tokens
             elif item.op.kind in (EditKind.DROP, EditKind.OFFLOAD):
                 delta = -item.span.est_tokens
-            elif item.op.kind in (EditKind.KEEP, EditKind.RESTORE) and item.span.state is not SpanState.ACTIVE:
+            elif (
+                item.op.kind in (EditKind.KEEP, EditKind.RESTORE)
+                and item.span.state is not SpanState.ACTIVE
+            ):
                 delta = item.span.est_tokens
             cur.execute(
                 "INSERT INTO tokens (revision, span_id, before_est, after_est, delta, estimator, detail_json) "
@@ -1876,7 +1959,10 @@ class ContextStore:
         with self._write() as cur:
             existing = self._txn_row(cur, txn_id)
             if existing is not None:
-                if str(existing["state"]) == "committed" and str(existing["staged_sha256"]) == request_sha:
+                if (
+                    str(existing["state"]) == "committed"
+                    and str(existing["staged_sha256"]) == request_sha
+                ):
                     return self._replay_commit(existing)
                 raise IdempotencyConflictError(
                     "txn_id already used by a different transaction",
@@ -1929,9 +2015,15 @@ class ContextStore:
                     )
                     continue
                 if state is SpanState.DROPPED:
-                    synthetic.append(EditOperation(kind=EditKind.DROP, span_ids=(span_id,), actor_origin=actor))
+                    synthetic.append(
+                        EditOperation(kind=EditKind.DROP, span_ids=(span_id,), actor_origin=actor)
+                    )
                 elif state is SpanState.OFFLOADED:
-                    synthetic.append(EditOperation(kind=EditKind.OFFLOAD, span_ids=(span_id,), actor_origin=actor))
+                    synthetic.append(
+                        EditOperation(
+                            kind=EditKind.OFFLOAD, span_ids=(span_id,), actor_origin=actor
+                        )
+                    )
                 elif rewrite is not None:
                     synthetic.append(
                         EditOperation(
@@ -1943,7 +2035,11 @@ class ContextStore:
                         )
                     )
                 else:
-                    synthetic.append(EditOperation(kind=EditKind.RESTORE, span_ids=(span_id,), actor_origin=actor))
+                    synthetic.append(
+                        EditOperation(
+                            kind=EditKind.RESTORE, span_ids=(span_id,), actor_origin=actor
+                        )
+                    )
                 applied.append(Receipt(span_id=span_id, kind="revert", effect="applied"))
                 self._set_state(cur, span_id, state, rewrite, revision)
 
@@ -1996,10 +2092,13 @@ class ContextStore:
                         txn_id,
                     ),
                 )
-            active_ids = [str(r[0]) for r in cur.execute(
-                "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
-                "WHERE st.state = 'active' ORDER BY s.seq"
-            )]
+            active_ids = [
+                str(r[0])
+                for r in cur.execute(
+                    "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
+                    "WHERE st.state = 'active' ORDER BY s.seq"
+                )
+            ]
             cur.execute(
                 "INSERT INTO snapshots (revision, head_hash, active_span_count, dropped_span_count, "
                 "offloaded_span_count, pinned_span_count, est_tokens, active_set_sha256, created_at) "
@@ -2078,7 +2177,9 @@ class ContextStore:
         self._write_index()
         return result
 
-    def _replay_states(self, cur: sqlite3.Cursor, target_revision: int) -> dict[str, tuple[SpanState, str | None]]:
+    def _replay_states(
+        self, cur: sqlite3.Cursor, target_revision: int
+    ) -> dict[str, tuple[SpanState, str | None]]:
         """Replay operations up to ``target_revision`` to derive span states.
 
         Revert revisions themselves are skipped: their recorded operations are
@@ -2094,7 +2195,9 @@ class ContextStore:
         }
         chain = sorted(self._chain(cur, target_revision))
         for revision in chain:
-            kind_row = cur.execute("SELECT kind FROM revisions WHERE revision = ?", (revision,)).fetchone()
+            kind_row = cur.execute(
+                "SELECT kind FROM revisions WHERE revision = ?", (revision,)
+            ).fetchone()
             if kind_row is None or str(kind_row[0]) == "revert":
                 continue
             for op in self._operations_for_revision(cur, revision):
@@ -2159,8 +2262,12 @@ class ContextStore:
                 )
             resolved = self._resolve_span_id(cur, span_id)
             if resolved is None:
-                raise NotFoundError("unknown span", code="unknown_span", details={"span_id": span_id})
-            pinned = cur.execute("SELECT span_id FROM pins WHERE span_id = ?", (resolved,)).fetchone()
+                raise NotFoundError(
+                    "unknown span", code="unknown_span", details={"span_id": span_id}
+                )
+            pinned = cur.execute(
+                "SELECT span_id FROM pins WHERE span_id = ?", (resolved,)
+            ).fetchone()
             now = self._now()
             revision = head + 1
             head_row = self._head_row(cur)
@@ -2186,7 +2293,17 @@ class ContextStore:
                 "INSERT INTO revisions (revision, parent_revision, base_revision, kind, head_hash, txn_id, "
                 "actor_origin, op_count, applied, inert, est_tokens_before, est_tokens_after, created_at) "
                 "VALUES (?, ?, ?, 'operator', ?, ?, ?, 0, ?, ?, 0, 0, ?)",
-                (revision, head, head, head_hash, txn_id, actor.value, 1 if removed else 0, 0 if removed else 1, now),
+                (
+                    revision,
+                    head,
+                    head,
+                    head_hash,
+                    txn_id,
+                    actor.value,
+                    1 if removed else 0,
+                    0 if removed else 1,
+                    now,
+                ),
             )
             counts = self._state_counts(cur)
             cur.execute(
@@ -2208,8 +2325,14 @@ class ContextStore:
             result = CommitResult(
                 ok=True,
                 revision=revision,
-                applied=(Receipt(span_id=resolved, kind="unpin", effect="applied"),) if removed else (),
-                inert=() if removed else (Receipt(span_id=resolved, kind="unpin", effect="inert", reason="not_pinned"),),
+                applied=(Receipt(span_id=resolved, kind="unpin", effect="applied"),)
+                if removed
+                else (),
+                inert=()
+                if removed
+                else (
+                    Receipt(span_id=resolved, kind="unpin", effect="inert", reason="not_pinned"),
+                ),
                 errors=(),
                 txn_id=txn_id,
                 head_hash=head_hash,
@@ -2294,7 +2417,9 @@ class ContextStore:
             payload = [op.to_payload() for op in ops]
             digest = canonical_sha256({"base": base, "origin": "aux", "operations": payload})
             proposal_id = "prop_" + digest[:24]
-            row = cur.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+            row = cur.execute(
+                "SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
             if row is None:
                 cur.execute(
                     "INSERT INTO proposals (proposal_id, proposal_sha256, base_revision, operations_json, "
@@ -2306,7 +2431,9 @@ class ContextStore:
                     "VALUES (?, 'proposal_created', 'aux', ?, ?)",
                     (
                         head,
-                        canonical_json({"proposal_id": proposal_id, "base_revision": base, "spans": len(ops)}),
+                        canonical_json(
+                            {"proposal_id": proposal_id, "base_revision": base, "spans": len(ops)}
+                        ),
                         self._now(),
                     ),
                 )
@@ -2334,13 +2461,19 @@ class ContextStore:
         if not isinstance(proposal_id, str) or not proposal_id:
             raise ValidationError("proposal_id is required", code="invalid_proposal_id")
         if not isinstance(proposal_sha256, str) or len(proposal_sha256) != 64:
-            raise ValidationError("proposal_sha256 must be a 64-char digest", code="invalid_proposal_hash")
+            raise ValidationError(
+                "proposal_sha256 must be a 64-char digest", code="invalid_proposal_hash"
+            )
         base = self._validate_revision(base_revision)
         with self._write() as cur:
-            row = cur.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+            row = cur.execute(
+                "SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
             if row is None:
                 raise NotFoundError(
-                    "unknown proposal", code="unknown_proposal", details={"proposal_id": proposal_id}
+                    "unknown proposal",
+                    code="unknown_proposal",
+                    details={"proposal_id": proposal_id},
                 )
             if str(row["proposal_sha256"]) != proposal_sha256:
                 raise StaleProposalError(
@@ -2367,7 +2500,11 @@ class ContextStore:
                 source = EditOperation.from_mapping(raw)
                 provenance = dict(source.provenance)
                 provenance.update(
-                    {"origin": "aux", "proposal_id": proposal_id, "proposal_sha256": proposal_sha256}
+                    {
+                        "origin": "aux",
+                        "proposal_id": proposal_id,
+                        "proposal_sha256": proposal_sha256,
+                    }
                 )
                 accepted.append(
                     EditOperation(
@@ -2440,10 +2577,22 @@ class ContextStore:
                 "archive_entries": archive_count,
                 "operations_committed": operations,
                 "staged_transactions": [
-                    {"txn_id": str(r["txn_id"]), "base_revision": int(r["base_revision"]), "created_at": str(r["created_at"])}
+                    {
+                        "txn_id": str(r["txn_id"]),
+                        "base_revision": int(r["base_revision"]),
+                        "created_at": str(r["created_at"]),
+                    }
                     for r in staged
                 ],
-                "last_audit": ({"event": str(last_audit["event"]), "revision": int(last_audit["revision"]), "created_at": str(last_audit["created_at"])} if last_audit else None),
+                "last_audit": (
+                    {
+                        "event": str(last_audit["event"]),
+                        "revision": int(last_audit["revision"]),
+                        "created_at": str(last_audit["created_at"]),
+                    }
+                    if last_audit
+                    else None
+                ),
                 "health": health,
                 "index": index,
                 "read_only": self._read_only,
@@ -2494,7 +2643,9 @@ class ContextStore:
                     "seq": int(row["seq"]),
                     "version": int(row["version"]),
                     "est_tokens": _tokens_for_text(text),
-                    "preview": _preview(text if row["rewrite_text"] else _message_text(row["message_json"])),
+                    "preview": _preview(
+                        text if row["rewrite_text"] else _message_text(row["message_json"])
+                    ),
                 }
             )
         next_cursor = _encode_cursor(items[-1]["seq"]) if len(rows) > n else None
@@ -2536,7 +2687,11 @@ class ContextStore:
             cur.close()
         items = []
         for row in rows[:n]:
-            haystack = row["rewrite_text"] or _message_text(row["message_json"]) or str(row["message_json"])
+            haystack = (
+                row["rewrite_text"]
+                or _message_text(row["message_json"])
+                or str(row["message_json"])
+            )
             lowered = haystack.lower()
             index = lowered.find(needle)
             start = max(0, index - 60)
@@ -2598,7 +2753,10 @@ class ContextStore:
                         {
                             "code": "retrieve_too_large",
                             "message": "archived payload exceeds clm.max_retrieve_bytes",
-                            "details": {"bytes": payload_bytes, "limit": self._config.max_retrieve_bytes},
+                            "details": {
+                                "bytes": payload_bytes,
+                                "limit": self._config.max_retrieve_bytes,
+                            },
                         }
                     ],
                 }
@@ -2647,7 +2805,9 @@ class ContextStore:
             integrity = cur.execute("PRAGMA integrity_check").fetchone()
             pragma_ok = integrity is not None and str(integrity[0]) == "ok"
             if not pragma_ok:
-                problems.append({"code": "integrity_check", "detail": integrity[0] if integrity else None})
+                problems.append(
+                    {"code": "integrity_check", "detail": integrity[0] if integrity else None}
+                )
             rows = [
                 dict(row)
                 for row in cur.execute(
@@ -2672,13 +2832,16 @@ class ContextStore:
                             "computed": computed,
                         }
                     )
-            revision_rows = [dict(r) for r in cur.execute("SELECT * FROM revisions ORDER BY revision")]
+            revision_rows = [
+                dict(r) for r in cur.execute("SELECT * FROM revisions ORDER BY revision")
+            ]
             prev_hash = GENESIS_HASH
             for rev in revision_rows:
                 ops = [
                     _op_payload_from_row(r)
                     for r in cur.execute(
-                        "SELECT * FROM operations WHERE revision = ? ORDER BY ord", (rev["revision"],)
+                        "SELECT * FROM operations WHERE revision = ? ORDER BY ord",
+                        (rev["revision"],),
                     )
                 ]
                 computed = revision_hash(
@@ -2735,10 +2898,14 @@ class ContextStore:
         ttl = self._config.stale_txn_ttl_seconds if ttl_seconds is None else int(ttl_seconds)
         if ttl < 0:
             return ()
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ttl)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ttl)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         stale: list[str] = []
         with self._write() as cur:
-            rows = cur.execute("SELECT txn_id, created_at FROM txns WHERE state = 'staged'").fetchall()
+            rows = cur.execute(
+                "SELECT txn_id, created_at FROM txns WHERE state = 'staged'"
+            ).fetchall()
             now = self._now()
             head = self._head(cur)
             for row in rows:
@@ -2805,7 +2972,13 @@ class ContextStore:
                     cur.execute(
                         "INSERT INTO span_state (span_id, state, rewrite_text, rewrite_sha256, updated_revision) "
                         "VALUES (?, ?, ?, ?, ?)",
-                        (span_id, state.value, rewrite, sha256_hex(rewrite) if rewrite else None, head),
+                        (
+                            span_id,
+                            state.value,
+                            rewrite,
+                            sha256_hex(rewrite) if rewrite else None,
+                            head,
+                        ),
                     )
                     changed += 1
                     continue
@@ -2825,16 +2998,30 @@ class ContextStore:
         cur = self._conn.cursor()
         try:
             rev_row = self._head_row(cur)
-            spans = cur.execute("SELECT span_id, content_sha256, seq FROM spans ORDER BY seq").fetchall()
-            operations = cur.execute("SELECT revision, ord, kind FROM operations ORDER BY revision, ord").fetchall()
-            revisions = cur.execute("SELECT revision, head_hash FROM revisions ORDER BY revision").fetchall()
+            spans = cur.execute(
+                "SELECT span_id, content_sha256, seq FROM spans ORDER BY seq"
+            ).fetchall()
+            operations = cur.execute(
+                "SELECT revision, ord, kind FROM operations ORDER BY revision, ord"
+            ).fetchall()
+            revisions = cur.execute(
+                "SELECT revision, head_hash FROM revisions ORDER BY revision"
+            ).fetchall()
             counts = self._state_counts(cur)
         finally:
             cur.close()
         row_hashes = {
-            "spans": sha256_hex(canonical_json([[str(r["span_id"]), str(r["content_sha256"])] for r in spans])),
-            "operations": sha256_hex(canonical_json([[int(r["revision"]), int(r["ord"]), str(r["kind"])] for r in operations])),
-            "revisions": sha256_hex(canonical_json([[int(r["revision"]), str(r["head_hash"])] for r in revisions])),
+            "spans": sha256_hex(
+                canonical_json([[str(r["span_id"]), str(r["content_sha256"])] for r in spans])
+            ),
+            "operations": sha256_hex(
+                canonical_json(
+                    [[int(r["revision"]), int(r["ord"]), str(r["kind"])] for r in operations]
+                )
+            ),
+            "revisions": sha256_hex(
+                canonical_json([[int(r["revision"]), str(r["head_hash"])] for r in revisions])
+            ),
         }
         return {
             "format": INDEX_FORMAT_VERSION,

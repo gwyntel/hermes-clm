@@ -33,7 +33,13 @@ def messages() -> list[dict]:
             "message_uid": "u-a1",
             "role": "assistant",
             "content": None,
-            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
         },
         {"message_uid": "u-t1", "role": "tool", "tool_call_id": "call-1", "content": "body"},
         {"message_uid": "u-a2", "role": "assistant", "content": "done"},

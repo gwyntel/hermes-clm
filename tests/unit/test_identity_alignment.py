@@ -191,7 +191,9 @@ def test_alignment_of_a_long_session_stays_fast():
 
     history = []
     for index in range(2000):
-        history.append(message("user" if index % 2 == 0 else "assistant", f"row {index}", f"m{index}"))
+        history.append(
+            message("user" if index % 2 == 0 else "assistant", f"row {index}", f"m{index}")
+        )
     request = assemble(history)
 
     started = time.perf_counter()

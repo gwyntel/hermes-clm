@@ -137,7 +137,9 @@ class ConcurrencyTests(kit.StoreTestCase):
         # the loser always observes head=2 with expected_revision=1, so the
         # plain CAS error is deterministic; a caught-up caller would instead
         # get stale_stage (covered in test_store_ops).
-        self.assertEqual(sorted(item.split(":")[0] for item in outcomes), ["ok", "stale_revision"], outcomes)
+        self.assertEqual(
+            sorted(item.split(":")[0] for item in outcomes), ["ok", "stale_revision"], outcomes
+        )
         self.assertEqual(store.snapshot().revision, 2)
 
     def test_parallel_ingest_is_serialised_and_idempotent(self) -> None:

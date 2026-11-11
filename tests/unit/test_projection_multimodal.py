@@ -16,7 +16,7 @@ IMAGE_PARTS = [
 
 def _history_with_image_result(prefix: str = ""):
     """A turn whose tool result is an image, plus a later turn so it is not the newest."""
-    tag = (lambda uid: f"{prefix}{uid}")
+    tag = lambda uid: f"{prefix}{uid}"
     return [
         message("user", "look at this", tag("u1")),
         message("assistant", "reading", tag("a1")),
@@ -25,9 +25,20 @@ def _history_with_image_result(prefix: str = ""):
             "role": "assistant",
             "content": "here",
             "message_uid": tag("a2"),
-            "tool_calls": [{"id": f"{prefix}call_1", "type": "function", "function": {"name": "shot", "arguments": "{}"}}],
+            "tool_calls": [
+                {
+                    "id": f"{prefix}call_1",
+                    "type": "function",
+                    "function": {"name": "shot", "arguments": "{}"},
+                }
+            ],
         },
-        {"role": "tool", "content": copy.deepcopy(IMAGE_PARTS), "message_uid": tag("t1"), "tool_call_id": f"{prefix}call_1"},
+        {
+            "role": "tool",
+            "content": copy.deepcopy(IMAGE_PARTS),
+            "message_uid": tag("t1"),
+            "tool_call_id": f"{prefix}call_1",
+        },
         message("user", "thanks", tag("u3")),
         message("assistant", "anytime", tag("a3")),
     ]

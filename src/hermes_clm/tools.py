@@ -193,9 +193,7 @@ def _guarded(method: Callable[..., Mapping[str, Any]]) -> Callable[..., str]:
         except _Invalid as exc:
             return _dump(exc.payload())
         except Exception as exc:  # noqa: BLE001 - never leak a traceback to the model
-            return _dump(
-                error_payload("internal_error", _sanitise_exception(exc))
-            )
+            return _dump(error_payload("internal_error", _sanitise_exception(exc)))
 
     return wrapper
 
@@ -232,9 +230,7 @@ def _require_int(args: Mapping[str, Any], key: str) -> int:
     return value
 
 
-def _optional_int(
-    args: Mapping[str, Any], key: str, default: int, *, maximum: int
-) -> int:
+def _optional_int(args: Mapping[str, Any], key: str, default: int, *, maximum: int) -> int:
     if key not in args:
         return default
     value = _require_int(args, key)
@@ -262,9 +258,7 @@ def _require_text(
     return value
 
 
-def _optional_text(
-    args: Mapping[str, Any], key: str, *, max_bytes: int
-) -> str | None:
+def _optional_text(args: Mapping[str, Any], key: str, *, max_bytes: int) -> str | None:
     if key not in args or args[key] is None:
         return None
     return _require_text(args, key, max_bytes=max_bytes, allow_empty=False)
@@ -486,7 +480,9 @@ class ToolHandlers:
     # -- reads ------------------------------------------------------------- #
 
     @_guarded
-    def status(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def status(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(args, allowed=())
         payload = self._call(self._service(session_id), "status")
         if self.aux is not None:
@@ -496,14 +492,18 @@ class ToolHandlers:
         return payload
 
     @_guarded
-    def inspect(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def inspect(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(args, allowed=("cursor", "limit"))
         cursor = _optional_text(args, "cursor", max_bytes=256)
         limit = _optional_int(args, "limit", 50, maximum=self.limits.inspect_limit_max)
         return self._call(self._service(session_id), "inspect", cursor=cursor, limit=limit)
 
     @_guarded
-    def search(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def search(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(args, allowed=("query", "cursor", "limit"), required=("query",))
         query = _require_text(args, "query", max_bytes=512)
         cursor = _optional_text(args, "cursor", max_bytes=256)
@@ -511,7 +511,9 @@ class ToolHandlers:
         return self._call(self._service(session_id), "search", query, cursor=cursor, limit=limit)
 
     @_guarded
-    def retrieve(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def retrieve(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(args, allowed=("span_id",), required=("span_id",))
         span_id = _span_id(args["span_id"])
         return self._call(self._service(session_id), "retrieve", span_id)
@@ -519,7 +521,9 @@ class ToolHandlers:
     # -- transaction lifecycle --------------------------------------------- #
 
     @_guarded
-    def stage(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def stage(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(
             args,
             allowed=("operations", "expected_revision", "txn_id"),
@@ -540,12 +544,18 @@ class ToolHandlers:
         payload.setdefault("expected_revision", expected_revision)
         if payload.get("ok") is not False:
             payload.setdefault("staged", True)
-            payload.setdefault("note", "staged only; call clm_commit with expected_revision to apply")
+            payload.setdefault(
+                "note", "staged only; call clm_commit with expected_revision to apply"
+            )
         return payload
 
     @_guarded
-    def commit(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
-        _check_keys(args, allowed=("txn_id", "expected_revision"), required=("txn_id", "expected_revision"))
+    def commit(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
+        _check_keys(
+            args, allowed=("txn_id", "expected_revision"), required=("txn_id", "expected_revision")
+        )
         txn_id = _txn_id(args, required=True)
         expected_revision = _require_int(args, "expected_revision")
         payload = self._call(
@@ -558,7 +568,9 @@ class ToolHandlers:
         return payload
 
     @_guarded
-    def discard(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def discard(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(args, allowed=("txn_id",), required=("txn_id",))
         txn_id = _txn_id(args, required=True)
         service = self._service(session_id)
@@ -569,7 +581,9 @@ class ToolHandlers:
         return {"ok": True, "txn_id": txn_id, "discarded": True, "errors": [], "receipts": []}
 
     @_guarded
-    def revert(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def revert(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(
             args,
             allowed=("target_revision", "expected_revision", "txn_id"),
@@ -588,14 +602,22 @@ class ToolHandlers:
         )
         payload.setdefault("txn_id", txn_id)
         if payload.get("ok") is not False:
-            payload.setdefault("note", "revert created a new revision; earlier revisions remain in the audit trail")
+            payload.setdefault(
+                "note", "revert created a new revision; earlier revisions remain in the audit trail"
+            )
         return payload
 
     # -- dedicated operations ---------------------------------------------- #
 
     @_guarded
-    def pin(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
-        _check_keys(args, allowed=("span_ids", "expected_revision", "txn_id"), required=("span_ids", "expected_revision"))
+    def pin(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
+        _check_keys(
+            args,
+            allowed=("span_ids", "expected_revision", "txn_id"),
+            required=("span_ids", "expected_revision"),
+        )
         span_ids = _span_ids(args, "span_ids", limits=self.limits)
         expected_revision = _require_int(args, "expected_revision")
         txn_id = _txn_id(args, required=False)
@@ -618,8 +640,12 @@ class ToolHandlers:
         return payload
 
     @_guarded
-    def boundary(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
-        _check_keys(args, allowed=("label", "expected_revision", "txn_id"), required=("expected_revision",))
+    def boundary(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
+        _check_keys(
+            args, allowed=("label", "expected_revision", "txn_id"), required=("expected_revision",)
+        )
         expected_revision = _require_int(args, "expected_revision")
         txn_id = _txn_id(args, required=False)
         label = _optional_text(args, "label", max_bytes=_MAX_LABEL_CHARS)
@@ -644,7 +670,9 @@ class ToolHandlers:
     # -- auxiliary proposals ----------------------------------------------- #
 
     @_guarded
-    def propose_compression(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def propose_compression(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(
             args,
             allowed=("span_ids", "instruction", "base_revision"),
@@ -662,7 +690,9 @@ class ToolHandlers:
                 "limit_exceeded",
                 f"span_ids has {len(span_ids)} entries, aux limit is {self.limits.max_aux_spans}",
             )
-        instruction = _optional_text(args, "instruction", max_bytes=self.limits.max_instruction_bytes)
+        instruction = _optional_text(
+            args, "instruction", max_bytes=self.limits.max_instruction_bytes
+        )
         base_revision = _require_int(args, "base_revision") if "base_revision" in args else None
         service = self._service(session_id)
         payload = self.aux.propose(
@@ -676,7 +706,9 @@ class ToolHandlers:
         return payload
 
     @_guarded
-    def accept_proposal(self, args: dict[str, Any], *, session_id: str | None = None, **_: Any) -> Mapping[str, Any]:
+    def accept_proposal(
+        self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
+    ) -> Mapping[str, Any]:
         _check_keys(
             args,
             allowed=("proposal_id", "proposal_sha256", "base_revision", "txn_id"),
@@ -737,7 +769,9 @@ _OPERATIONS_SCHEMA = {
 }
 
 
-def _spec(name: str, description: str, parameters: Mapping[str, Any], handler: Callable[..., str]) -> ToolSpec:
+def _spec(
+    name: str, description: str, parameters: Mapping[str, Any], handler: Callable[..., str]
+) -> ToolSpec:
     schema = {
         "name": name,
         "description": description,
@@ -764,8 +798,15 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
             {
                 "type": "object",
                 "properties": {
-                    "cursor": {"type": "string", "description": "Opaque cursor from a previous page."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": handlers.limits.inspect_limit_max},
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque cursor from a previous page.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": handlers.limits.inspect_limit_max,
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -845,7 +886,11 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                 "properties": {
                     "query": {"type": "string"},
                     "cursor": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": handlers.limits.search_limit_max},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": handlers.limits.search_limit_max,
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -904,7 +949,10 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "span_ids": _SPAN_IDS_SCHEMA,
-                    "instruction": {"type": "string", "description": "Optional focus for the compressor."},
+                    "instruction": {
+                        "type": "string",
+                        "description": "Optional focus for the compressor.",
+                    },
                     "base_revision": {"type": "integer", "minimum": 0},
                 },
                 "required": ["span_ids"],

@@ -43,7 +43,9 @@ def test_two_staged_txns_from_the_same_revision_exactly_one_wins(home, sid):
     first = C.commit(store, txn_id="cas-a", expected_revision=revision)
     assert C.res_ok(first), C.res_errors(first)
     second = C.commit(store, txn_id="cas-b", expected_revision=revision)
-    assert not C.res_ok(second), "second commit from a stale expected_revision must be rejected (I7)"
+    assert not C.res_ok(second), (
+        "second commit from a stale expected_revision must be rejected (I7)"
+    )
 
     snap = C.snapshot(store)
     assert C.snap_revision(snap) == revision + 1
@@ -58,7 +60,9 @@ def test_replayed_transaction_returns_original_outcome_without_a_second_write(ho
     revision = C.snap_revision(C.snapshot(store))
     spans = list(C.snap_spans(C.snapshot(store)))
     assert C.res_ok(
-        C.stage(store, [C.make_op("drop", [spans[0]])], expected_revision=revision, txn_id="replay-a")
+        C.stage(
+            store, [C.make_op("drop", [spans[0]])], expected_revision=revision, txn_id="replay-a"
+        )
     )
     first = C.commit(store, txn_id="replay-a", expected_revision=revision)
     assert C.res_ok(first)
@@ -76,7 +80,9 @@ def test_direct_sql_cannot_update_or_delete_pinned_rows(home, sid):
     store = _store_with_rows(home, sid)
     spans = list(C.snap_spans(C.snapshot(store)))
     revision = C.snap_revision(C.snapshot(store))
-    assert C.res_ok(C.stage(store, [C.make_op("pin", [spans[0]])], expected_revision=revision, txn_id="trg-pin"))
+    assert C.res_ok(
+        C.stage(store, [C.make_op("pin", [spans[0]])], expected_revision=revision, txn_id="trg-pin")
+    )
     assert C.res_ok(C.commit(store, txn_id="trg-pin", expected_revision=revision))
     db = C.db_path(home, sid)
     C.close(store)
@@ -188,7 +194,9 @@ def test_consistent_chain_rewrite_is_undetected_without_an_anchor(home, sid):
                 # keep any per-record checksum consistent: this is the A2 simulation
                 cols = C.columns(conn, table)
                 for candidate in cols:
-                    if any(tag in candidate.lower() for tag in ("sha", "checksum", "digest", "hash")):
+                    if any(
+                        tag in candidate.lower() for tag in ("sha", "checksum", "digest", "hash")
+                    ):
                         try:
                             new_text = text.replace("ORIGINAL-A", "REWRITTEN-A")
                             conn.execute(

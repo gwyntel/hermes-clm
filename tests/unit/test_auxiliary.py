@@ -49,7 +49,9 @@ def test_default_aux_call_uses_compression_task_and_no_route_overrides(monkeypat
     monkeypatch.setitem(sys.modules, "agent", package)
     monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
 
-    out = default_aux_call(messages=[{"role": "user", "content": "hi"}], timeout=12.0, max_tokens=64)
+    out = default_aux_call(
+        messages=[{"role": "user", "content": "hi"}], timeout=12.0, max_tokens=64
+    )
     assert out is not None
     assert recorded["task"] == "compression"
     assert recorded["timeout"] == 12.0
@@ -190,7 +192,9 @@ def test_empty_text_response_is_an_error(service):
 
 
 def test_exception_is_contained_and_does_not_leak_route_detail(service):
-    client = RecordingAuxClient(raises=RuntimeError("401 from https://gateway.example/v1 model=x key=sk-live-1"))
+    client = RecordingAuxClient(
+        raises=RuntimeError("401 from https://gateway.example/v1 model=x key=sk-live-1")
+    )
     compressor = AuxCompressor(client)
     payload = compressor.propose(service, span_ids=["m-0001"])
     assert payload["ok"] is False
@@ -279,7 +283,13 @@ def test_multimodal_span_is_never_flattened(service):
     service.spans["m-0003"] = {
         "ok": True,
         "span_id": "m-0003",
-        "message": {"role": "user", "content": [{"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {"url": "x"}}]},
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image_url", "image_url": {"url": "x"}},
+            ],
+        },
         "protected": False,
     }
     payload = AuxCompressor(lambda **_: None).propose(service, span_ids=["m-0003"])

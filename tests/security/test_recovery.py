@@ -58,7 +58,9 @@ os._exit(9)  # crash with a staged transaction, never committed
     try:
         after = C.snap_revision(C.snapshot(store))
         result = C.commit(store, txn_id="orphan-txn", expected_revision=after)
-        assert not C.res_ok(result), "a staged txn from a crashed process applied retroactively (I8)"
+        assert not C.res_ok(result), (
+            "a staged txn from a crashed process applied retroactively (I8)"
+        )
         assert C.snap_revision(C.snapshot(store)) == after
         assert span in C.snap_spans(C.snapshot(store))
     finally:
@@ -83,7 +85,9 @@ def test_stale_active_json_is_discarded_not_replayed(home, sid):
 
     store = C.for_session(home, sid)
     try:
-        assert C.snap_revision(C.snapshot(store)) == head, "stale active.json overrode the DB (F2/I30)"
+        assert C.snap_revision(C.snapshot(store)) == head, (
+            "stale active.json overrode the DB (F2/I30)"
+        )
         out = C.project(store, [msg("assistant", "request")])
         blob = json.dumps(out.messages, default=str) if out.messages else ""
         assert "resurrect-me" not in blob, "dropped content resurrected from a stale index (I30)"
@@ -172,7 +176,12 @@ def test_interrupted_index_write_is_rebuilt_from_the_db(home, sid):
     before = index.read_bytes() if index.exists() else b""
     revision = C.snap_revision(C.snapshot(store))
     spans = list(C.snap_spans(C.snapshot(store)))
-    C.stage(store, [C.make_op("rewrite", [spans[0]], replacement="post-index-write")], expected_revision=revision, txn_id="t29")
+    C.stage(
+        store,
+        [C.make_op("rewrite", [spans[0]], replacement="post-index-write")],
+        expected_revision=revision,
+        txn_id="t29",
+    )
     assert C.res_ok(C.commit(store, txn_id="t29", expected_revision=revision))
     head = C.snap_revision(C.snapshot(store))
     C.close(store)
@@ -187,7 +196,7 @@ def test_interrupted_index_write_is_rebuilt_from_the_db(home, sid):
 
 
 @pytest.mark.t("T30")
-@pytest.mark.parametrize("garbage", [b"", b"{", b"\x00\x01\x02", b'{"revision": "nope"}', b'[]'])
+@pytest.mark.parametrize("garbage", [b"", b"{", b"\x00\x01\x02", b'{"revision": "nope"}', b"[]"])
 def test_garbage_active_json_is_rebuilt(home, sid, garbage):
     store = _seed(home, sid, ("survives-garbage",))
     head = C.snap_revision(C.snapshot(store))
@@ -244,10 +253,16 @@ def test_one_unreadable_payload_tombstones_and_the_rest_projects(home, sid):
     try:
         for table, column in C.find_payload_column(conn):
             for rowid, value in conn.execute(f'SELECT rowid, "{column}" FROM "{table}"').fetchall():
-                text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
+                text = (
+                    value.decode("utf-8", "replace")
+                    if isinstance(value, bytes)
+                    else str(value or "")
+                )
                 if "PAYLOAD-B" not in text:
                     continue
-                conn.execute(f'UPDATE "{table}" SET "{column}" = ? WHERE rowid = ?', (text[:20], rowid))
+                conn.execute(
+                    f'UPDATE "{table}" SET "{column}" = ? WHERE rowid = ?', (text[:20], rowid)
+                )
                 corrupted = True
                 break
             if corrupted:
@@ -279,7 +294,9 @@ def test_unreadable_structure_yields_no_projection(home, sid):
     dropped = None
     try:
         for table in C.tables(conn):
-            if any(tag in table.lower() for tag in ("span", "message", "archive", "payload", "row")):
+            if any(
+                tag in table.lower() for tag in ("span", "message", "archive", "payload", "row")
+            ):
                 conn.execute(f'DROP TABLE "{table}"')
                 dropped = table
                 break

@@ -34,9 +34,7 @@ SKIP_REASON = (
     "against docs/integration-contract.md and runs unchanged once those merge."
 )
 
-CLOSED_OP_KINDS = frozenset(
-    {"keep", "drop", "rewrite", "pin", "offload", "restore", "boundary"}
-)
+CLOSED_OP_KINDS = frozenset({"keep", "drop", "rewrite", "pin", "offload", "restore", "boundary"})
 PROTECTED_ORIGINS = frozenset({"operator", "system", "host", "user"})
 MODEL_ORIGINS = frozenset({"model", "assistant", "agent", "aux"})
 PROJECTION_CANDIDATES = (
@@ -102,9 +100,7 @@ def _bind(fn, values: Mapping[str, Any], *, what: str) -> dict[str, Any]:
             and name not in kwargs
         ]
         if missing:
-            raise AssertionError(
-                f"cannot bind {what}: no value for {missing}; signature={sig}"
-            )
+            raise AssertionError(f"cannot bind {what}: no value for {missing}; signature={sig}")
     return kwargs
 
 
@@ -265,7 +261,9 @@ def search(store, query, **kwargs):
 
 
 def retrieve(store, span_id):
-    return store.retrieve(**_bind(store.retrieve, {"span_id": span_id}, what="ContextStore.retrieve"))
+    return store.retrieve(
+        **_bind(store.retrieve, {"span_id": span_id}, what="ContextStore.retrieve")
+    )
 
 
 def create_proposal(store, operations, *, base_revision):

@@ -54,7 +54,12 @@ class IngestBasicsTests(kit.StoreTestCase):
 
     def test_bad_input_shape_is_rejected(self) -> None:
         store = self.open_store()
-        for bad in ("not-a-list", {"role": "user"}, 42, [{"role": "user", "content": "x"}][0:0] + ["nope"]):
+        for bad in (
+            "not-a-list",
+            {"role": "user"},
+            42,
+            [{"role": "user", "content": "x"}][0:0] + ["nope"],
+        ):
             with self.assertRaises(ValidationError):
                 store.ingest(bad)  # type: ignore[arg-type]
 
@@ -81,7 +86,9 @@ class RedactionAtRestTests(kit.StoreTestCase):
         ids = self.ingest(store)
         retrieved = store.retrieve(ids["u-q1"])
         self.assertNotIn("sk-abcdefghijklmnopqrstuvwx", retrieved["message"]["content"])
-        self.assertEqual(retrieved["content_sha256"], store.snapshot().span(ids["u-q1"]).content_sha256)
+        self.assertEqual(
+            retrieved["content_sha256"], store.snapshot().span(ids["u-q1"]).content_sha256
+        )
 
     def test_opt_out_is_explicit_and_recorded(self) -> None:
         store = self.open_store(config=StoreConfig(archive_redact=False))
@@ -127,7 +134,9 @@ class ContentVersionTests(kit.StoreTestCase):
         store.ingest([{"message_uid": "u-1", "role": "assistant", "content": "v1"}])
         store.ingest([{"message_uid": "u-1", "role": "assistant", "content": "v2"}])
         raw = self.raw_connect()
-        contents = [row[0] for row in raw.execute("SELECT payload_json FROM archive ORDER BY archive_id")]
+        contents = [
+            row[0] for row in raw.execute("SELECT payload_json FROM archive ORDER BY archive_id")
+        ]
         self.assertEqual(len(contents), 2)
         self.assertIn("v1", contents[0])
         self.assertIn("v2", contents[1])
@@ -169,22 +178,39 @@ class ProtectionTests(kit.StoreTestCase):
                 {
                     "message_uid": "u-img",
                     "role": "user",
-                    "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "x"}}],
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": "x"}},
+                    ],
                 }
             ]
         )
         span = next(iter(store.snapshot().spans.values()))
         self.assertTrue(span.protected)
         with self.assertRaises(Exception) as ctx:
-            self.commit(store, [kit.EditOperation(kind=kit.EditKind.OFFLOAD, span_ids=(span.span_id,))], "t1")
+            self.commit(
+                store,
+                [kit.EditOperation(kind=kit.EditKind.OFFLOAD, span_ids=(span.span_id,))],
+                "t1",
+            )
         self.assertEqual(getattr(ctx.exception, "code", None), "protected_span")
 
     def test_host_can_only_escalate_protection(self) -> None:
         store = self.open_store()
         store.ingest(
             [
-                {"message_uid": "u-a", "role": "assistant", "content": "keep me", "protected": True},
-                {"message_uid": "u-b", "role": "user", "content": "do not unprotect", "protected": False},
+                {
+                    "message_uid": "u-a",
+                    "role": "assistant",
+                    "content": "keep me",
+                    "protected": True,
+                },
+                {
+                    "message_uid": "u-b",
+                    "role": "user",
+                    "content": "do not unprotect",
+                    "protected": False,
+                },
             ]
         )
         by_uid = {span.uid: span for span in store.snapshot().spans.values()}
@@ -203,7 +229,9 @@ class GroupTests(kit.StoreTestCase):
 
     def test_unpaired_tool_result_is_not_grouped(self) -> None:
         store = self.open_store()
-        store.ingest([{"message_uid": "u-orphan", "role": "tool", "tool_call_id": "nope", "content": "x"}])
+        store.ingest(
+            [{"message_uid": "u-orphan", "role": "tool", "tool_call_id": "nope", "content": "x"}]
+        )
         self.assertIsNone(next(iter(store.snapshot().spans.values())).group_id)
 
 

@@ -59,7 +59,12 @@ def sample_messages(secret: str = "sk-abcdefghijklmnopqrstuvwx") -> list[dict[st
                 }
             ],
         },
-        {"message_uid": "u-t1", "role": "tool", "tool_call_id": "call-1", "content": "content of a.py"},
+        {
+            "message_uid": "u-t1",
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "content of a.py",
+        },
         {"message_uid": "u-a2", "role": "assistant", "content": "The file looks fine."},
         {"message_uid": "u-q2", "role": "user", "content": "now refactor it"},
     ]
@@ -110,7 +115,9 @@ class StoreTestCase(unittest.TestCase):
         return conn
 
     # -- choreography ----------------------------------------------------
-    def ingest(self, store: ContextStore, messages: Sequence[Mapping[str, Any]] | None = None) -> dict[str, str]:
+    def ingest(
+        self, store: ContextStore, messages: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, str]:
         store.ingest(list(messages if messages is not None else sample_messages()))
         return self.span_ids(store)
 
@@ -118,7 +125,14 @@ class StoreTestCase(unittest.TestCase):
     def span_ids(store: ContextStore) -> dict[str, str]:
         return {span.uid: span.span_id for span in store.snapshot().spans.values()}
 
-    def stage(self, store: ContextStore, ops: Sequence[EditOperation], txn_id: str, *, actor: str = "agent"):
+    def stage(
+        self,
+        store: ContextStore,
+        ops: Sequence[EditOperation],
+        txn_id: str,
+        *,
+        actor: str = "agent",
+    ):
         return store.stage(
             list(ops),
             expected_revision=store.snapshot().revision,
@@ -126,7 +140,14 @@ class StoreTestCase(unittest.TestCase):
             actor_origin=actor,
         )
 
-    def commit(self, store: ContextStore, ops: Sequence[EditOperation], txn_id: str, *, actor: str = "agent"):
+    def commit(
+        self,
+        store: ContextStore,
+        ops: Sequence[EditOperation],
+        txn_id: str,
+        *,
+        actor: str = "agent",
+    ):
         revision = store.snapshot().revision
         store.stage(list(ops), expected_revision=revision, txn_id=txn_id, actor_origin=actor)
         return store.commit(txn_id=txn_id, expected_revision=revision)

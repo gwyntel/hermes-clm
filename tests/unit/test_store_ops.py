@@ -30,9 +30,7 @@ class StageCommitBase(kit.StoreTestCase):
 class TransactionLifecycleTests(StageCommitBase):
     def test_commit_applies_state_and_bumps_revision(self) -> None:
         revision = self.store.snapshot().revision
-        result = self.commit(
-            self.store, [self.drop([self.ids["u-a2"]])], "txn-1"
-        )
+        result = self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
         self.assertTrue(result.ok)
         self.assertEqual(result.revision, revision + 1)
         self.assertEqual(result.base_revision, revision)
@@ -54,7 +52,11 @@ class TransactionLifecycleTests(StageCommitBase):
         self.stage(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
         self.store.discard(txn_id="txn-1")
         self.assertExceptionCode(
-            "txn_discarded", IdempotencyConflictError, self.store.commit, txn_id="txn-1", expected_revision=1
+            "txn_discarded",
+            IdempotencyConflictError,
+            self.store.commit,
+            txn_id="txn-1",
+            expected_revision=1,
         )
         self.assertIs(self.store.snapshot().span(self.ids["u-a2"]).state, kit.SpanState.ACTIVE)
 
@@ -63,7 +65,9 @@ class TransactionLifecycleTests(StageCommitBase):
 
     def test_discard_of_committed_txn_is_refused(self) -> None:
         self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
-        self.assertExceptionCode("already_committed", ConflictError, self.store.discard, txn_id="txn-1")
+        self.assertExceptionCode(
+            "already_committed", ConflictError, self.store.discard, txn_id="txn-1"
+        )
 
     def test_commit_unknown_txn_is_refused(self) -> None:
         self.assertExceptionCode(
@@ -78,7 +82,10 @@ class TransactionLifecycleTests(StageCommitBase):
         for bad in ("", "has space", "x" * 200, "tab\tchar"):
             with self.assertRaises(ValidationError):
                 self.store.stage(
-                    [self.drop([self.ids["u-a2"]])], expected_revision=1, txn_id=bad, actor_origin="agent"
+                    [self.drop([self.ids["u-a2"]])],
+                    expected_revision=1,
+                    txn_id=bad,
+                    actor_origin="agent",
                 )
 
 
@@ -97,7 +104,11 @@ class CompareAndSwapTests(StageCommitBase):
     def test_commit_with_stale_revision_refused(self) -> None:
         self.stage(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
         self.assertExceptionCode(
-            "stale_revision", StaleRevisionError, self.store.commit, txn_id="txn-1", expected_revision=99
+            "stale_revision",
+            StaleRevisionError,
+            self.store.commit,
+            txn_id="txn-1",
+            expected_revision=99,
         )
 
     def test_commit_after_head_moved_is_refused(self) -> None:
@@ -106,11 +117,19 @@ class CompareAndSwapTests(StageCommitBase):
         self.assertEqual(moved.revision, 2)
         # caller still on old head -> plain CAS failure
         self.assertExceptionCode(
-            "stale_revision", StaleRevisionError, self.store.commit, txn_id="txn-1", expected_revision=1
+            "stale_revision",
+            StaleRevisionError,
+            self.store.commit,
+            txn_id="txn-1",
+            expected_revision=1,
         )
         # caller caught up but the staged txn itself is rooted at the old head
         self.assertExceptionCode(
-            "stale_stage", StaleRevisionError, self.store.commit, txn_id="txn-1", expected_revision=2
+            "stale_stage",
+            StaleRevisionError,
+            self.store.commit,
+            txn_id="txn-1",
+            expected_revision=2,
         )
 
     def test_two_txns_staged_on_same_revision(self) -> None:
@@ -119,7 +138,11 @@ class CompareAndSwapTests(StageCommitBase):
         first = self.store.commit(txn_id="txn-1", expected_revision=1)
         self.assertEqual(first.revision, 2)
         self.assertExceptionCode(
-            "stale_stage", StaleRevisionError, self.store.commit, txn_id="txn-2", expected_revision=2
+            "stale_stage",
+            StaleRevisionError,
+            self.store.commit,
+            txn_id="txn-2",
+            expected_revision=2,
         )
 
 
@@ -131,7 +154,9 @@ class IdempotencyTests(StageCommitBase):
         self.assertEqual(replay.revision, original.revision)
         self.assertEqual(replay.head_hash, original.head_hash)
         self.assertEqual([r.span_id for r in replay.applied], [r.span_id for r in original.applied])
-        self.assertEqual(self.store.snapshot().revision, original.revision, "replay must not add a revision")
+        self.assertEqual(
+            self.store.snapshot().revision, original.revision, "replay must not add a revision"
+        )
 
     def test_stage_replay_same_payload_is_idempotent(self) -> None:
         first = self.stage(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
@@ -154,7 +179,10 @@ class IdempotencyTests(StageCommitBase):
     def test_stage_after_commit_reports_already_committed(self) -> None:
         self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
         replay = self.store.stage(
-            [self.drop([self.ids["u-a2"]])], expected_revision=1, txn_id="txn-1", actor_origin="agent"
+            [self.drop([self.ids["u-a2"]])],
+            expected_revision=1,
+            txn_id="txn-1",
+            actor_origin="agent",
         )
         self.assertTrue(replay.already_committed)
         self.assertEqual(replay.revision, 2)
@@ -209,7 +237,11 @@ class OperationSemanticsTests(StageCommitBase):
             with self.assertRaises(ProtectedSpanError):
                 self.commit(
                     self.store,
-                    [EditOperation(kind=EditKind.REWRITE, span_ids=(self.ids[uid],), replacement="x")],
+                    [
+                        EditOperation(
+                            kind=EditKind.REWRITE, span_ids=(self.ids[uid],), replacement="x"
+                        )
+                    ],
                     f"txn-{uid}",
                 )
 
@@ -219,13 +251,19 @@ class OperationSemanticsTests(StageCommitBase):
         with self.assertRaises(StoreBudgetError):
             self.commit(
                 small,
-                [EditOperation(kind=EditKind.REWRITE, span_ids=(ids["u-a2"],), replacement="y" * 100)],
+                [
+                    EditOperation(
+                        kind=EditKind.REWRITE, span_ids=(ids["u-a2"],), replacement="y" * 100
+                    )
+                ],
                 "txn-big",
             )
 
     def test_offload_keeps_archive_and_produces_stub(self) -> None:
         result = self.commit(
-            self.store, [EditOperation(kind=EditKind.OFFLOAD, span_ids=(self.ids["u-a2"],))], "txn-1"
+            self.store,
+            [EditOperation(kind=EditKind.OFFLOAD, span_ids=(self.ids["u-a2"],))],
+            "txn-1",
         )
         self.assertEqual(result.applied[0].effect, "applied")
         span = self.store.snapshot().span(self.ids["u-a2"])
@@ -237,7 +275,9 @@ class OperationSemanticsTests(StageCommitBase):
 
     def test_offload_then_restore(self) -> None:
         self.commit(
-            self.store, [EditOperation(kind=EditKind.OFFLOAD, span_ids=(self.ids["u-a2"],))], "txn-1"
+            self.store,
+            [EditOperation(kind=EditKind.OFFLOAD, span_ids=(self.ids["u-a2"],))],
+            "txn-1",
         )
         result = self.commit(
             self.store,
@@ -283,13 +323,20 @@ class OperationSemanticsTests(StageCommitBase):
         )
         span_id = next(iter(store.snapshot().spans))
         with self.assertRaises(ProtectedSpanError):
-            self.commit(store, [EditOperation(kind=EditKind.OFFLOAD, span_ids=(span_id,))], "txn-mm")
+            self.commit(
+                store, [EditOperation(kind=EditKind.OFFLOAD, span_ids=(span_id,))], "txn-mm"
+            )
 
 
 class AuthorityTests(StageCommitBase):
     def test_unknown_span_refused(self) -> None:
         self.assertExceptionCode(
-            "unknown_span", NotFoundError, self.commit, self.store, [self.drop(["sp_doesnotexist"])], "txn-1"
+            "unknown_span",
+            NotFoundError,
+            self.commit,
+            self.store,
+            [self.drop(["sp_doesnotexist"])],
+            "txn-1",
         )
 
     def test_duplicate_span_across_ops_refused(self) -> None:
@@ -307,7 +354,11 @@ class AuthorityTests(StageCommitBase):
     def test_actor_origin_must_match_caller(self) -> None:
         with self.assertRaises(ValidationError) as ctx:
             self.store.stage(
-                [kit.EditOperation(kind=EditKind.DROP, span_ids=(self.ids["u-a2"],), actor_origin="operator")],
+                [
+                    kit.EditOperation(
+                        kind=EditKind.DROP, span_ids=(self.ids["u-a2"],), actor_origin="operator"
+                    )
+                ],
                 expected_revision=1,
                 txn_id="txn-1",
                 actor_origin="agent",
@@ -365,7 +416,10 @@ class AuthorityTests(StageCommitBase):
     def test_operation_budget_bound(self) -> None:
         store = self.open_store("ops-budget", config=StoreConfig(max_operations_per_txn=2))
         ids = self.ingest(store)
-        ops = [EditOperation(kind=EditKind.PIN, span_ids=(ids[uid],)) for uid in ("u-a1", "u-a2", "u-t1")]
+        ops = [
+            EditOperation(kind=EditKind.PIN, span_ids=(ids[uid],))
+            for uid in ("u-a1", "u-a2", "u-t1")
+        ]
         with self.assertRaises(StoreBudgetError):
             self.commit(store, ops, "txn-1")
 

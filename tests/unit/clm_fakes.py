@@ -92,13 +92,25 @@ class FakeService:
             }
             for span_id, record in list(self.spans.items())[:limit]
         ]
-        return {"ok": True, "revision": self.revision, "spans": spans, "cursor": None, "limit": limit}
+        return {
+            "ok": True,
+            "revision": self.revision,
+            "spans": spans,
+            "cursor": None,
+            "limit": limit,
+        }
 
-    def stage(self, operations: Any, *, expected_revision: int, txn_id: str, actor_origin: str) -> dict[str, Any]:
+    def stage(
+        self, operations: Any, *, expected_revision: int, txn_id: str, actor_origin: str
+    ) -> dict[str, Any]:
         self._record(
             "stage",
             (operations,),
-            {"expected_revision": expected_revision, "txn_id": txn_id, "actor_origin": actor_origin},
+            {
+                "expected_revision": expected_revision,
+                "txn_id": txn_id,
+                "actor_origin": actor_origin,
+            },
         )
         if self.stage_result is not None:
             return dict(self.stage_result)
@@ -121,7 +133,9 @@ class FakeService:
     def discard(self, *, txn_id: str) -> None:
         self._record("discard", (), {"txn_id": txn_id})
 
-    def revert(self, *, target_revision: int, expected_revision: int, txn_id: str, actor_origin: str) -> dict[str, Any]:
+    def revert(
+        self, *, target_revision: int, expected_revision: int, txn_id: str, actor_origin: str
+    ) -> dict[str, Any]:
         self._record(
             "revert",
             (),
@@ -188,7 +202,10 @@ class FakeService:
         known = {proposal["proposal_id"]: proposal for proposal in self.proposals}
         proposal = known.get(proposal_id)
         if proposal is None:
-            return {"ok": False, "errors": [{"code": "unknown_proposal", "message": "no such proposal"}]}
+            return {
+                "ok": False,
+                "errors": [{"code": "unknown_proposal", "message": "no such proposal"}],
+            }
         if proposal["proposal_sha256"] != proposal_sha256:
             return {
                 "ok": False,
@@ -196,11 +213,17 @@ class FakeService:
             }
         return {"ok": True, "revision": base_revision, "applied": 1, "errors": [], "receipts": []}
 
-    def unpin(self, span_ids: Any, *, expected_revision: int, txn_id: str, actor_origin: str) -> dict[str, Any]:
+    def unpin(
+        self, span_ids: Any, *, expected_revision: int, txn_id: str, actor_origin: str
+    ) -> dict[str, Any]:
         self._record(
             "unpin",
             (span_ids,),
-            {"expected_revision": expected_revision, "txn_id": txn_id, "actor_origin": actor_origin},
+            {
+                "expected_revision": expected_revision,
+                "txn_id": txn_id,
+                "actor_origin": actor_origin,
+            },
         )
         self.revision = expected_revision + 1
         return {"ok": True, "revision": self.revision, "errors": [], "receipts": []}

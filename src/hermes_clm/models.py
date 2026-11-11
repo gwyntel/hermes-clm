@@ -211,11 +211,11 @@ def validate_txn_id(txn_id: Any) -> str:
     if not isinstance(txn_id, str) or not txn_id:
         raise ValidationError("txn_id must be a non-empty string", code="invalid_txn_id")
     if len(txn_id) > _TXN_ID_MAX:
-        raise ValidationError(
-            f"txn_id longer than {_TXN_ID_MAX} characters", code="invalid_txn_id"
-        )
+        raise ValidationError(f"txn_id longer than {_TXN_ID_MAX} characters", code="invalid_txn_id")
     if any(ch.isspace() or ord(ch) < 0x20 for ch in txn_id):
-        raise ValidationError("txn_id must not contain whitespace/control chars", code="invalid_txn_id")
+        raise ValidationError(
+            "txn_id must not contain whitespace/control chars", code="invalid_txn_id"
+        )
     return txn_id
 
 
@@ -249,7 +249,9 @@ class EditOperation(_Immutable):
             try:
                 object.__setattr__(self, "kind", EditKind(self.kind))
             except ValueError as exc:  # pragma: no cover - defensive
-                raise ValidationError(f"unknown edit kind: {self.kind!r}", code="invalid_kind") from exc
+                raise ValidationError(
+                    f"unknown edit kind: {self.kind!r}", code="invalid_kind"
+                ) from exc
         if not isinstance(self.actor_origin, ActorOrigin):
             try:
                 object.__setattr__(self, "actor_origin", ActorOrigin(self.actor_origin))
@@ -282,7 +284,9 @@ class EditOperation(_Immutable):
         if self.expected_revision is not None and (
             not isinstance(self.expected_revision, int) or self.expected_revision < 0
         ):
-            raise ValidationError("expected_revision must be a non-negative int", code="invalid_revision")
+            raise ValidationError(
+                "expected_revision must be a non-negative int", code="invalid_revision"
+            )
         if self.txn_id is not None:
             validate_txn_id(self.txn_id)
         if not isinstance(self.provenance, Mapping):
@@ -319,7 +323,9 @@ class EditOperation(_Immutable):
         unknown = set(raw) - _OP_FIELDS
         if unknown:
             raise ValidationError(
-                f"unknown operation field(s): {sorted(unknown)}", code="unknown_field", details={"fields": sorted(unknown)}
+                f"unknown operation field(s): {sorted(unknown)}",
+                code="unknown_field",
+                details={"fields": sorted(unknown)},
             )
         span_ids = raw.get("span_ids", ())
         if isinstance(span_ids, str):
@@ -619,7 +625,9 @@ class StoreSnapshot(_Immutable):
             "aliases": dict(self.aliases),
             "operations": [op.to_payload() for op in self.operations],
             "operations_truncated": self.operations_truncated,
-            "spans": [span.to_dict(include_message=include_messages) for span in self.spans.values()],
+            "spans": [
+                span.to_dict(include_message=include_messages) for span in self.spans.values()
+            ],
         }
 
 
@@ -664,7 +672,9 @@ class OperationResult(_Immutable):
         object.__setattr__(self, "applied", tuple(self.applied))
         object.__setattr__(self, "inert", tuple(self.inert))
         object.__setattr__(self, "errors", tuple(_frozen_map(err) for err in self.errors))
-        object.__setattr__(self, "receipts", tuple(self.receipts) or tuple(self.applied) + tuple(self.inert))
+        object.__setattr__(
+            self, "receipts", tuple(self.receipts) or tuple(self.applied) + tuple(self.inert)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

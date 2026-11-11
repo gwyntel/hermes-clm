@@ -120,7 +120,9 @@ def test_older_tool_group_may_be_dropped():
     result = project(request, conversation_messages=history, snapshot=snapshot)
 
     assert result.ok
-    assert [row.get("tool_call_id") for row in result.messages if row["role"] == "tool"] == ["call_2"]
+    assert [row.get("tool_call_id") for row in result.messages if row["role"] == "tool"] == [
+        "call_2"
+    ]
 
 
 def test_second_group_of_a_three_group_history_stays_editable():
@@ -133,14 +135,14 @@ def test_second_group_of_a_three_group_history_stays_editable():
     ]
     history = history + extra
     request = assemble(history)
-    snapshot = snapshot_for(
-        history, [FakeOperation(kind="offload", span_ids=("a3", "t2"))]
-    )
+    snapshot = snapshot_for(history, [FakeOperation(kind="offload", span_ids=("a3", "t2"))])
 
     result = project(request, conversation_messages=history, snapshot=snapshot)
 
     assert result.ok
-    tools = {row["tool_call_id"]: row["content"] for row in result.messages if row["role"] == "tool"}
+    tools = {
+        row["tool_call_id"]: row["content"] for row in result.messages if row["role"] == "tool"
+    }
     assert "[clm.offloaded" not in tools["call_1"]  # untouched group stays verbatim
     assert "[clm.offloaded" in tools["call_2"]  # both members of the targeted group stubbed
     assert tools["call_3"] == "LATEST"  # newest tool output is host-owned
@@ -149,9 +151,7 @@ def test_second_group_of_a_three_group_history_stays_editable():
 def test_protected_system_and_user_rows_survive_identical_bytes():
     history = coding_turns()
     request = assemble(history)
-    snapshot = snapshot_for(
-        history, [FakeOperation(kind="drop", span_ids=("a1", "t1"))]
-    )
+    snapshot = snapshot_for(history, [FakeOperation(kind="drop", span_ids=("a1", "t1"))])
 
     result = project(request, conversation_messages=history, snapshot=snapshot)
 

@@ -56,7 +56,13 @@ def test_status_reports_revision_counts_budget_and_aux():
         "pressure": 0.75,
         "store_health": "ok",
         "last_error": None,
-        "aux": {"task": "compression", "enabled": True, "calls": 2, "failures": 0, "latency_ms_total": 900},
+        "aux": {
+            "task": "compression",
+            "enabled": True,
+            "calls": 2,
+            "failures": 0,
+            "latency_ms_total": 900,
+        },
     }
     text = run("status", service=service)
     assert "revision 12" in text
@@ -71,7 +77,10 @@ def test_status_reports_revision_counts_budget_and_aux():
 
 def test_status_surfaces_a_store_error():
     service = FakeService()
-    service.status_result = {"ok": False, "errors": [{"code": "corrupt", "message": "index rebuild failed"}]}
+    service.status_result = {
+        "ok": False,
+        "errors": [{"code": "corrupt", "message": "index rebuild failed"}],
+    }
     text = run("status", service=service)
     assert "corrupt" in text and "index rebuild failed" in text
 
@@ -147,7 +156,10 @@ def test_edit_stage_failure_does_not_commit():
 
 def test_edit_commit_failure_is_reported():
     service = FakeService(revision=3)
-    service.commit_result = {"ok": False, "errors": [{"code": "stale_revision", "message": "moved"}]}
+    service.commit_result = {
+        "ok": False,
+        "errors": [{"code": "stale_revision", "message": "moved"}],
+    }
     text = run("edit drop m-0001", service=service)
     assert "commit failed" in text.lower() or "stale_revision" in text
 

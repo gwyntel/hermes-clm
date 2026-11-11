@@ -25,7 +25,9 @@ class RevisionTests(kit.StoreTestCase):
         for index, uid in enumerate(("u-a2", "u-a1", "u-a1")):
             if uid == "u-a1":
                 ops = [
-                    kit.EditOperation(kind=kit.EditKind.DROP, span_ids=(self.ids["u-a1"], self.ids["u-t1"]))
+                    kit.EditOperation(
+                        kind=kit.EditKind.DROP, span_ids=(self.ids["u-a1"], self.ids["u-t1"])
+                    )
                 ]
             else:
                 ops = [self.drop([self.ids[uid]])]
@@ -57,7 +59,9 @@ class RevisionTests(kit.StoreTestCase):
         raw = self.raw_connect()
         self.assertEqual(raw.execute("SELECT COUNT(*) FROM revisions").fetchone()[0], 4)
         self.assertEqual(raw.execute("SELECT COUNT(*) FROM operations").fetchone()[0] >= 3, True)
-        self.assertIsNotNone(raw.execute("SELECT 1 FROM audit WHERE event = 'commit:revert'").fetchone())
+        self.assertIsNotNone(
+            raw.execute("SELECT 1 FROM audit WHERE event = 'commit:revert'").fetchone()
+        )
 
     def test_revert_reports_receipts_for_restored_spans(self) -> None:
         target = self.store.snapshot().revision
@@ -132,7 +136,9 @@ class RevisionTests(kit.StoreTestCase):
 
     def test_edit_after_revert_builds_on_revert_state(self) -> None:
         self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-1")
-        self.store.revert(target_revision=1, expected_revision=2, txn_id="txn-r", actor_origin="agent")
+        self.store.revert(
+            target_revision=1, expected_revision=2, txn_id="txn-r", actor_origin="agent"
+        )
         self.commit(self.store, [self.drop([self.ids["u-a1"], self.ids["u-t1"]])], "txn-2")
         snapshot = self.store.snapshot()
         self.assertIs(snapshot.span(self.ids["u-a2"]).state, kit.SpanState.ACTIVE)

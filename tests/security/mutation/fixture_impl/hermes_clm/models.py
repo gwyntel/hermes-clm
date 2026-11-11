@@ -5,9 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-CLOSED_OP_KINDS = frozenset(
-    {"keep", "drop", "rewrite", "pin", "offload", "restore", "boundary"}
-)
+CLOSED_OP_KINDS = frozenset({"keep", "drop", "rewrite", "pin", "offload", "restore", "boundary"})
 MUTATING_KINDS = frozenset({"drop", "rewrite", "offload", "restore", "boundary"})
 
 

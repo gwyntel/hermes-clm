@@ -44,7 +44,9 @@ def big_history():
 
 def test_routine_compress_never_touches_the_store_or_the_transcript():
     history = big_history()
-    engine, factory = build_engine(snapshot_for(history, [OperationSpec(kind="drop", span_ids=("a1", "t1"))]))
+    engine, factory = build_engine(
+        snapshot_for(history, [OperationSpec(kind="drop", span_ids=("a1", "t1"))])
+    )
     result = engine.compress(history, current_tokens=10_000)
     assert result == history
     assert factory.store.ingest_calls == []
@@ -81,7 +83,9 @@ def test_manual_compress_applies_the_committed_projection_only():
 
 def test_manual_compress_aborts_honestly_on_a_refused_projection():
     history = big_history()
-    engine, factory = build_engine(snapshot_for(history, [OperationSpec(kind="drop", span_ids=("a3",))]))
+    engine, factory = build_engine(
+        snapshot_for(history, [OperationSpec(kind="drop", span_ids=("a3",))])
+    )
     result = engine.compress(history, force=True)
     assert result == history
     assert engine._last_compress_aborted is True

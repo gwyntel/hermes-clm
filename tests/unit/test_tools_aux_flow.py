@@ -50,7 +50,11 @@ def test_inspect_then_stage_then_commit_changes_the_next_revision():
     staged = call(
         tools,
         "clm_stage",
-        {"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 2, "txn_id": "t1"},
+        {
+            "operations": [{"kind": "drop", "span_ids": ["m-0001"]}],
+            "expected_revision": 2,
+            "txn_id": "t1",
+        },
     )
     assert staged["ok"] is True and staged["staged"] is True
     assert service.revision == 2, "staging must not move the revision"

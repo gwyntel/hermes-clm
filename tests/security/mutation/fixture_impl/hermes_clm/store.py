@@ -143,7 +143,9 @@ class ContextStore:
             if not D.active("M25"):
                 conn.executescript(TRIGGERS)
         else:
-            present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            present = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
             missing = {"meta", "spans", "pins", "staged", "outcomes", "committed_ops"} - present
             if missing:
                 conn.close()
@@ -156,9 +158,7 @@ class ContextStore:
             conn.execute("INSERT INTO meta(key,value) VALUES('tick','0')")
         elif existing[0] != session_id and not D.active("M3"):
             conn.close()
-            raise MountError(
-                f"db belongs to session {existing[0]!r}, not {session_id!r}"
-            )
+            raise MountError(f"db belongs to session {existing[0]!r}, not {session_id!r}")
         store = cls(home, session_id, conn)
         if not D.active("M41"):
             for path in (db, Path(str(db) + "-journal")):
@@ -230,14 +230,25 @@ class ContextStore:
             self._conn.execute(
                 "INSERT INTO spans(span_id,seq,role,origin,protected,content,content_sha256,group_id)"
                 " VALUES(?,?,?,?,?,?,?,?)",
-                (span_id, seq, role, origin, 1 if role in ("system", "user") else 0, content, digest, None),
+                (
+                    span_id,
+                    seq,
+                    role,
+                    origin,
+                    1 if role in ("system", "user") else 0,
+                    content,
+                    digest,
+                    None,
+                ),
             )
         self._set_revision(revision)
         return _Result(ok=True, revision=self._revision())
 
     def snapshot(self) -> StoreSnapshot:
         if D.active("M39"):
-            self._conn.execute("UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key='tick'")
+            self._conn.execute(
+                "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key='tick'"
+            )
         spans = {}
         for row in self._conn.execute(
             "SELECT span_id, role, origin, protected, content, content_sha256 FROM spans ORDER BY seq"
@@ -277,19 +288,33 @@ class ContextStore:
                 "SELECT pin_id, span_id, revision, content_sha256, actor_origin FROM pins"
             )
         }
-        head = _sha(json.dumps([[op["kind"], list(op["span_ids"]), op["revision"]] for op in ops])) if ops else ""
+        head = (
+            _sha(json.dumps([[op["kind"], list(op["span_ids"]), op["revision"]] for op in ops]))
+            if ops
+            else ""
+        )
         return StoreSnapshot(
             revision=self._revision(), operations=ops, spans=spans, pins=pins, head_hash=head
         )
 
-    def stage(self, operations, *, expected_revision: int, txn_id: str, actor_origin: str = "model"):
+    def stage(
+        self, operations, *, expected_revision: int, txn_id: str, actor_origin: str = "model"
+    ):
         ops = []
         for op in operations:
             if isinstance(op, Mapping):
-                op = EditOperation(**{k: op.get(k) for k in ("kind", "span_ids", "replacement", "actor_origin") if op.get(k) is not None})
+                op = EditOperation(
+                    **{
+                        k: op.get(k)
+                        for k in ("kind", "span_ids", "replacement", "actor_origin")
+                        if op.get(k) is not None
+                    }
+                )
             kind = getattr(op, "kind", None)
             if kind not in CLOSED_OP_KINDS:
-                return _Result(ok=False, errors=[f"unknown operation kind {kind!r}"], revision=self._revision())
+                return _Result(
+                    ok=False, errors=[f"unknown operation kind {kind!r}"], revision=self._revision()
+                )
             span_ids = list(getattr(op, "span_ids", ()) or ())
             known = {row[0] for row in self._conn.execute("SELECT span_id FROM spans")}
             missing = [sid for sid in span_ids if sid not in known]
@@ -326,14 +351,14 @@ class ContextStore:
                 "SELECT revision, applied FROM outcomes WHERE txn_id=?", (txn_id,)
             ).fetchone()
             if row:
-                return _Result(
-                    ok=True, revision=row[0], applied=json.loads(row[1]), replayed=True
-                )
+                return _Result(ok=True, revision=row[0], applied=json.loads(row[1]), replayed=True)
         row = self._conn.execute(
             "SELECT expected_revision, payload FROM staged WHERE txn_id=?", (txn_id,)
         ).fetchone()
         if row is None:
-            return _Result(ok=False, errors=[f"unknown transaction {txn_id!r}"], revision=self._revision())
+            return _Result(
+                ok=False, errors=[f"unknown transaction {txn_id!r}"], revision=self._revision()
+            )
         staged_revision, payload = row
         current = self._revision()
         if not D.active("M20") and current != expected_revision:
@@ -349,14 +374,18 @@ class ContextStore:
             kind = op["kind"]
             if kind == "drop":
                 for span_id in op["span_ids"]:
-                    self._conn.execute("DELETE FROM spans WHERE span_id=? AND protected=0", (span_id,))
+                    self._conn.execute(
+                        "DELETE FROM spans WHERE span_id=? AND protected=0", (span_id,)
+                    )
                     applied.append(span_id)
             elif kind == "pin":
                 for span_id in op["span_ids"]:
                     content = self._conn.execute(
                         "SELECT content_sha256 FROM spans WHERE span_id=?", (span_id,)
                     ).fetchone()[0]
-                    pin_id = "pin-" + _sha(f"{self.session_id}:{next_revision}:{span_id}:{content}")[:24]
+                    pin_id = (
+                        "pin-" + _sha(f"{self.session_id}:{next_revision}:{span_id}:{content}")[:24]
+                    )
                     self._conn.execute(
                         "INSERT OR IGNORE INTO pins(pin_id, span_id, revision, content_sha256, actor_origin)"
                         " VALUES(?,?,?,?,?)",
@@ -377,7 +406,13 @@ class ContextStore:
             self._conn.execute(
                 "INSERT INTO committed_ops(txn_id, revision, kind, span_ids, actor_origin)"
                 " VALUES(?,?,?,?,?)",
-                (txn_id, next_revision, kind, json.dumps(op["span_ids"]), op.get("actor_origin", "model")),
+                (
+                    txn_id,
+                    next_revision,
+                    kind,
+                    json.dumps(op["span_ids"]),
+                    op.get("actor_origin", "model"),
+                ),
             )
         self._set_revision(next_revision)
         self._conn.execute("DELETE FROM staged WHERE txn_id=?", (txn_id,))
@@ -392,7 +427,14 @@ class ContextStore:
         self._conn.execute("DELETE FROM staged WHERE txn_id=?", (txn_id,))
         return _Result(ok=True, revision=self._revision())
 
-    def revert(self, *, target_revision: int, expected_revision: int, txn_id: str, actor_origin: str = "model"):
+    def revert(
+        self,
+        *,
+        target_revision: int,
+        expected_revision: int,
+        txn_id: str,
+        actor_origin: str = "model",
+    ):
         if self._revision() != expected_revision:
             return _Result(ok=False, errors=["stale revision"], revision=self._revision())
         return self.commit(txn_id=txn_id, expected_revision=expected_revision)
@@ -451,7 +493,13 @@ class ContextStore:
     def create_proposal(self, operations, *, base_revision: int):
         ops = [op for op in operations]
         material = json.dumps(
-            [{"kind": getattr(o, "kind", None), "span_ids": list(getattr(o, "span_ids", ()) or ())} for o in ops],
+            [
+                {
+                    "kind": getattr(o, "kind", None),
+                    "span_ids": list(getattr(o, "span_ids", ()) or ()),
+                }
+                for o in ops
+            ],
             sort_keys=True,
         )
         digest = _sha(f"{self.session_id}:{base_revision}:{material}")

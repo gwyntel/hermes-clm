@@ -22,9 +22,13 @@ class AppendOnlyTriggerTests(kit.StoreTestCase):
 
     def test_spans_cannot_be_updated_or_deleted(self) -> None:
         self._assert_abort(
-            "E_APPEND_ONLY:spans", "UPDATE spans SET content_sha256 = 'x' WHERE span_id = ?", (self.ids["u-a2"],)
+            "E_APPEND_ONLY:spans",
+            "UPDATE spans SET content_sha256 = 'x' WHERE span_id = ?",
+            (self.ids["u-a2"],),
         )
-        self._assert_abort("E_APPEND_ONLY:spans", "DELETE FROM spans WHERE span_id = ?", (self.ids["u-a2"],))
+        self._assert_abort(
+            "E_APPEND_ONLY:spans", "DELETE FROM spans WHERE span_id = ?", (self.ids["u-a2"],)
+        )
 
     def test_archive_cannot_be_updated_or_deleted(self) -> None:
         self._assert_abort("E_APPEND_ONLY:archive", "UPDATE archive SET payload_json = '{}'")

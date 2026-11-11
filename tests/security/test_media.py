@@ -141,7 +141,5 @@ def test_aux_proposal_cannot_produce_a_multimodal_part(store, base_messages):
     # a plain-text replacement of the same span is still allowed, so this is a
     # part-type refusal rather than "proposals never work"
     ok_op = C.make_op("rewrite", [span_id], replacement="aux summary text", actor_origin="aux")
-    proposal = C.create_proposal(
-        store, [ok_op], base_revision=C.snap_revision(C.snapshot(store))
-    )
+    proposal = C.create_proposal(store, [ok_op], base_revision=C.snap_revision(C.snapshot(store)))
     assert proposal is not None

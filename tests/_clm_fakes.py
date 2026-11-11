@@ -19,8 +19,17 @@ from hermes_clm.identity import content_sha256  # noqa: E402
 
 #: Fields the host strips from every provider-bound request copy.
 PERSISTENCE_FIELDS = frozenset(
-    {"timestamp", "display_kind", "display_metadata", "_row_id", "message_uid",
-     "_absorbed_message_uids", "_tool_call_uids", "_tool_call_uid", "api_content"}
+    {
+        "timestamp",
+        "display_kind",
+        "display_metadata",
+        "_row_id",
+        "message_uid",
+        "_absorbed_message_uids",
+        "_tool_call_uids",
+        "_tool_call_uid",
+        "api_content",
+    }
 )
 
 
@@ -51,9 +60,14 @@ def tool_result(uid: str, call_id: str, content: str) -> Dict[str, Any]:
     return {"role": "tool", "content": content, "message_uid": uid, "tool_call_id": call_id}
 
 
-def assemble(history: Sequence[Mapping[str, Any]], *, system: str = "SYSTEM PROMPT",
-             prefill: Sequence[Mapping[str, Any]] = (), trailing: Sequence[Mapping[str, Any]] = (),
-             injections: Optional[Mapping[int, str]] = None) -> List[Dict[str, Any]]:
+def assemble(
+    history: Sequence[Mapping[str, Any]],
+    *,
+    system: str = "SYSTEM PROMPT",
+    prefill: Sequence[Mapping[str, Any]] = (),
+    trailing: Sequence[Mapping[str, Any]] = (),
+    injections: Optional[Mapping[int, str]] = None,
+) -> List[Dict[str, Any]]:
     """Mimic the host's assembled request: system + prefill + stripped history + tail.
 
     Persistence-only fields (``message_uid`` included) are stripped exactly as
@@ -62,14 +76,28 @@ def assemble(history: Sequence[Mapping[str, Any]], *, system: str = "SYSTEM PROM
     """
     request: List[Dict[str, Any]] = [{"role": "system", "content": system}]
     for row in prefill:
-        request.append({key: copy.deepcopy(value) for key, value in row.items() if key not in PERSISTENCE_FIELDS})
+        request.append(
+            {
+                key: copy.deepcopy(value)
+                for key, value in row.items()
+                if key not in PERSISTENCE_FIELDS
+            }
+        )
     for index, row in enumerate(history):
-        clean = {key: copy.deepcopy(value) for key, value in row.items() if key not in PERSISTENCE_FIELDS}
+        clean = {
+            key: copy.deepcopy(value) for key, value in row.items() if key not in PERSISTENCE_FIELDS
+        }
         if injections and index in injections:
             clean["content"] = str(clean.get("content", "")) + injections[index]
         request.append(clean)
     for row in trailing:
-        request.append({key: copy.deepcopy(value) for key, value in row.items() if key not in PERSISTENCE_FIELDS})
+        request.append(
+            {
+                key: copy.deepcopy(value)
+                for key, value in row.items()
+                if key not in PERSISTENCE_FIELDS
+            }
+        )
     return request
 
 
@@ -126,7 +154,9 @@ class FakeSnapshot:
     head_hash: str = ""
 
 
-def spans_from_history(history: Sequence[Mapping[str, Any]], *, protected: Iterable[str] = ()) -> Dict[str, FakeSpan]:
+def spans_from_history(
+    history: Sequence[Mapping[str, Any]], *, protected: Iterable[str] = ()
+) -> Dict[str, FakeSpan]:
     """Archive a history list into spans keyed by span id (== uid for the fake)."""
     protected_set = set(protected)
     spans: Dict[str, FakeSpan] = {}
@@ -186,8 +216,13 @@ class FakeStoreResult:
 class FakeStore:
     """A store that satisfies the engine-facing contract and records calls."""
 
-    def __init__(self, snapshot: Optional[FakeSnapshot] = None, *, supports_commit: bool = True,
-                 family: str = "fake") -> None:
+    def __init__(
+        self,
+        snapshot: Optional[FakeSnapshot] = None,
+        *,
+        supports_commit: bool = True,
+        family: str = "fake",
+    ) -> None:
         self._snapshot = snapshot or FakeSnapshot()
         self.ingest_calls: List[List[Dict[str, Any]]] = []
         self.staged: List[Any] = []
@@ -211,7 +246,9 @@ class FakeStore:
     def inspect(self, *, cursor: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
         return {"cursor": cursor, "limit": limit, "spans": sorted(self._snapshot.spans)}
 
-    def search(self, query: str, *, cursor: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
+    def search(
+        self, query: str, *, cursor: Optional[str] = None, limit: int = 20
+    ) -> Dict[str, Any]:
         return {"query": query, "cursor": cursor, "limit": limit, "results": []}
 
     def retrieve(self, span_id: str) -> Dict[str, Any]:
@@ -249,8 +286,9 @@ def _install_commit_surface(store: FakeStore) -> None:
     store.discard = store.discard_txn  # type: ignore[attr-defined]
 
 
-def make_store(snapshot: Optional[FakeSnapshot] = None, *, supports_commit: bool = True,
-               family: str = "fake") -> FakeStore:
+def make_store(
+    snapshot: Optional[FakeSnapshot] = None, *, supports_commit: bool = True, family: str = "fake"
+) -> FakeStore:
     """A FakeStore with the commit surface bound when requested."""
     store = FakeStore(snapshot, supports_commit=True, family=family)
     if supports_commit:
@@ -264,15 +302,21 @@ def make_store(snapshot: Optional[FakeSnapshot] = None, *, supports_commit: bool
 class StoreFactory:
     """Records every store the engine opens; returns the same store per session."""
 
-    def __init__(self, snapshot: Optional[FakeSnapshot] = None, *, supports_commit: bool = True) -> None:
+    def __init__(
+        self, snapshot: Optional[FakeSnapshot] = None, *, supports_commit: bool = True
+    ) -> None:
         self.snapshot = snapshot or FakeSnapshot()
         self.supports_commit = supports_commit
         self.opened: List[Dict[str, Any]] = []
         self.stores: List[FakeStore] = []
 
     def __call__(self, hermes_home, session_id, *, read_only: bool = False) -> FakeStore:
-        self.opened.append({"hermes_home": hermes_home, "session_id": session_id, "read_only": read_only})
-        store = make_store(self.snapshot, supports_commit=self.supports_commit, family=str(session_id))
+        self.opened.append(
+            {"hermes_home": hermes_home, "session_id": session_id, "read_only": read_only}
+        )
+        store = make_store(
+            self.snapshot, supports_commit=self.supports_commit, family=str(session_id)
+        )
         self.stores.append(store)
         return store
 

@@ -31,7 +31,9 @@ def pytest_configure(config):  # noqa: D401 - pytest hook
     config.addinivalue_line("markers", "security: security/adversarial suite (plan D)")
     config.addinivalue_line("markers", "fuzz: bounded deterministic property fuzz")
     config.addinivalue_line("markers", "mutation: defect-injection harness self-proof")
-    config.addinivalue_line("markers", "integration: needs another delegate's branch (engine/tools)")
+    config.addinivalue_line(
+        "markers", "integration: needs another delegate's branch (engine/tools)"
+    )
     config.addinivalue_line(
         "markers", "t(*ids): design-review acceptance test ids covered (T1..T49)"
     )

@@ -37,7 +37,11 @@ def test_secret_in_tool_output_is_redacted_at_write(home, sid, secret):
                     "role": "assistant",
                     "content": "",
                     "tool_calls": [
-                        {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
                     ],
                 },
                 msg("tool", f"export TOKEN={secret}\n", tool_call_id="c1", name="bash"),
@@ -97,7 +101,9 @@ def test_retention_expires_unpinned_sessions_and_keeps_pinned(home, sid):
     revision = C.snap_revision(C.snapshot(store))
     C.commit(store, txn_id="r1", expected_revision=revision)
     span = next(iter(C.snap_spans(C.snapshot(store))))
-    assert C.res_ok(C.stage(store, [C.make_op("pin", [span])], expected_revision=revision, txn_id="r2"))
+    assert C.res_ok(
+        C.stage(store, [C.make_op("pin", [span])], expected_revision=revision, txn_id="r2")
+    )
     assert C.res_ok(C.commit(store, txn_id="r2", expected_revision=revision))
 
     name, fn = _retention_callable(store)

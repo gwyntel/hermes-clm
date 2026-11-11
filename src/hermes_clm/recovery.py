@@ -165,7 +165,9 @@ def recover(store: ContextStore) -> RecoveryReport:
 def _schema_is_incomplete(db_path: Path) -> bool:
     conn = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True, timeout=1.0)
     try:
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         return bool(set(schema.TABLES) - tables)
     except sqlite3.DatabaseError:
         return False
@@ -205,7 +207,9 @@ def recover_session(
     directory = session_dir(hermes_home, sid)
     if not directory.exists():
         raise CorruptStoreError(
-            "no store for this session", code="store_not_found", details={"store_key": session_key(sid)}
+            "no store for this session",
+            code="store_not_found",
+            details={"store_key": session_key(sid)},
         )
     _assert_plain(directory, kind="directory")
     db_path = directory / DB_FILENAME
@@ -248,7 +252,9 @@ def verify_session(
     """Read-only verification entry point for diagnostics/CLI."""
 
     cfg = _coerce_config(config)
-    with ContextStore.for_session(hermes_home, session_id, read_only=read_only, config=cfg) as store:
+    with ContextStore.for_session(
+        hermes_home, session_id, read_only=read_only, config=cfg
+    ) as store:
         report = store.verify()
         report["index"] = store.index_status()
         return report

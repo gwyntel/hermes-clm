@@ -31,7 +31,7 @@ PIECES = [
     b'{"session_id": "parent-sess"}',
     b'{"spans": {"x": {"content": "INJECTED-ROW"}}}',
     b"\x00" * 32,
-    b"{\"revision\": NaN}",
+    b'{"revision": NaN}',
 ]
 
 
@@ -45,7 +45,9 @@ def test_random_derived_index_content_never_changes_the_projection(home, sid):
     C.ingest(store, [msg("assistant", "BASELINE-ROW"), msg("user", "operator row")])
     C.commit(store, txn_id="fz-seed", expected_revision=C.snap_revision(C.snapshot(store)))
     head = C.snap_revision(C.snapshot(store))
-    baseline = json.dumps(C.project(store, [msg("assistant", "req")]).messages, default=str, sort_keys=True)
+    baseline = json.dumps(
+        C.project(store, [msg("assistant", "req")]).messages, default=str, sort_keys=True
+    )
     C.close(store)
 
     index = C.active_json(home, sid)

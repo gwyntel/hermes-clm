@@ -96,7 +96,9 @@ def test_structural_corruption_degrades_to_none_not_a_guess(home, sid):
     dropped = None
     try:
         for table in C.tables(conn):
-            if any(tag in table.lower() for tag in ("span", "message", "archive", "payload", "row")):
+            if any(
+                tag in table.lower() for tag in ("span", "message", "archive", "payload", "row")
+            ):
                 conn.execute(f'DROP TABLE "{table}"')
                 dropped = table
                 break
@@ -151,7 +153,9 @@ def test_late_or_repeated_commit_lands_at_most_once(home, sid):
     kwargs = {}
     for name in ("messages", "force", "bypass_cooldown", "reason", "trigger"):
         if name in params:
-            kwargs[name] = conversation if name == "messages" else (True if name != "trigger" else "manual")
+            kwargs[name] = (
+                conversation if name == "messages" else (True if name != "trigger" else "manual")
+            )
     first = engine.compress(**kwargs)
     after_first = None
     store = C.for_session(home, sid)

@@ -13,7 +13,13 @@ import store_testkit as kit
 
 from hermes_clm import schema
 from hermes_clm.errors import CorruptStoreError
-from hermes_clm.recovery import RecoveryReport, recover, recover_session, rebuild_index, verify_session
+from hermes_clm.recovery import (
+    RecoveryReport,
+    recover,
+    recover_session,
+    rebuild_index,
+    verify_session,
+)
 from hermes_clm.store import DB_FILENAME, INDEX_FILENAME, ContextStore, session_dir
 
 
@@ -44,7 +50,9 @@ class VerificationTests(kit.StoreTestCase):
         rec = recover(self.store)
         self.assertFalse(rec.ok)
         self.assertEqual(rec.corrupt_spans, (self.ids["u-a2"],))
-        still = raw.execute("SELECT message_json FROM spans WHERE span_id = ?", (self.ids["u-a2"],)).fetchone()[0]
+        still = raw.execute(
+            "SELECT message_json FROM spans WHERE span_id = ?", (self.ids["u-a2"],)
+        ).fetchone()[0]
         self.assertIn("tampered", still)
         with self.assertRaises(CorruptStoreError):
             self.store.retrieve(self.ids["u-a2"])
@@ -56,7 +64,10 @@ class VerificationTests(kit.StoreTestCase):
     def test_archive_tamper_breaks_the_chain(self) -> None:
         raw = self.raw_connect()
         raw.execute("DROP TRIGGER trg_archive_no_update")
-        raw.execute("UPDATE archive SET payload_json = ? WHERE archive_id = 2", (kit.canonical_json({"x": 1}),))
+        raw.execute(
+            "UPDATE archive SET payload_json = ? WHERE archive_id = 2",
+            (kit.canonical_json({"x": 1}),),
+        )
         report = self.store.verify()
         self.assertFalse(report["ok"])
         self.assertIn("entry_hash_mismatch", {p["code"] for p in report["problems"]})
@@ -91,7 +102,9 @@ class VerificationTests(kit.StoreTestCase):
 
     def test_versioned_spans_do_not_look_like_divergence(self) -> None:
         # historical (absorbed) versions must not be mistaken for missing state
-        self.store.ingest([{"message_uid": "u-a2", "role": "assistant", "content": "v2 of the reply"}])
+        self.store.ingest(
+            [{"message_uid": "u-a2", "role": "assistant", "content": "v2 of the reply"}]
+        )
         self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-version")
         report = self.store.verify()
         self.assertTrue(report["ok"], report)
@@ -145,7 +158,9 @@ class SchemaRepairTests(kit.StoreTestCase):
         (directory / DB_FILENAME).write_bytes(b"this is definitely not a sqlite database" * 10)
         with self.assertRaises(CorruptStoreError) as ctx:
             ContextStore.for_session(self.home, self.session_id)
-        self.assertIn(ctx.exception.code, {"sqlite_open_failed", "schema_missing", "schema_incomplete"})
+        self.assertIn(
+            ctx.exception.code, {"sqlite_open_failed", "schema_missing", "schema_incomplete"}
+        )
 
     def test_truncated_database_is_detected(self) -> None:
         store = self.open_store()
@@ -217,7 +232,9 @@ class RetentionHelpersTests(kit.StoreTestCase):
 
         purged = ContextStore.purge_session(self.home, "session-a")
         self.assertTrue(purged["removed"])
-        self.assertEqual([item["session_id"] for item in ContextStore.list_sessions(self.home)], ["session-b"])
+        self.assertEqual(
+            [item["session_id"] for item in ContextStore.list_sessions(self.home)], ["session-b"]
+        )
         self.assertTrue(ContextStore.purge_session(self.home, "session-a")["removed"] is False)
 
     def test_purge_refuses_while_a_writer_holds_the_lock(self) -> None:

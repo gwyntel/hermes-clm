@@ -182,7 +182,7 @@ def _strip_fence(text: str) -> str:
         return stripped
     body = stripped.split("\n", 1)[1] if "\n" in stripped else ""
     if body.rstrip().endswith("```"):
-        body = body.rstrip()[: -3]
+        body = body.rstrip()[:-3]
     first_line, _, remainder = body.partition("\n")
     if first_line.strip().lower() in {"json", "json5", ""}:
         return remainder.strip() or body.strip()
@@ -264,7 +264,9 @@ class AuxCompressor:
         """
 
         if not self.enabled:
-            return self._fail("aux_disabled", "auxiliary compression is disabled (clm.aux_enabled false)")
+            return self._fail(
+                "aux_disabled", "auxiliary compression is disabled (clm.aux_enabled false)"
+            )
 
         requested = [str(span_id) for span_id in span_ids]
         if not requested:
@@ -294,7 +296,9 @@ class AuxCompressor:
             record = service.retrieve(span_id)
             payload = _as_mapping(record)
             if payload is None:
-                return self._fail("service_error", f"retrieve({span_id}) returned an unsupported result")
+                return self._fail(
+                    "service_error", f"retrieve({span_id}) returned an unsupported result"
+                )
             if payload.get("ok") is False:
                 code = _first_error_code(payload) or "span_unavailable"
                 return self._fail(code, f"span {span_id} is not retrievable")
@@ -444,7 +448,9 @@ class AuxCompressor:
         for span in spans:
             text = str(span["text"])
             if len(text) > self.limits.prompt_span_chars:
-                text = text[: self.limits.prompt_span_chars] + "\n…[span truncated for this request]"
+                text = (
+                    text[: self.limits.prompt_span_chars] + "\n…[span truncated for this request]"
+                )
             block = (
                 f"\nSPAN {span['span_id']} role={span['role']} origin={span['origin']} "
                 f"chars={len(str(span['text']))}\n{text}\nEND SPAN {span['span_id']}"
@@ -501,9 +507,7 @@ class AuxCompressor:
             if span_id in seen:
                 return [], self._fail("aux_invalid_output", f"duplicate rewrite for span {span_id}")
             if not isinstance(replacement, str) or not replacement.strip():
-                return [], self._fail(
-                    "aux_invalid_output", f"rewrite for span {span_id} is empty"
-                )
+                return [], self._fail("aux_invalid_output", f"rewrite for span {span_id} is empty")
             if len(replacement.encode("utf-8")) > self.limits.max_rewrite_bytes:
                 return [], self._fail(
                     "aux_invalid_output",
@@ -609,8 +613,7 @@ def _review_text(
         before = len(str(span.get("text", "")))
         after = len(item["text"])
         lines.append(
-            f"- {item['span_id']}: {before} -> {after} chars "
-            f"({_percent_change(before, after)})"
+            f"- {item['span_id']}: {before} -> {after} chars ({_percent_change(before, after)})"
         )
     lines.append(
         "Accept with clm_accept_proposal (proposal_id + proposal_sha256 + base_revision), "

@@ -85,7 +85,10 @@ def test_every_handler_returns_a_json_string(handlers: ToolHandlers):
     args_by_tool = {
         "clm_status": {},
         "clm_inspect": {},
-        "clm_stage": {"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1},
+        "clm_stage": {
+            "operations": [{"kind": "drop", "span_ids": ["m-0001"]}],
+            "expected_revision": 1,
+        },
         "clm_commit": {"txn_id": "t-1", "expected_revision": 1},
         "clm_discard": {"txn_id": "t-1"},
         "clm_revert": {"target_revision": 1, "expected_revision": 1},
@@ -184,7 +187,9 @@ def test_stage_accepts_closed_kinds(handlers: ToolHandlers, service: FakeService
 
 def test_pin_kind_must_use_the_pin_tool(handlers: ToolHandlers, service: FakeService):
     payload = load(
-        handlers.stage({"operations": [{"kind": "pin", "span_ids": ["m-0001"]}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "pin", "span_ids": ["m-0001"]}], "expected_revision": 1}
+        )
     )
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "wrong_tool"
@@ -194,7 +199,9 @@ def test_pin_kind_must_use_the_pin_tool(handlers: ToolHandlers, service: FakeSer
 
 def test_boundary_kind_must_use_the_boundary_tool(handlers: ToolHandlers):
     payload = load(
-        handlers.stage({"operations": [{"kind": "boundary", "span_ids": []}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "boundary", "span_ids": []}], "expected_revision": 1}
+        )
     )
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "wrong_tool"
@@ -202,7 +209,9 @@ def test_boundary_kind_must_use_the_boundary_tool(handlers: ToolHandlers):
 
 def test_unknown_kind_is_rejected(handlers: ToolHandlers):
     payload = load(
-        handlers.stage({"operations": [{"kind": "summarize", "span_ids": ["m-0001"]}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "summarize", "span_ids": ["m-0001"]}], "expected_revision": 1}
+        )
     )
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "invalid_field"
@@ -210,7 +219,9 @@ def test_unknown_kind_is_rejected(handlers: ToolHandlers):
 
 def test_rewrite_requires_replacement(handlers: ToolHandlers):
     payload = load(
-        handlers.stage({"operations": [{"kind": "rewrite", "span_ids": ["m-0001"]}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "rewrite", "span_ids": ["m-0001"]}], "expected_revision": 1}
+        )
     )
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "missing_field"
@@ -233,9 +244,7 @@ def test_unknown_operation_field_is_rejected(handlers: ToolHandlers):
     payload = load(
         handlers.stage(
             {
-                "operations": [
-                    {"kind": "drop", "span_ids": ["m-0001"], "provider": "openrouter"}
-                ],
+                "operations": [{"kind": "drop", "span_ids": ["m-0001"], "provider": "openrouter"}],
                 "expected_revision": 1,
             }
         )
@@ -278,7 +287,10 @@ def test_oversized_replacement_is_rejected(handlers: ToolHandlers):
 def test_malformed_span_id_is_rejected(handlers: ToolHandlers):
     payload = load(
         handlers.stage(
-            {"operations": [{"kind": "drop", "span_ids": ["../../etc/passwd"]}], "expected_revision": 1}
+            {
+                "operations": [{"kind": "drop", "span_ids": ["../../etc/passwd"]}],
+                "expected_revision": 1,
+            }
         )
     )
     assert payload["ok"] is False
@@ -288,7 +300,10 @@ def test_malformed_span_id_is_rejected(handlers: ToolHandlers):
 def test_duplicate_span_ids_in_one_operation_are_rejected(handlers: ToolHandlers):
     payload = load(
         handlers.stage(
-            {"operations": [{"kind": "drop", "span_ids": ["m-0001", "m-0001"]}], "expected_revision": 1}
+            {
+                "operations": [{"kind": "drop", "span_ids": ["m-0001", "m-0001"]}],
+                "expected_revision": 1,
+            }
         )
     )
     assert payload["ok"] is False
@@ -301,7 +316,9 @@ def test_duplicate_span_ids_in_one_operation_are_rejected(handlers: ToolHandlers
 
 def test_stage_generates_a_txn_id_when_absent(handlers: ToolHandlers, service: FakeService):
     payload = load(
-        handlers.stage({"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1}
+        )
     )
     assert payload["ok"] is True
     assert payload["txn_id"].startswith("tool-")
@@ -329,14 +346,18 @@ def test_malformed_txn_id_is_rejected(handlers: ToolHandlers):
     assert payload["errors"][0]["code"] == "invalid_field"
 
 
-def test_service_rejection_carries_a_plain_error_string(handlers: ToolHandlers, service: FakeService):
+def test_service_rejection_carries_a_plain_error_string(
+    handlers: ToolHandlers, service: FakeService
+):
     service.stage_result = {
         "ok": False,
         "revision": 9,
         "errors": [{"code": "stale_revision", "message": "expected revision 9"}],
     }
     payload = load(
-        handlers.stage({"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1}
+        )
     )
     assert payload["error"] == "expected revision 9"
     assert payload["errors"][0]["code"] == "stale_revision"
@@ -350,7 +371,9 @@ def test_stage_surfaces_a_stale_revision_rejection(handlers: ToolHandlers, servi
         "receipts": [],
     }
     payload = load(
-        handlers.stage({"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1})
+        handlers.stage(
+            {"operations": [{"kind": "drop", "span_ids": ["m-0001"]}], "expected_revision": 1}
+        )
     )
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "stale_revision"
@@ -372,7 +395,9 @@ def test_discard_returns_ok(handlers: ToolHandlers, service: FakeService):
     assert service.kwargs_for("discard") == {"txn_id": "txn-1"}
 
 
-def test_revert_records_a_new_revision_not_a_truncation(handlers: ToolHandlers, service: FakeService):
+def test_revert_records_a_new_revision_not_a_truncation(
+    handlers: ToolHandlers, service: FakeService
+):
     payload = load(handlers.revert({"target_revision": 1, "expected_revision": 4}))
     assert payload["ok"] is True
     assert payload["revision"] == 5
@@ -455,7 +480,9 @@ def test_propose_without_aux_client_is_a_clear_error(handlers: ToolHandlers):
 
 def test_accept_proposal_requires_a_full_hash(handlers: ToolHandlers):
     payload = load(
-        handlers.accept_proposal({"proposal_id": "p1", "proposal_sha256": "abc", "base_revision": 1})
+        handlers.accept_proposal(
+            {"proposal_id": "p1", "proposal_sha256": "abc", "base_revision": 1}
+        )
     )
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "invalid_field"

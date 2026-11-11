@@ -12,7 +12,9 @@ from hermes_clm.projection import project
 def test_returned_rows_are_independent_of_the_request():
     history = coding_turns()
     request = assemble(history)
-    snapshot = snapshot_for(history, [FakeOperation(kind="rewrite", span_ids=("a1",), replacement="short")])
+    snapshot = snapshot_for(
+        history, [FakeOperation(kind="rewrite", span_ids=("a1",), replacement="short")]
+    )
 
     result = project(request, conversation_messages=history, snapshot=snapshot)
 
@@ -51,7 +53,9 @@ def test_caller_mutation_cannot_affect_a_later_projection():
 def test_projection_never_writes_to_the_snapshot_or_its_spans():
     history = coding_turns()
     request = assemble(history)
-    snapshot = snapshot_for(history, [FakeOperation(kind="rewrite", span_ids=("a1",), replacement="short")])
+    snapshot = snapshot_for(
+        history, [FakeOperation(kind="rewrite", span_ids=("a1",), replacement="short")]
+    )
     before = copy.deepcopy(snapshot)
 
     project(request, conversation_messages=history, snapshot=snapshot)
@@ -106,7 +110,11 @@ def test_projection_needs_no_store_writes_and_no_aux_calls():
 
 def test_structured_content_survives_deep_copy():
     parts = [{"type": "text", "text": "hello"}]
-    history = [message("user", "q", "u1"), message("assistant", parts, "a1"), message("user", "q2", "u2")]
+    history = [
+        message("user", "q", "u1"),
+        message("assistant", parts, "a1"),
+        message("user", "q2", "u2"),
+    ]
     request = assemble(history)
     snapshot = snapshot_for(history, [], revision=1)
 

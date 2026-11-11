@@ -98,7 +98,7 @@ def test_every_defect_has_a_code_path_in_the_fixture():
     source = "\n".join(p.read_text() for p in FIXTURE.rglob("*.py"))
     for probe in PROBES:
         assert f'"{probe["id"]}"' in source, (
-            f"{probe['id']} is catalogued but the fixture has no `D.active(\"{probe['id']}\")` path"
+            f'{probe["id"]} is catalogued but the fixture has no `D.active("{probe["id"]}")` path'
         )
 
 
