@@ -241,11 +241,18 @@ class OffloadCandidate:
     tokens: int
     protected: bool = False
     pinned: bool = False
+    #: Store-facing span ids for this group (same order as ``uids``).
+    span_ids: tuple[str, ...] = ()
 
     @property
     def eligible(self) -> bool:
         """Whether this group may be offloaded at all."""
         return bool(self.uids) and not self.protected and not self.pinned and self.tokens > 0
+
+    @property
+    def edit_span_ids(self) -> tuple[str, ...]:
+        """Ids to put in an ``offload`` operation: span ids, falling back to uids."""
+        return self.span_ids or self.uids
 
 
 def plan_offload(

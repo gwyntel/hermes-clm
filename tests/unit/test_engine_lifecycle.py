@@ -8,6 +8,7 @@ import sys
 import textwrap
 
 import pytest
+
 from _clm_fakes import (
     StoreFactory,
     assemble,
@@ -15,7 +16,6 @@ from _clm_fakes import (
     make_store,
     snapshot_for,
 )
-
 from hermes_clm import budget as budget_module
 from hermes_clm.engine import (
     CLMEngine,
@@ -124,12 +124,50 @@ def test_importing_the_package_does_not_import_hermes():
     assert "agent" not in sys.modules
 
 
-def test_default_store_factory_is_lazy_and_import_error_is_contained():
-    module = sys.modules[default_store_factory.__module__]
-    source = open(str(module.__file__), encoding="utf-8").read()
-    assert "importlib.import_module" in source
-    with pytest.raises(ModuleNotFoundError):
-        default_store_factory("/tmp/home", "sess")
+def test_default_store_factory_is_lazy_and_contains_errors(tmp_path):
+    """The factory imports the store on call (not at import) and real errors stay contained."""
+    # 1. Lazy: importing the engine does not import the store package.
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "src")
+        import hermes_clm.engine  # noqa: F401
+        assert "hermes_clm.store" not in sys.modules, sorted(sys.modules)
+        print("ok")
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd="."
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
+
+    # 2. Real open: the store exists on this branch, so opening must succeed.
+    store = default_store_factory(str(tmp_path / "home"), "sess-lazy")
+    try:
+        assert store.session_id == "sess-lazy"
+        assert store.directory.is_dir()
+        assert store.status()["ok"] is True
+    finally:
+        store.close()
+
+    # 3. Error containment: a bad home raises from the store, and the engine
+    #    absorbs it into detached mode instead of breaking the turn.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory", encoding="utf-8")
+    from hermes_clm.errors import CLMError
+
+    with pytest.raises((CLMError, OSError)):
+        default_store_factory(str(blocker), "sess-unopenable")
+
+    engine = CLMEngine(hermes_home=str(blocker), store_factory=default_store_factory)
+    engine.on_session_start("sess-unopenable")
+    assert engine.store is None
+    assert engine.get_status()["last_error"]
+    assert (
+        engine.select_context(assemble(coding_turns()), conversation_messages=coding_turns())
+        is None
+    )
 
 
 def test_store_is_not_opened_before_a_session_starts():
@@ -447,3 +485,379 @@ def test_store_snapshot_corruption_degrades_to_identity():
 
     assert engine.select_context(assemble(history), conversation_messages=history) is None
     assert engine.get_status()["last_error"] == "snapshot_unavailable"
+
+
+# ------------------------------------------------------------------ config seam
+
+
+def test_engine_accepts_the_plugins_flat_clm_mapping():
+    """``plugin.build_engine`` passes ``dict(read_clm_config())``: flat ``clm.*`` keys."""
+    raw = {
+        "clm.reserve_tokens": 512,
+        "clm.pressure_thresholds": [0.5, 0.9],
+        "clm.aux_enabled": False,
+        "clm.aux_timeout_seconds": 12.5,
+        "clm.max_rewrite_bytes": 99,
+        "clm.max_aux_spans": 3,
+        "clm.max_operations": 2,
+    }
+    engine = CLMEngine(config=raw, store_factory=StoreFactory())
+
+    assert isinstance(engine.config, EngineConfig)
+    assert engine.config.reserve_tokens == 512
+    assert engine.config.pressure_thresholds == (0.5, 0.9)
+    assert engine.config.aux_enabled is False
+    assert engine.config.max_rewrite_bytes == 99
+    # The raw mapping survives for ToolLimits, including keys EngineConfig lacks.
+    assert engine._tool_limits.max_rewrite_bytes == 99
+    assert engine._tool_limits.max_aux_spans == 3
+    assert engine._tool_limits.max_operations == 2
+    # And the engine is usable: the aux compressor is built from that config,
+    # with the compression task only and no provider surface of its own.
+    assert engine.aux.enabled is False
+    metrics = engine.aux.metrics()
+    assert metrics["task"] == "compression"
+    assert metrics["timeout_seconds"] == 12.5
+    assert not any(key in json.dumps(metrics) for key in ("model", "provider", "base_url"))
+    assert engine.get_tool_schemas()
+    assert engine.get_status()["config"]["reserve_tokens"] == 512
+
+
+def test_engine_rejects_model_or_provider_config():
+    with pytest.raises(ValueError):
+        CLMEngine(config={"clm.model": "gpt"}, store_factory=StoreFactory())
+
+
+def test_engine_accepts_an_engine_config_object_unchanged():
+    config = EngineConfig(reserve_tokens=777)
+    engine = CLMEngine(config=config, store_factory=StoreFactory())
+    assert engine.config is config
+    assert engine._tool_limits.max_rewrite_bytes == config.max_rewrite_bytes
+
+
+# --------------------------------------------------------- default store config
+
+
+def test_default_store_factory_applies_engine_config_to_the_store(tmp_path):
+    config = EngineConfig(
+        max_retrieve_bytes=1234,
+        max_rewrite_bytes=4321,
+        max_aux_spans=3,
+        archive_redact=False,
+        retention_sessions=5,
+    )
+    store = default_store_factory(str(tmp_path / "home"), "sess-config", config=config)
+    try:
+        status = store.status()
+        assert status["limits"]["max_retrieve_bytes"] == 1234
+        assert status["limits"]["max_rewrite_bytes"] == 4321
+        assert status["limits"]["max_aux_spans"] == 3
+        # Redaction is a store-side decision, so the engine's flag must reach it.
+        assert status["redaction"]["enabled"] is False
+    finally:
+        store.close()
+
+
+def test_engine_with_the_real_factory_opens_a_store_with_its_limits(tmp_path):
+    engine = CLMEngine(
+        config={"clm.max_retrieve_bytes": 2048, "clm.archive_redact": False},
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start("sess-real")
+
+    assert engine.store is not None
+    try:
+        status = engine.tool_service().status()
+        assert status["limits"]["max_retrieve_bytes"] == 2048
+        assert status["redaction"]["enabled"] is False
+        assert status["revision"] >= 1  # a fresh store starts at revision 1
+    finally:
+        engine.on_session_end("sess-real", [])
+
+
+def test_custom_store_factories_keep_the_three_argument_protocol():
+    factory = StoreFactory()
+    engine = CLMEngine(store_factory=factory, hermes_home="/tmp/hermes-home")
+    engine.on_session_start("sess-custom")
+    assert factory.opened == [
+        {"hermes_home": "/tmp/hermes-home", "session_id": "sess-custom", "read_only": False}
+    ]
+
+
+# --------------------------------------------------------------- service scope
+
+
+def test_service_for_session_is_scoped_to_this_engine():
+    engine, factory = started_engine()
+    service = engine.service_for_session()
+    assert isinstance(service, ToolService)
+    assert service.revision == factory.store.status()["revision"]
+
+    assert engine.service_for_session("sess-1") is not None
+    # Another session never resolves: no cross-session reads, ever.
+    assert engine.service_for_session("sess-other") is None
+    assert [entry["session_id"] for entry in factory.opened] == ["sess-1"]
+
+
+def test_service_for_session_attaches_the_store_lazily():
+    engine, factory = engine_for()
+    assert engine.store is None
+    assert factory.opened == []
+
+    service = engine.service_for_session("sess-tools")
+
+    assert service is not None
+    assert engine.session_id == "sess-tools"
+    assert factory.opened[0]["session_id"] == "sess-tools"
+    # A second, different session is refused even though the engine is attached.
+    assert engine.service_for_session("sess-other") is None
+
+
+def test_service_for_session_returns_none_when_the_store_cannot_open():
+    def exploding_factory(hermes_home, session_id, *, read_only=False):
+        raise OSError("disk on fire")
+
+    engine = CLMEngine(store_factory=exploding_factory, session_id="sess-bad")
+    assert engine.service_for_session() is None
+    assert "OSError" in engine.get_status()["last_error"]
+
+
+# ------------------------------------------------------------ tool service API
+
+
+class _RecordingStore:
+    """Store stand-in exposing the proposal/operator surface ToolService delegates to."""
+
+    def __init__(self, revision: int = 3) -> None:
+        self.revision = revision
+        self.calls: list[tuple[str, dict]] = []
+        self.proposal = {
+            "proposal_id": "prop_1",
+            "proposal_sha256": "a" * 64,
+            "base_revision": revision,
+            "origin": "aux",
+            "operations": [{"kind": "rewrite", "span_ids": ["t1"], "replacement": "short"}],
+            "span_ids": ["t1"],
+            "created_revision": revision,
+        }
+        self.stage_result = {"ok": True, "revision": revision, "errors": [], "receipts": []}
+
+    def status(self):
+        return {"ok": True, "revision": self.revision}
+
+    def create_proposal(self, operations, *, base_revision):
+        self.calls.append(("create_proposal", {"operations": operations, "base": base_revision}))
+        return dict(self.proposal, base_revision=base_revision)
+
+    def accept_proposal(self, **kwargs):
+        self.calls.append(("accept_proposal", dict(kwargs)))
+        return dict(self.stage_result)
+
+    def unpin(self, span_id, *, expected_revision, txn_id, actor_origin):
+        self.calls.append(
+            (
+                "unpin",
+                {
+                    "span_id": span_id,
+                    "expected_revision": expected_revision,
+                    "txn_id": txn_id,
+                    "actor_origin": actor_origin,
+                },
+            )
+        )
+        self.revision = expected_revision + 1
+        return {
+            "ok": True,
+            "revision": self.revision,
+            "applied": [{"span_id": span_id, "kind": "unpin", "effect": "applied"}],
+            "errors": [],
+        }
+
+
+def _service_with(store):
+    engine = CLMEngine(store_factory=lambda home, session, read_only=False: store)
+    engine.on_session_start("sess-props")
+    return engine.tool_service(), store
+
+
+def test_service_revision_reads_the_store_not_the_last_projection():
+    history = coding_turns()
+    engine, factory = started_engine(snapshot_for(history, [], revision=4))
+    engine.select_context(assemble(history), conversation_messages=history)
+    assert engine.get_status()["revision"] == 4  # cached projection revision
+
+    # The store moves on; the tool surface must report the live head.
+    factory.store._snapshot.revision = 7
+
+    assert engine.tool_service().revision == 7
+    assert engine.tool_service().status()["revision"] == 7
+
+
+def test_service_revision_is_zero_without_a_store():
+    engine = CLMEngine(store_factory=StoreFactory())
+    assert engine.tool_service().revision == 0
+
+
+def test_service_delegates_proposal_creation_and_acceptance():
+    from hermes_clm.auxiliary import canonical_proposal_sha256
+
+    service, store = _service_with(_RecordingStore(revision=3))
+    operations = [{"kind": "rewrite", "span_ids": ["t1"], "replacement": "short"}]
+
+    proposal = service.create_proposal(operations, base_revision=3)
+
+    assert proposal["proposal_id"] == "prop_1"
+    assert proposal["base_revision"] == 3
+    assert store.calls[0][1]["base"] == 3
+    # The reviewed hash is the aux canonical form; the store digest rides beside it.
+    aux_hash = canonical_proposal_sha256(operations, base_revision=3)
+    assert proposal["proposal_sha256"] == aux_hash
+    assert proposal["store_proposal_sha256"] == "a" * 64
+    # Aux-originated operations are stamped for the store's actor check.
+    assert store.calls[0][1]["operations"] == [{**operations[0], "actor_origin": "aux"}]
+
+    accepted = service.accept_proposal(
+        proposal_id="prop_1", proposal_sha256=aux_hash, base_revision=3, txn_id="txn-acc"
+    )
+    assert accepted["ok"] is True
+    assert store.calls[1][0] == "accept_proposal"
+    assert store.calls[1][1]["txn_id"] == "txn-acc"
+    # The aux digest is translated to the digest the store recorded.
+    assert store.calls[1][1]["proposal_sha256"] == "a" * 64
+
+
+def test_service_create_proposal_defaults_to_the_live_revision():
+    service, store = _service_with(_RecordingStore(revision=5))
+    service.create_proposal([{"kind": "rewrite", "span_ids": ["t1"], "replacement": "x"}])
+    assert store.calls[0][1]["base"] == 5
+
+
+def test_service_unpin_is_operator_only_and_batches_spans():
+    service, store = _service_with(_RecordingStore(revision=2))
+
+    refused = service.unpin(["t1"], expected_revision=2, txn_id="txn-a", actor_origin="agent")
+    assert refused["ok"] is False
+    assert refused["errors"][0]["code"] == "pin_authority"
+    assert store.calls == []
+
+    applied = service.unpin(
+        ["t1", "t2"], expected_revision=2, txn_id="txn-op", actor_origin="operator"
+    )
+    assert applied["ok"] is True
+    assert applied["revision"] == 4
+    assert [call[1]["span_id"] for call in store.calls] == ["t1", "t2"]
+    assert [call[1]["txn_id"] for call in store.calls] == ["txn-op.0", "txn-op.1"]
+    assert [call[1]["expected_revision"] for call in store.calls] == [2, 3]
+    assert {call[1]["actor_origin"] for call in store.calls} == {"operator"}
+
+
+# ---------------------------------------------------------------- tool dispatch
+
+
+def test_engine_advertises_the_clm_tools():
+    engine, _ = started_engine()
+    names = {schema["name"] for schema in engine.get_tool_schemas()}
+    assert {
+        "clm_status",
+        "clm_inspect",
+        "clm_stage",
+        "clm_commit",
+        "clm_discard",
+        "clm_revert",
+        "clm_search",
+        "clm_retrieve",
+        "clm_pin",
+        "clm_boundary",
+        "clm_propose_compression",
+        "clm_accept_proposal",
+    } <= names
+    for schema in engine.get_tool_schemas():
+        assert "parameters" in schema and "description" in schema
+        assert not any(key in json.dumps(schema) for key in ("api_key", "base_url"))
+
+
+def test_tool_dispatch_status_reads_the_live_store_revision():
+    history = coding_turns()
+    engine, factory = started_engine(snapshot_for(history, [], revision=4))
+    factory.store._snapshot.revision = 6
+
+    payload = json.loads(engine.handle_tool_call("clm_status", {}))
+
+    assert payload["ok"] is True
+    assert payload["revision"] == 6
+    assert payload["engine"] == "hermes-clm"
+    assert "aux" in payload
+
+
+def test_tool_dispatch_stage_and_commit_go_through_the_scoped_service():
+    history = coding_turns()
+    engine, factory = started_engine(snapshot_for(history, [], revision=1))
+
+    staged = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [{"kind": "drop", "span_ids": ["a1", "t1"]}],
+                "expected_revision": 1,
+                "txn_id": "txn-tool",
+            },
+            messages=history,
+        )
+    )
+    assert staged["ok"] is True
+    assert staged["txn_id"] == "txn-tool"
+    committed = json.loads(
+        engine.handle_tool_call("clm_commit", {"txn_id": "txn-tool", "expected_revision": 1})
+    )
+
+    assert committed["ok"] is True
+    assert factory.store.commits == [{"txn_id": "txn-tool", "expected_revision": 1}]
+    assert factory.store.staged[0][3] == "agent"
+    # messages=... is archived before dispatch so a mid-turn call sees its rows.
+    assert factory.store.ingest_calls[0] == history
+
+
+def test_tool_dispatch_never_crosses_sessions():
+    engine, factory = started_engine(snapshot_for(coding_turns()))
+    payload = json.loads(engine.handle_tool_call("clm_status", {}, session_id="sess-other"))
+    assert payload["ok"] is False
+    assert payload["errors"][0]["code"] == "no_session"
+    assert [entry["session_id"] for entry in factory.opened] == ["sess-1"]
+
+
+def test_tool_dispatch_returns_json_errors_and_never_raises():
+    engine, _ = started_engine()
+    unknown = json.loads(engine.handle_tool_call("clm_nope", {}))
+    assert unknown["ok"] is False and "error" in unknown
+
+    # A handler that explodes is still a JSON reply, not an exception.
+    class Exploding:
+        name = "clm_status"
+
+        @property
+        def schema(self):
+            return {"name": self.name, "description": "x", "parameters": {}}
+
+        def handler(self, *_args, **_kwargs):
+            raise RuntimeError("boom at /private/store.sqlite3")
+
+    engine._tool_specs = [Exploding()]
+    broken = json.loads(engine.handle_tool_call("clm_status", {}))
+    assert broken["ok"] is False
+    assert "RuntimeError" in broken["error"]
+
+    # Bad argument shapes are reported, not raised.
+    engine._tool_specs = None
+    assert json.loads(engine.handle_tool_call("clm_stage", "not-json"))["ok"] is False
+    assert json.loads(engine.handle_tool_call("clm_stage", {"operations": "x"}))["ok"] is False
+
+
+def test_clone_shares_the_aux_compressor_and_config_without_deepcopy():
+    engine, _ = started_engine()
+    clone = engine.clone_for_agent()
+    assert clone.aux is engine.aux
+    assert clone.config is engine.config
+    assert clone._store_factory is engine._store_factory
+    assert clone._raw_config == engine._raw_config
+    assert clone._raw_config is not engine._raw_config  # a copy, not shared mutation
+    assert clone.store is None
