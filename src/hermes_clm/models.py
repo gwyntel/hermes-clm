@@ -201,7 +201,16 @@ def origin_for_role(role: str) -> SpanOrigin:
 # ---------------------------------------------------------------------------
 
 _OP_FIELDS = frozenset(
-    {"kind", "span_ids", "replacement", "actor_origin", "provenance", "expected_revision", "txn_id"}
+    {
+        "kind",
+        "span_ids",
+        "replacement",
+        "label",
+        "actor_origin",
+        "provenance",
+        "expected_revision",
+        "txn_id",
+    }
 )
 
 _TXN_ID_MAX = 128
@@ -269,6 +278,16 @@ class EditOperation(_Immutable):
                     "rewrite requires a text replacement (multimodal content is not rewritable)",
                     code="invalid_replacement",
                 )
+        elif self.kind is EditKind.BOUNDARY:
+            # A boundary marker may carry an operator/tool label.  It is stored
+            # as the operation's ``replacement`` field (persisted provenance),
+            # never applied to a span, and therefore never becomes active
+            # content.  Only strings are accepted; non-strings are refused.
+            if self.replacement is not None and not isinstance(self.replacement, str):
+                raise ValidationError(
+                    "boundary label/replacement must be a string",
+                    code="invalid_replacement",
+                )
         else:
             if self.replacement is not None:
                 raise ValidationError(
@@ -291,7 +310,29 @@ class EditOperation(_Immutable):
             validate_txn_id(self.txn_id)
         if not isinstance(self.provenance, Mapping):
             raise ValidationError("provenance must be a mapping", code="invalid_provenance")
-        object.__setattr__(self, "provenance", _frozen_map(self.provenance))
+        if self.kind is EditKind.BOUNDARY and self.replacement is not None:
+            # Record the boundary label in the persisted provenance as well as
+            # in ``replacement`` so it survives every serialization path and is
+            # visible as label metadata, not as span content.
+            provenance = dict(self.provenance)
+            existing = provenance.get("label")
+            if existing is not None and existing != self.replacement:
+                raise ValidationError(
+                    "boundary provenance label conflicts with replacement label",
+                    code="invalid_provenance",
+                )
+            provenance["label"] = self.replacement
+            object.__setattr__(self, "provenance", _frozen_map(provenance))
+        else:
+            object.__setattr__(self, "provenance", _frozen_map(self.provenance))
+
+    @property
+    def label(self) -> str | None:
+        """Boundary marker label, if any (never active content)."""
+
+        if self.kind is EditKind.BOUNDARY:
+            return self.replacement
+        return None
 
     # -- serialization ---------------------------------------------------
     def to_payload(self) -> dict[str, Any]:
@@ -340,10 +381,24 @@ class EditOperation(_Immutable):
             raise ValidationError(
                 f"unknown edit kind: {raw.get('kind')!r}", code="invalid_kind"
             ) from exc
+        replacement = raw.get("replacement")
+        label = raw.get("label")
+        if label is not None:
+            if kind is not EditKind.BOUNDARY:
+                raise ValidationError(
+                    f"{kind.value} does not accept a label payload",
+                    code="invalid_replacement",
+                )
+            if replacement is not None:
+                raise ValidationError(
+                    "boundary accepts either replacement or label, not both",
+                    code="invalid_replacement",
+                )
+            replacement = label
         return cls(
             kind=kind,
             span_ids=span_ids,
-            replacement=raw.get("replacement"),
+            replacement=replacement,
             actor_origin=raw.get("actor_origin", ActorOrigin.AGENT),
             provenance=raw.get("provenance") or {},
             expected_revision=raw.get("expected_revision"),
