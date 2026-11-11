@@ -1,0 +1,79 @@
+# Hermes CLM architecture
+
+## Control flow
+
+```text
+raw Hermes history ──ingest/redact──> per-session SQLite archive
+                                      │  ▲
+agent tools ──validate/stage/commit───┘  │ expected-revision CAS
+                                      │  │ revision N
+                                      ▼  │
+request clones ──UID/subsequence──> projection ──> provider request
+```
+
+Main agent chooses operations. Auxiliary model only proposes selected-span compression. Store validates and persists. Host owns raw transcript and final wire sanitization.
+
+## Tool surface (contract)
+
+Names may share one `clm_context` dispatcher or separate schemas; behavior is fixed:
+
+- `status`: revision, budget/pressure, active/offloaded/pinned counts, last error, store health, aux metrics.
+- `inspect`: bounded active-context view with stable span IDs, roles, origins, token estimates; never another session.
+- `stage`: keep/drop/rewrite/pin/offload/restore/boundary operations, `expected_revision`, idempotency key. Pin is one-way for agent.
+- `commit` / `discard`: explicit transaction lifecycle; commit validates again inside write txn.
+- `revert`: new revision restoring a prior projection subject to current pins and host-present UIDs.
+- `search` / `retrieve`: bounded, paginated archive access by current-session span ID/query; no arbitrary paths/session selectors.
+- `propose_compression`: selected editable span IDs; bounded aux call; returns immutable proposal and exact review text.
+- `accept_proposal`: requires proposal ID + hash + base revision; stages only, then normal `commit`.
+
+All handlers return JSON strings, reject unknown fields, and never expose provider/model fallback configuration.
+
+## Store contract
+
+Preferred public types (store delegate owns exact definitions):
+
+- `SpanKey`: UID plus optional absorbed-UID alias; ephemeral rows are not editable.
+- `EditOperation`: `{kind, span_ids, replacement?, expected_revision, txn_id, actor_origin}`; closed kinds only.
+- `ProjectionResult`: messages plus applied/inert/conflicting operation diagnostics.
+- `Proposal`: immutable structured operations + `proposal_id`, `proposal_sha256`, `base_revision`, `origin=aux`.
+- `Revision`: monotonically increasing integer; revert references earlier revision without deleting later audit.
+
+One SQLite transaction covers operation append, archive additions, revision bump, idempotency outcome and audit event. Derived index writes happen after commit. SQL triggers prevent archive and protected-row UPDATE/DELETE. Redaction precedes immutable archival. Media is content-addressed and verified before use.
+
+## Projection invariants
+
+1. Pure function of current host history + committed revision. No wall clock, aux call, token-dependent selection or store writes.
+2. System, user, prefill, current-user and newest-tool rows pass through exactly.
+3. Ordered unique subsequence alignment; unknown rows pass through; ambiguity affecting any op fails whole projection.
+4. No unknown-role coercion, role inference from text, privileged-message synthesis, or persisted UID requirement bypass.
+5. Complete tool groups only; group edits preserve IDs and call/result coverage.
+6. Multimodal and unknown content-part types are protected/refused, never flattened.
+7. Fresh deep copies returned; caller mutation cannot affect store or later projection.
+8. Structural store corruption ⇒ return `None`. Derived-index corruption ⇒ rebuild index. Never return a guessed subset.
+9. Origin survives rewrite: model and aux summaries remain untrusted, schema-like labels; never operator authority.
+10. Offload stubs are non-imperative and contain only span ID/hash metadata.
+
+## Token pressure and cache
+
+- Reuse Hermes model/context-length state and rough estimators. Calibrate estimates against real `usage.prompt_tokens` with bounded ratio; record real cache read/write fields when supplied.
+- Default configurable reserve and pressure tiers; `context_status`/tool receipts expose the same estimate used for edit validation.
+- Existing Hermes pressure notices remain intact because newest tool output is protected.
+- Routine projection does not inject changing status rows (would destroy cache). Task-boundary tool creates explicit agent-chosen snapshots/audit markers.
+- Record before/after estimated tokens for every edit, aux usage/latency when available, and revision snapshots sufficient for prefix-reuse analysis.
+
+## Compression and lifecycle
+
+- `should_compress=False`, `should_compress_preflight=False`, default pruning no-op.
+- Manual `/compress`: commit current valid projection only; if no reduction, report no changes.
+- Overflow (`bypass_cooldown=True`): archive first, then commit projection; if needed, deterministically offload oldest unpinned tool groups until reserve fits. Never delete system/user/pinned content.
+- Lazy initialization from host `session_id`; no reliance on `bind_session_state` or `on_session_end`.
+- `clone_for_agent()` returns a fresh engine with reopened store, never deep-copies SQLite/locks.
+- Compression boundaries carry state only through explicit `old_session_id` lifecycle; new session gets isolated copy. No lineage guessing from `conversation_id`.
+
+## Security limits
+
+Plugin cannot defend against arbitrary same-UID shell access. It can enforce tool authority, file permissions, redaction, origin preservation, CAS, idempotency and corruption detection. It cannot make self-authored instructions unpersuasive, guarantee host post-sanitizer bytes, or support child→parent retrieval until Hermes supplies lineage. These limits belong in README and benchmark reporting.
+
+## Reference host facts
+
+Verified on Hermes v0.23.0 `2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`; context-engine files matched main `2fd5066fdd9e143ee90d7d549527ea1e1e07cf5d` during research. Load-bearing paths: `agent/conversation_loop.py:1351`, `agent/turn_request_assembly.py:123`, `agent/context_engine.py:121`, `agent/tool_executor.py:1689`, `agent/auxiliary_client.py:7905`.
