@@ -35,6 +35,24 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  release-assets:
+    name: Attach distributions to the GitHub release
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+      - name: Upload release assets
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   pypi:
     name: Publish to PyPI (trusted publishing)
     needs: build
