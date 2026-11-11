@@ -1546,7 +1546,7 @@ class ContextStore:
                 raise
         return tuple(ops)
 
-    def _replay_commit(self, txn: Mapping[str, Any]) -> CommitResult:
+    def _replay_commit(self, txn: Mapping[str, Any] | sqlite3.Row) -> CommitResult:
         payload_json = txn["result_json"]
         if not payload_json:
             raise CorruptStoreError(

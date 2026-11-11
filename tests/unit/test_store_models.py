@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 from types import MappingProxyType
 
@@ -25,6 +26,40 @@ from hermes_clm.models import (
     offload_stub,
     origin_for_role,
 )
+
+
+class JsonSurfaceTests(kit.StoreTestCase):
+    """Results must survive json.dumps: tools serialise them straight to a client."""
+
+    def test_snapshot_and_results_are_json_serializable(self) -> None:
+        store = self.open_store()
+        ingest = store.ingest(kit.sample_messages())
+        snapshot = store.snapshot()
+        target = kit.StoreTestCase.span_ids(store)["u-a2"]
+        op = kit.EditOperation(kind=kit.EditKind.DROP, span_ids=(target,), actor_origin="agent")
+        staged = store.stage([op], expected_revision=snapshot.revision, txn_id="txn-json", actor_origin="agent")
+        commit = store.commit(txn_id="txn-json", expected_revision=snapshot.revision)
+
+        for payload in (
+            ingest.to_dict(),
+            snapshot.to_dict(),
+            snapshot.to_dict(include_messages=True),
+            staged.to_dict(),
+            commit.to_dict(),
+            store.status(),
+            store.inspect(),
+            store.search("refund"),
+            store.retrieve(target),
+        ):
+            json.dumps(payload)  # no default= hook: everything must be native
+
+    def test_message_is_a_read_only_proxy(self) -> None:
+        store = self.open_store()
+        store.ingest(kit.sample_messages())
+        span = next(iter(store.snapshot().spans.values()))
+        self.assertIsInstance(span.message, MappingProxyType)
+        with self.assertRaises(TypeError):
+            span.message["content"] = "mutated"  # type: ignore[index]
 
 
 class CanonicalHashTests(unittest.TestCase):

@@ -468,7 +468,9 @@ Engine (`feat/engine`):
 
 * Call `ingest(history)` once per iteration with the full host history, then `snapshot()`; both are
   cheap (`snapshot` caches per generation and verifies only the head hash).
-* `snapshot.spans` holds one `ArchivedSpan` per current UID, ordered by `seq`; `snapshot.aliases`
+* `snapshot.spans` maps `span_id → ArchivedSpan` for every **current** version (historical versions
+  are reachable through `snapshot.aliases` / `snapshot.resolve`); use `snapshot.active_spans()` for the
+  seq-ordered active tuple, `snapshot.span(id)` for an alias-resolving lookup. `snapshot.aliases`
   maps absorbed ids to current ones; `snapshot.resolve(id)` does the same. Use
   `ArchivedSpan.state`/`rewrite_text`/`effective_message()` or implement the same rules — either
   way the store's `retrieve`/`verify` must agree.
