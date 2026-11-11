@@ -89,6 +89,23 @@ class VerificationTests(kit.StoreTestCase):
         self.assertEqual(first.actions, second.actions)
         self.assertEqual(first.head_revision, second.head_revision)
 
+    def test_versioned_spans_do_not_look_like_divergence(self) -> None:
+        # historical (absorbed) versions must not be mistaken for missing state
+        self.store.ingest([{"message_uid": "u-a2", "role": "assistant", "content": "v2 of the reply"}])
+        self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-version")
+        report = self.store.verify()
+        self.assertTrue(report["ok"], report)
+        rebuilt = self.store.rebuild_state()
+        self.assertEqual(rebuilt["changed"], 0, "checkpoint already matches replayed chain")
+        self.assertTrue(self.store.verify()["ok"])
+
+    def test_recovery_removes_interrupted_index_temp_file(self) -> None:
+        tmp = self.store.directory / f".{INDEX_FILENAME}.1234.tmp"
+        tmp.write_text("partial")
+        report = recover(self.store)
+        self.assertIn("removed_stale_index_tmp", report.actions)
+        self.assertFalse(tmp.exists())
+
 
 class SchemaRepairTests(kit.StoreTestCase):
     session_id = "repair-session"

@@ -18,17 +18,15 @@ Recovery is **derived-state reconstruction**, never payload rewriting:
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from . import schema
 from .errors import CLMError, CorruptStoreError, StoreClosedError
-from .models import canonical_json, sha256_hex
 from .store import (
     DB_FILENAME,
     INDEX_FILENAME,
@@ -36,13 +34,10 @@ from .store import (
     StoreConfig,
     _assert_plain,
     _coerce_config,
-    _connect,
-    _ensure_private_dir,
     _harden_file,
     _validate_session_id,
     session_dir,
     session_key,
-    sessions_root,
 )
 
 __all__ = [
@@ -137,7 +132,15 @@ def recover(store: ContextStore) -> RecoveryReport:
     if discarded:
         actions.append("expired_staged_transactions")
 
-    # 5. Rebuild the derived index (authoritative state is SQLite).
+    # 5. Drop temp files left by an interrupted index write.
+    for stale_tmp in store.directory.glob(f".{INDEX_FILENAME}.*.tmp"):
+        try:
+            stale_tmp.unlink()
+            actions.append("removed_stale_index_tmp")
+        except OSError:
+            problems.append({"code": "index_tmp_not_removed", "path": stale_tmp.name})
+
+    # 6. Rebuild the derived index (authoritative state is SQLite).
     index = store.rebuild_index()
     actions.append("rebuilt_index" if index.get("ok") else "index_rebuild_failed")
     if not index.get("ok"):

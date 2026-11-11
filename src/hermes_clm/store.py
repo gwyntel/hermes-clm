@@ -37,7 +37,7 @@ import sqlite3
 import stat
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -62,7 +62,6 @@ from .errors import (
     ValidationError,
 )
 from .models import (
-    ALLOWED_EDIT_KINDS,
     PROTECTED_ROLES,
     ActorOrigin,
     ArchivedSpan,
@@ -80,7 +79,6 @@ from .models import (
     canonical_json,
     canonical_sha256,
     coerce_operations,
-    offload_stub,
     origin_for_role,
     sha256_hex,
     validate_span_id,
@@ -574,14 +572,15 @@ class ContextStore:
             version = schema.schema_version(cur) if tables else 0
             fresh = version == 0 or not tables
             if fresh:
+                if "meta" in tables:
+                    session_row = cur.execute("SELECT value FROM meta WHERE key = 'session_id'").fetchone()
+                    if session_row is not None and session_row[0] != self._session_id:
+                        raise CorruptStoreError(
+                            "store belongs to a different session",
+                            code="session_mismatch",
+                            details={"expected": self._session_id[:64]},
+                        )
                 schema.create_schema(cur)
-                session_row = cur.execute("SELECT value FROM meta WHERE key = 'session_id'").fetchone()
-                if session_row is not None and session_row[0] != self._session_id:
-                    raise CorruptStoreError(
-                        "store belongs to a different session",
-                        code="session_mismatch",
-                        details={"expected": self._session_id[:64]},
-                    )
                 self._db_id = sha256_hex(f"clm-db\x00{self._session_id}\x00{_utc_now()}")[:32]
                 cur.execute(
                     "INSERT INTO meta (key, value) VALUES ('session_id', ?) "
@@ -734,7 +733,14 @@ class ContextStore:
                         pass
                     raise
                 else:
-                    cur.execute("COMMIT")
+                    try:
+                        cur.execute("COMMIT")
+                    except BaseException:
+                        try:
+                            cur.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                        raise
                 finally:
                     self._in_txn = False
             finally:
@@ -1240,8 +1246,6 @@ class ContextStore:
         targeted: dict[str, EditKind] = {}
         planned: list[_Planned] = []
         for op in ops:
-            if op.kind not in EditKind:
-                raise ValidationError(f"unknown edit kind: {op.kind}", code="invalid_kind")
             if op.kind is EditKind.BOUNDARY:
                 planned.append(_Planned(op=op, span=None, effect="applied", reason="boundary"))
                 continue
@@ -1459,7 +1463,7 @@ class ContextStore:
         inert = self._receipts(planned, "inert")
         return StageResult(
             ok=True,
-            revision=self._head(self._conn.cursor()),
+            revision=self._revision_read(),
             applied=applied,
             inert=inert,
             txn_id=txn_id,
@@ -1868,10 +1872,11 @@ class ContextStore:
         actor = ActorOrigin(actor_origin)
         target = self._validate_revision(target_revision)
         expected = self._validate_revision(expected_revision)
+        request_sha = canonical_sha256({"op": "revert", "target": target, "expected": expected})
         with self._write() as cur:
             existing = self._txn_row(cur, txn_id)
             if existing is not None:
-                if str(existing["state"]) == "committed":
+                if str(existing["state"]) == "committed" and str(existing["staged_sha256"]) == request_sha:
                     return self._replay_commit(existing)
                 raise IdempotencyConflictError(
                     "txn_id already used by a different transaction",
@@ -2060,7 +2065,7 @@ class ContextStore:
                 (
                     txn_id,
                     expected,
-                    canonical_sha256([op.to_payload() for op in synthetic]),
+                    request_sha,
                     canonical_json([op.to_payload() for op in synthetic]),
                     actor.value,
                     now,
@@ -2081,9 +2086,11 @@ class ContextStore:
         root), so replay is deterministic and idempotent.
         """
 
+        # Only current span versions participate: historical (absorbed) versions
+        # have no span_state row and are addressed through alias resolution.
         desired: dict[str, tuple[SpanState, str | None]] = {
             str(row[0]): (SpanState.ACTIVE, None)
-            for row in cur.execute("SELECT span_id FROM spans")
+            for row in cur.execute("SELECT span_id FROM current_spans")
         }
         chain = sorted(self._chain(cur, target_revision))
         for revision in chain:
@@ -2128,10 +2135,17 @@ class ContextStore:
         validate_span_id(span_id)
         validate_txn_id(txn_id)
         expected = self._validate_revision(expected_revision)
+        request_sha = canonical_sha256({"op": "unpin", "span_id": span_id})
         with self._write() as cur:
             existing = self._txn_row(cur, txn_id)
             if existing is not None and str(existing["state"]) == "committed":
-                return self._replay_commit(existing)
+                if str(existing["staged_sha256"]) == request_sha:
+                    return self._replay_commit(existing)
+                raise IdempotencyConflictError(
+                    "txn_id already used by a different transaction",
+                    code="txn_payload_mismatch",
+                    details={"txn_id": txn_id},
+                )
             if existing is not None:
                 raise IdempotencyConflictError(
                     "txn_id already used by a different transaction", code="txn_payload_mismatch"
@@ -2220,7 +2234,7 @@ class ContextStore:
                 (
                     txn_id,
                     expected,
-                    canonical_sha256({"op": "unpin", "span_id": resolved}),
+                    request_sha,
                     canonical_json({"op": "unpin", "span_id": resolved}),
                     actor.value,
                     now,
@@ -2406,7 +2420,11 @@ class ContextStore:
             finally:
                 cur.close()
             index = self._index_summary()
-            est_tokens = self._est_active_tokens(self._conn.cursor())
+            tokens_cur = self._conn.cursor()
+            try:
+                est_tokens = self._est_active_tokens(tokens_cur)
+            finally:
+                tokens_cur.close()
             return {
                 "ok": True,
                 "session_id": self._session_id,
@@ -2743,9 +2761,14 @@ class ContextStore:
         problems: list[dict[str, Any]] = []
         head = self._head(cur)
         desired = self._replay_states(cur, head)
+        # Compare only live versions; superseded span rows keep their (unused)
+        # state rows as part of the append-only history.
         actual = {
             str(row["span_id"]): (SpanState(row["state"]), row["rewrite_text"])
-            for row in cur.execute("SELECT span_id, state, rewrite_text FROM span_state")
+            for row in cur.execute(
+                "SELECT st.span_id AS span_id, st.state AS state, st.rewrite_text AS rewrite_text "
+                "FROM span_state st WHERE st.span_id IN (SELECT span_id FROM current_spans)"
+            )
         }
         if set(desired) != set(actual):
             missing = sorted(set(desired) - set(actual))[:20]

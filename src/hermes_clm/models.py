@@ -690,10 +690,18 @@ class IngestResult(_Immutable):
     spans_total: int = 0
     updated_span_ids: tuple[str, ...] = ()
     errors: tuple[Mapping[str, Any], ...] = ()
+    # uniform result surface: ingestion never edits the projection, so these
+    # stay empty but are present for generic result consumers.
+    applied: tuple[Receipt, ...] = ()
+    inert: tuple[Receipt, ...] = ()
+    receipts: Receipts = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "updated_span_ids", tuple(self.updated_span_ids))
         object.__setattr__(self, "errors", tuple(_frozen_map(err) for err in self.errors))
+        object.__setattr__(self, "applied", tuple(self.applied))
+        object.__setattr__(self, "inert", tuple(self.inert))
+        object.__setattr__(self, "receipts", tuple(self.receipts))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -708,6 +716,9 @@ class IngestResult(_Immutable):
             "spans_total": self.spans_total,
             "updated_span_ids": list(self.updated_span_ids),
             "errors": [dict(err) for err in self.errors],
+            "applied": _receipts_to_list(self.applied),
+            "inert": _receipts_to_list(self.inert),
+            "receipts": _receipts_to_list(self.receipts),
         }
 
 
