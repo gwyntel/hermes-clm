@@ -1,0 +1,41 @@
+name: hermes-clm
+version: 0.1.0
+manifest_version: 2
+description: >-
+  Durable, editable request projection: the agent inspects, stages and commits
+  span-level edits that change the next provider request, with a raw append-only
+  archive, revision CAS and auxiliary compression proposals that can never apply
+  themselves.
+author: GwynTel
+license: LicenseRef-MutuaL-1.2
+kind: standalone
+homepage: https://github.com/gwyntel/hermes-clm
+tags:
+  - context
+  - context-engine
+  - compression
+  - projection
+provides_tools:
+  - clm_status
+  - clm_inspect
+  - clm_stage
+  - clm_commit
+  - clm_discard
+  - clm_revert
+  - clm_search
+  - clm_retrieve
+  - clm_pin
+  - clm_boundary
+  - clm_propose_compression
+  - clm_accept_proposal
+config_keys:
+  - clm.reserve_tokens
+  - clm.pressure_thresholds
+  - clm.aux_enabled
+  - clm.aux_timeout_seconds
+  - clm.archive_redact
+  - clm.retention_sessions
+  - clm.max_retrieve_bytes
+  - clm.max_rewrite_bytes
+  - clm.max_aux_spans
+  - clm.max_operations
