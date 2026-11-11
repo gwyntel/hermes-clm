@@ -8,7 +8,14 @@
    (a ctx with ``register_tool`` but without ``register_context_engine``); a
    context engine advertises the same tools through ``get_tool_schemas()``, and
    registering them twice is how duplicate tool names happen,
-4. registers the operator-only ``/clm`` slash command when the context can.
+4. registers the operator-only ``/clm`` slash command when the context can,
+5. registers one static system-prompt section (:mod:`hermes_clm.guidance`) when
+   the host offers that API **and** the model can actually call the tools:
+   ``context.engine`` selects this engine in the engine lane, or the fallback
+   lane registered the tools itself. The host renders it once per new session
+   and restores those frozen bytes on resume. A host without the API (the
+   engine-only ``_EngineCollector`` path) still loads — it just gets no
+   guidance, which ``docs/limitations.md`` records.
 
 Hermes is imported lazily and only inside the functions that need it, so this
 module imports cleanly in a bare environment (tests use fakes for ``ctx``).
@@ -26,12 +33,19 @@ including for subagents, whose stores are separate.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from .auxiliary import AuxCompressor, AuxLimits, bound_timeout
 from .commands import COMMAND_NAME
 from .commands import handle as handle_command
+from .guidance import (
+    SYSTEM_PROMPT_SECTION_ID,
+    SYSTEM_PROMPT_SECTION_MAX_CHARS,
+    SYSTEM_PROMPT_SECTION_POSITION,
+    SYSTEM_PROMPT_SECTION_TEXT,
+)
 from .tools import TOOLSET, ToolHandlers, ToolLimits, build_tool_specs
 
 __all__ = [
@@ -41,9 +55,14 @@ __all__ = [
     "build_aux",
     "build_engine",
     "build_tool_handlers",
+    "clm_engine_selected",
+    "prompt_section_enabled",
     "read_clm_config",
+    "read_context_engine",
     "register",
 ]
+
+logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "hermes-clm"
 #: Must equal the engine's ``name`` and the operator's ``context.engine`` value.
@@ -54,12 +73,13 @@ DEFAULT_AUX_TIMEOUT_SECONDS = 45.0
 DEFAULT_AUX_ENABLED = True
 
 
-def read_clm_config() -> dict[str, Any]:
-    """Read the ``clm.*`` section of the active profile config.
+def _read_profile_config() -> Mapping[str, Any]:
+    """Active profile config, or ``{}`` when Hermes is absent or unreadable.
 
-    Returns a flat mapping such as ``{"clm.aux_enabled": True}``. A missing or
-    unreadable config yields defaults: the plugin never writes config and never
-    falls back to environment secrets.
+    ``load_config_readonly`` is the host's own read path (the plugin layer uses
+    it for ``plugins.hook_callback_timeout``); it never writes and never loads
+    secrets. A bare environment without Hermes yields ``{}``, which keeps every
+    caller on defaults.
     """
 
     try:
@@ -68,12 +88,46 @@ def read_clm_config() -> dict[str, Any]:
         config = load_config_readonly() or {}
     except Exception:
         return {}
-    if not isinstance(config, Mapping):
-        return {}
+    return config if isinstance(config, Mapping) else {}
+
+
+def read_clm_config() -> dict[str, Any]:
+    """Read the ``clm.*`` section of the active profile config.
+
+    Returns a flat mapping such as ``{"clm.aux_enabled": True}``. A missing or
+    unreadable config yields defaults: the plugin never writes config and never
+    falls back to environment secrets.
+    """
+
+    config = _read_profile_config()
     section = config.get(CONFIG_SECTION)
     if not isinstance(section, Mapping):
         return {}
     return {f"{CONFIG_SECTION}.{key}": value for key, value in section.items()}
+
+
+def read_context_engine() -> str | None:
+    """Name in ``context.engine`` for the active profile, or ``None``.
+
+    This is the host's own selection mechanism: ``agent/agent_init.py`` reads
+    ``context.engine`` and passes it to the engine loader verbatim, so a profile
+    that names anything else — another engine, a typo, surrounding whitespace —
+    never activates this one. ``None`` means "not selected" for every caller;
+    the value is never normalised, because a host miss on ``" hermes-clm "``
+    must not turn into claimed guidance for a tool surface that is absent.
+    """
+
+    context = _read_profile_config().get("context")
+    if not isinstance(context, Mapping):
+        return None
+    engine = context.get("engine")
+    return engine if isinstance(engine, str) and engine else None
+
+
+def clm_engine_selected() -> bool:
+    """Whether the active profile selects this context engine."""
+
+    return read_context_engine() == ENGINE_NAME
 
 
 def _config_get(config: Mapping[str, Any], key: str, default: Any) -> Any:
@@ -94,6 +148,27 @@ def _config_bool(config: Mapping[str, Any], key: str, default: bool) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def prompt_section_enabled(*, engine_lane: bool, selected: bool | None = None) -> bool:
+    """Whether model-facing guidance belongs in this profile.
+
+    Guidance is emitted only where the ``clm_*`` tools are actually callable:
+
+    * **engine lane** — the tools are injected from the engine, so guidance is
+      emitted only when ``context.engine`` selects it. A profile that merely
+      installs the plugin for another engine must not receive instructions for
+      tools the model cannot call.
+    * **general-plugin fallback** — this module registered the tools itself, so
+      they exist whenever the plugin is enabled and guidance travels with them.
+
+    ``selected`` overrides the config read (tests, and callers that already
+    resolved the engine).
+    """
+
+    if not engine_lane:
+        return True
+    return clm_engine_selected() if selected is None else bool(selected)
 
 
 def build_aux(
@@ -184,6 +259,14 @@ class PluginRuntime:
         self.config = dict(config or {})
         self.aux = aux
         self.handlers = build_tool_handlers(self.service, config=self.config, aux=aux)
+        #: Registration handle for the frozen system-prompt section, when the
+        #: host accepted one. ``None`` means either the host has no section API
+        #: (engine-only load path) or guidance was correctly withheld because
+        #: this profile does not select the engine.
+        self.prompt_section: Any = None
+        #: ``"<type>: <message>"`` when the host rejected the section, so a
+        #: failed registration is visible instead of silently absent.
+        self.prompt_section_error: str | None = None
 
     # -- session → service -------------------------------------------------- #
 
@@ -223,6 +306,7 @@ def register(
     engine_factory: Callable[[Mapping[str, Any]], Any] | None = None,
     aux: AuxCompressor | None = None,
     aux_call: Callable[..., Any] | None = None,
+    engine_selected: bool | None = None,
 ) -> PluginRuntime:
     """Register the engine and/or tools and the operator command with ``ctx``.
 
@@ -238,11 +322,15 @@ def register(
 
     In the engine lane the tools exist only while the engine is selected
     (``context.engine: hermes-clm``); enabling the plugin without selecting the
-    engine intentionally exposes nothing.
+    engine intentionally exposes nothing. The system-prompt section follows the
+    same rule (see :func:`prompt_section_enabled`): it is registered only when
+    ``ctx.register_system_prompt_section`` exists *and* guidance would be true.
+    A ctx without that API (the directory-loaded engine path) still loads.
 
     Injection points exist for tests and for integration: ``engine`` (a ready
-    engine), ``engine_factory``, ``aux`` (a compressor) and ``aux_call`` (the
-    auxiliary client). Production passes only ``ctx``.
+    engine), ``engine_factory``, ``aux`` (a compressor), ``aux_call`` (the
+    auxiliary client) and ``engine_selected`` (an already-resolved selection).
+    Production passes only ``ctx``.
     """
 
     cfg = dict(config) if config is not None else read_clm_config()
@@ -265,6 +353,33 @@ def register(
                 schema=spec.schema,
                 handler=spec.handler,
                 description=spec.description,
+            )
+
+    # Guide the model only where the tools are callable. The host renders this
+    # section once per new session and freezes the bytes, so it must stay
+    # static: nothing here interpolates archive, tool or user data.
+    register_section = getattr(ctx, "register_system_prompt_section", None)
+    if callable(register_section) and prompt_section_enabled(
+        engine_lane=engine_lane, selected=engine_selected
+    ):
+        try:
+            runtime.prompt_section = register_section(
+                SYSTEM_PROMPT_SECTION_ID,
+                SYSTEM_PROMPT_SECTION_TEXT,
+                position=SYSTEM_PROMPT_SECTION_POSITION,
+                max_chars=SYSTEM_PROMPT_SECTION_MAX_CHARS,
+            )
+        except Exception as exc:  # fail open: the engine and tools still work
+            runtime.prompt_section_error = f"{type(exc).__name__}: {exc}"
+            # The entry-point shim discards ``PluginRuntime``, so the runtime
+            # attribute alone would hide a rejection in production. Log the
+            # type only: host error text is untrusted input and may embed
+            # plugin names or paths we must not amplify into logs.
+            logger.warning(
+                "hermes-clm: system prompt section %s was rejected by the host (%s); "
+                "the engine and tools still load, but the model gets no CLM guidance",
+                SYSTEM_PROMPT_SECTION_ID,
+                type(exc).__name__,
             )
 
     register_command = getattr(ctx, "register_command", None)

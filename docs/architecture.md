@@ -70,6 +70,32 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - `clone_for_agent()` returns a fresh engine with reopened store, never deep-copies SQLite/locks.
 - Compression boundaries carry state only through explicit `old_session_id` lifecycle; new session gets isolated copy. No lineage guessing from `conversation_id`.
 
+## Model guidance (system-prompt section)
+
+The tool surface is useless if the model does not know the operating rules, so the plugin
+registers one static text block through the host's section API
+(`ctx.register_system_prompt_section`): id `hermes-clm.usage`, position `after_memory`,
+`max_chars` 4000 (the host ceiling; the text is ~2.9 KB with headroom because an
+oversized section is skipped, not truncated).
+
+- **Static by construction.** The section is registered as a string, never a callable.
+  Archive bytes, tool results and user text are never interpolated: the block is
+  high-trust prompt bytes, and a callable would turn session data into instructions.
+- **Frozen per session.** The host renders sections once at session start and persists
+  the rendered prompt; a resumed session restores those exact bytes rather than re-running
+  plugin code. Editing the text therefore changes new sessions only.
+- **Gated on the live tool surface.** The section is registered only when the host offers
+  the API *and* the `clm_*` tools are callable — `context.engine` selects this engine in
+  the engine lane, or the general-plugin fallback registered the tools itself. A profile
+  that installs the plugin but selects another engine gets the engine registration and no
+  instructions.
+- **Capability-missing hosts still load.** Hermes' directory-loaded engine path
+  (`_EngineCollector`) has no section API; registration is `getattr`-guarded, so the
+  engine still loads and simply carries no guidance. A rejected registration is recorded
+  on the runtime (`prompt_section_error`) and logged as a warning carrying only the
+  section id and exception type (the entry-point shim discards the runtime, and host
+  exception text is untrusted) instead of breaking the plugin.
+
 ## Security limits
 
 Plugin cannot defend against arbitrary same-UID shell access. It can enforce tool authority, file permissions, redaction, origin preservation, CAS, idempotency and corruption detection. It cannot make self-authored instructions unpersuasive, guarantee host post-sanitizer bytes, or support child→parent retrieval until Hermes supplies lineage. These limits belong in README and benchmark reporting.

@@ -11,8 +11,9 @@ rewritten, tool-call groups stay atomic, and system / user / pinned rows pass th
 byte-identically.
 
 > **Status: pre-release, integrated tree.** The engine, store, tools, plugin, benchmark
-> harness and packaging are integrated. Local gates: **776 passed, 3 skipped, 0 failed**
-> with `CLM_HERMES_CHECKOUT` set (754 passed, 25 skipped without the checkout);
+> harness and packaging are integrated. Local gates: **811 passed, 3 skipped, 0 failed**
+> with `CLM_HERMES_CHECKOUT` set (782 passed, 32 skipped without the checkout), including
+> the system-prompt-section tests;
 > `ruff check`, `ruff format --check`, `mypy src`, `python -m build` and
 > `twine check` pass. The remaining skips are two media-blob probes that do not apply to
 > inline archives and one tool-schema probe with no module-level schema object.
@@ -74,6 +75,16 @@ checkout's root `__init__.py` is the entry point Hermes calls; `plugin.yaml` dec
 `clm_*` tools and the `clm.*` config keys. The host must be a build that supports
 context-engine plugins; the hook line numbers were verified against Hermes v0.23.0.
 
+Also add the plugin to `plugins.enabled` (see [Configure](#configure)). Selecting
+`context.engine` alone loads the engine through Hermes' engine collector, which exposes
+the tools but has no system-prompt-section API, so the model receives no usage guidance.
+With the plugin enabled in that profile, it registers one static `hermes-clm.usage` section
+(about 2.9 KB) after the memory block. The host renders sections once per new session and
+persists the rendered prompt, so a resumed session keeps the exact bytes it started with:
+editing this package's guidance affects new sessions only. If the host rejects the
+registration (for example, another plugin claimed the id), the engine and tools still load
+and a warning naming the section id and exception type is logged.
+
 **As a library or CLI only (no Hermes).** This is what the wheel is for:
 
 ```bash
@@ -87,6 +98,9 @@ Use `python -m pip install -e ".[dev]"` inside a virtualenv for tests, linting a
 
 ```yaml
 # profile config
+plugins:
+  enabled:
+    - hermes-clm      # required for the frozen model-usage section
 context:
   engine: hermes-clm
 compression:
@@ -98,6 +112,12 @@ Optional keys: `clm.reserve_tokens`, `clm.pressure_thresholds`, `clm.aux_enabled
 `clm.max_retrieve_bytes`, `clm.max_rewrite_bytes`, `clm.max_aux_spans`,
 `clm.max_operations`. The engine does not choose providers or models and never writes
 provider credentials.
+
+The usage section is registered when the plugin is enabled **and** `context.engine`
+selects `hermes-clm`; with another engine selected the plugin loads but injects nothing,
+because the `clm_*` tools are not callable. It is a static string — no archive, tool
+result or session text is ever interpolated into it — and it is frozen at session start,
+so changing it needs a new session, not a restart alone.
 
 ### Roll back
 

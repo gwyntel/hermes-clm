@@ -11,17 +11,21 @@ deployment has occurred.
 
 | Gate | Command | Result |
 |---|---|---|
-| Format | `ruff format --check .` | pass (124 files) |
+| Format | `ruff format --check .` | pass (127 files) |
 | Lint | `ruff check .` | pass |
-| Types | `mypy src/hermes_clm` | pass (18 modules) |
+| Types | `mypy src/hermes_clm` | pass (19 modules) |
 | Build | `python -m build`, `twine check dist/*` | pass |
-| Tests | `pytest -o addopts='-ra --import-mode=importlib'` | 776 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; 754/25 without it |
+| Tests | `pytest -o addopts='-ra --import-mode=importlib'` | 811 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; 782/32 without it |
 | Security + fuzz | its own suite | all pass; mutation baseline green, 16/16 injected defects red |
 | Benchmarks | offline simulator, two runs and CPython 3.11/3.12/3.14 | byte-identical JSON; simulator only, no model calls |
 
 The three skips are expected and explicit: two media-blob probes do not apply to inline
 archives, and one tool-schema probe has no module-level JSON schema object. Without a Hermes
-checkout, the 21 real-discovery/lifecycle tests also skip.
+checkout, the 29 real-discovery, prompt-section and lifecycle tests also skip.
+
+The format/type/test rows were re-measured locally for the system-prompt-section work
+(adding `src/hermes_clm/guidance.py` and the section tests); no remote CI run covers those
+changes yet, so treat the row values as local until one does.
 
 Resolved during integration: the `commit()`-without-`stage()` test adaptation, the
 `model`→`agent` actor vocabulary, hashed-but-stable session IDs, `EngineConfig` mapping
@@ -169,3 +173,24 @@ intermittent CAS-loser corruption error. The last is now covered by a non-`xfail
     constant `"chars/4"` (`B105`, a false positive), and `store.py:1721` asserts an
     internal invariant (`B101`, which disappears under `python -O`). The `B101` one is a
     real robustness question for the store owner, not a style nit.
+
+## Model guidance (system-prompt section)
+
+41. **The engine-only load path carries no guidance.** Hermes' directory-loaded engine
+    collector (`plugins/context_engine/_EngineCollector`) has no
+    `register_system_prompt_section` API, so a profile that only sets
+    `context.engine: hermes-clm` gets the engine and the twelve tools but no instructions
+    for using them. The registration is `getattr`-guarded and the plugin loads normally;
+    enabling the plugin through `plugins.enabled` is what adds the section.
+42. **The section is frozen per session and cannot be updated in place.** The host renders
+    it at session start and restores those exact bytes on resume, so editing the guidance
+    affects new sessions only. It is also static: it cannot report the current revision,
+    pressure or pinned spans, and advice that turns out to be wrong cannot be corrected
+    mid-session — the tools' own receipts carry the live state.
+43. **Guidance follows engine selection, not per-platform toolset gates.** The section is
+    registered at plugin load, before `enabled_toolsets`/`agent.disabled_toolsets` are
+    resolved. An explicit platform toolset that omits `context_engine` leaves the model
+    with instructions for tools it cannot call (the same gap as item 5, seen from the
+    prompt side). A `context.engine` change needs a restart **and** a new session: the
+    host selects the engine at agent initialisation, and the prompt bytes are already
+    frozen.

@@ -10,8 +10,9 @@ Sources of truth, in order: `docs/integration-contract.md`, `docs/architecture.m
 ## 1. Status
 
 > **Integrated and green (local).** On the integration tree the full suite reports
-> **776 passed, 3 skipped, 0 failed, 0 xpassed** with `CLM_HERMES_CHECKOUT` pointing at a
-> real Hermes checkout; without it the same tree is 754 passed / 25 skipped. The three
+> **811 passed, 3 skipped, 0 failed, 0 xpassed** with `CLM_HERMES_CHECKOUT` pointing at a
+> real Hermes checkout (this count includes the system-prompt-section tests); without it
+> the same tree is 782 passed / 32 skipped. The three
 > remaining skips are expected: two media probes do not apply to inline archives, and one
 > tool-schema probe has no module-level JSON schema object. `tests/security` and
 > `tests/fuzz` all pass, including the 16-test mutation harness: a correct fixture baseline

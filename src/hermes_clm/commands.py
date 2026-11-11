@@ -38,7 +38,7 @@ USAGE = """\
   /clm edit drop <span_id> [<span_id> ...]
       remove spans from the projected context (raw archive keeps them)
   /clm edit keep <span_id> [<span_id> ...]
-      keep spans verbatim and stop later edits from touching them
+      return spans to the projected context (not a pin: later edits can still target them)
   /clm edit rewrite <span_id> <text ...>
       replace one span's text
   /clm unpin <span_id> [<span_id> ...]
