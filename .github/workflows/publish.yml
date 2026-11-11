@@ -39,7 +39,7 @@ jobs:
     name: Publish to PyPI (trusted publishing)
     needs: build
     # Disabled until Gwyn creates the PyPI pending publisher:
-    #   project hermes-clm, owner gwyntel-git, repo hermes-clm,
+    #   project hermes-clm, owner gwyntel, repo hermes-clm,
     #   workflow publish.yml, environment pypi.
     # Then set repository variable PYPI_PUBLISH_ENABLED=true.
     if: github.event_name == 'release' && vars.PYPI_PUBLISH_ENABLED == 'true'

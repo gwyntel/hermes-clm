@@ -26,7 +26,7 @@ ruff format --check .
 mypy src
 pytest -m "not slow" --cov --cov-report=term-missing
 bandit -q -r src benchmarks
-pip freeze --exclude-editable | grep -viE '^(pip|setuptools|hermes-clm)==' > /tmp/audit-reqs.txt
+pip freeze --exclude-editable | grep -viE '^(pip|setuptools|hermes-clm)(==| @ )' > /tmp/audit-reqs.txt
 pip-audit --strict --no-deps --disable-pip -r /tmp/audit-reqs.txt
 python -m build
 python -m twine check dist/*

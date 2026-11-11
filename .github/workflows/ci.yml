@@ -73,11 +73,11 @@ jobs:
         run: bandit -q -r src benchmarks -x tests
       - name: Audit third-party dependencies
         # Scope: every installed third-party package (runtime + dev). Interpreter-provided
-        # pip/setuptools and the local editable project are excluded so the gate reports
-        # project dependencies rather than the runner image.
+        # pip/setuptools and the local project are excluded so the gate reports project
+        # dependencies rather than the runner image.
         run: |
           python -m pip freeze --exclude-editable \
-            | grep -viE '^(pip|setuptools|hermes-clm)==' > "$RUNNER_TEMP/audit-reqs.txt"
+            | grep -viE '^(pip|setuptools|hermes-clm)(==| @ )' > "$RUNNER_TEMP/audit-reqs.txt"
           pip-audit --strict --progress-spinner off --no-deps --disable-pip \
             -r "$RUNNER_TEMP/audit-reqs.txt"
 
