@@ -14,7 +14,7 @@ Tags: **[M]** = measured/reported claim in paper · **[C]** = verified in releas
 | PDF (downloaded, not parsed page-by-page) | https://arxiv.org/pdf/2609.37725 → downloaded PDF (2.8 MB); text was read from the HTML because no PDF text extractor was used |
 | Code (cloned, commit pinned) | https://github.com/facebookresearch/context-language-models — `483198229ab7b90c0eed4651306ab3b3505aaf50`, 2026-10-13 → a temporary reference clone |
 | ContextBench method skills (fetched) | https://github.com/RulinShao/ContextBench (branch `master`), `clm_exp/skills/{clm,base,summary,acm,rlm,context_folding,self_compact}/*.md` |
-| Corr. author | Rulin Shao, rulin@cs.washington.edu |
+| Corr. author | Rulin Shao (corresponding author) |
 
 Versions: only `[v1]` exists on arXiv (checked). Code repo tip is **14 days newer than the paper**; where paper and code disagree I say so explicitly.
 
