@@ -373,6 +373,79 @@ def _hash_op_payloads(ops: Iterable[EditOperation], txn_id: str | None) -> list[
     return payloads
 
 
+def _coerce_aux_proposal(
+    operations: Iterable[Any],
+) -> tuple[tuple[EditOperation, ...], list[dict[str, Any]]]:
+    """Normalize aux proposal operations while preserving their raw payloads.
+
+    The digest must be computed over the caller's *raw* operation payloads
+    (exactly what :func:`hermes_clm.auxiliary.canonical_proposal_sha256` sees),
+    not over store-normalized payloads that add authority/provenance fields.
+    Structural validation still runs on normalized :class:`EditOperation`
+    values, and a missing ``actor_origin`` defaults to ``aux``.
+    """
+
+    if operations is None:
+        raise ValidationError("operations are required", code="missing_operations")
+    if isinstance(operations, str | bytes | Mapping):
+        raise ValidationError("operations must be a sequence", code="invalid_operations")
+    ops: list[EditOperation] = []
+    raw_payload: list[dict[str, Any]] = []
+    for item in operations:
+        if isinstance(item, EditOperation):
+            payload = item.to_payload()
+            op = item
+        elif isinstance(item, Mapping):
+            payload = dict(item)
+            candidate = dict(payload)
+            candidate.setdefault("actor_origin", ActorOrigin.AUX.value)
+            op = EditOperation.from_mapping(candidate)
+        else:
+            raise ValidationError(
+                "operation must be a mapping or EditOperation", code="invalid_operation"
+            )
+        if op.actor_origin is not ActorOrigin.AUX:
+            raise ValidationError(
+                "operation actor_origin does not match the calling actor",
+                code="actor_mismatch",
+                details={"expected": ActorOrigin.AUX.value, "found": op.actor_origin.value},
+            )
+        ops.append(op)
+        raw_payload.append(payload)
+    if not ops:
+        raise ValidationError("operations must not be empty", code="missing_operations")
+    return tuple(ops), raw_payload
+
+
+def _unpin_targets(span_ids: str | Sequence[str] | None, span_id: str | None) -> tuple[str, ...]:
+    """Normalize ``unpin`` arguments to an ordered, de-duplicated tuple."""
+
+    if span_ids is not None and span_id is not None:
+        raise ValidationError("pass either span_id or span_ids, not both", code="invalid_span_id")
+    if span_id is not None:
+        raw: Any = span_id
+    else:
+        raw = span_ids
+    if raw is None:
+        raise ValidationError("span_id or span_ids is required", code="missing_span_ids")
+    if isinstance(raw, str):
+        items: Sequence[Any] = (raw,)
+    elif isinstance(raw, Sequence) and not isinstance(raw, bytes | bytearray):
+        items = raw
+    else:
+        raise ValidationError(
+            "span_ids must be a string or a sequence of strings", code="invalid_span_ids"
+        )
+    if not items:
+        raise ValidationError("span_ids must not be empty", code="missing_span_ids")
+    out: list[str] = []
+    for item in items:
+        validate_span_id(item)
+        if item not in out:
+            out.append(item)
+    return tuple(out)
+
+
 def revision_hash(
     *,
     prev_hash: str,
@@ -1826,6 +1899,13 @@ class ContextStore:
             "est_tokens_before": before_tokens,
             "est_tokens_after": after_tokens,
         }
+        boundary_labels = [
+            item.op.replacement
+            for item in planned
+            if item.op.kind is EditKind.BOUNDARY and item.op.replacement is not None
+        ]
+        if boundary_labels:
+            audit_detail["boundary_labels"] = boundary_labels
         if extra_audit:
             audit_detail.update(dict(extra_audit))
         cur.execute(
@@ -2220,13 +2300,25 @@ class ContextStore:
 
     # -- operator pin transition -----------------------------------------
     def unpin(
-        self, span_id: str, *, expected_revision: int, txn_id: str, actor_origin: str
+        self,
+        span_ids: str | Sequence[str] | None = None,
+        *,
+        span_id: str | None = None,
+        expected_revision: int,
+        txn_id: str,
+        actor_origin: str,
     ) -> CommitResult:
-        """Remove a pin.  Operator authority only (agents can pin, never unpin).
+        """Remove one or more pins.  Operator authority only.
 
         Additive extension: the integration contract has no unpin entry point,
-        but the operator manual command needs one.  ``operator_unpin`` is the
-        convenience wrapper used by the command layer.
+        but the operator manual command needs one.  ``span_ids`` accepts either
+        a single span id or a sequence; the ``span_id=`` keyword is an alias.
+        Multiple targets are unpinned **atomically in exactly one revision**:
+        the whole batch is validated and applied inside one write transaction
+        (unknown span ids abort before any pin is removed).
+
+        Agents may pin but never unpin; the authority check runs before any
+        state is read or written.
         """
 
         self._require_writable()
@@ -2235,10 +2327,16 @@ class ContextStore:
             raise PinAuthorityError(
                 "only the operator may unpin", code="pin_authority", details={"actor": actor.value}
             )
-        validate_span_id(span_id)
+        targets = _unpin_targets(span_ids, span_id)
         validate_txn_id(txn_id)
         expected = self._validate_revision(expected_revision)
-        request_sha = canonical_sha256({"op": "unpin", "span_id": span_id})
+        # Legacy single-target signature is preserved so transactions staged by
+        # earlier builds still replay idempotently.
+        request_sha = (
+            canonical_sha256({"op": "unpin", "span_id": targets[0]})
+            if len(targets) == 1
+            else canonical_sha256({"op": "unpin", "span_ids": list(targets)})
+        )
         with self._write() as cur:
             existing = self._txn_row(cur, txn_id)
             if existing is not None and str(existing["state"]) == "committed":
@@ -2260,14 +2358,26 @@ class ContextStore:
                     code="stale_revision",
                     details={"expected": expected, "current": head},
                 )
-            resolved = self._resolve_span_id(cur, span_id)
-            if resolved is None:
-                raise NotFoundError(
-                    "unknown span", code="unknown_span", details={"span_id": span_id}
+            resolved: list[str] = []
+            for requested in targets:
+                resolved_id = self._resolve_span_id(cur, requested)
+                if resolved_id is None:
+                    raise NotFoundError(
+                        "unknown span",
+                        code="unknown_span",
+                        details={"span_id": requested},
+                    )
+                if resolved_id not in resolved:
+                    resolved.append(resolved_id)
+            pinned_rows = {
+                str(row[0])
+                for row in cur.execute(
+                    "SELECT span_id FROM pins WHERE span_id IN ("
+                    + ",".join("?" for _ in resolved)
+                    + ")",
+                    tuple(resolved),
                 )
-            pinned = cur.execute(
-                "SELECT span_id FROM pins WHERE span_id = ?", (resolved,)
-            ).fetchone()
+            }
             now = self._now()
             revision = head + 1
             head_row = self._head_row(cur)
@@ -2281,14 +2391,27 @@ class ContextStore:
                 txn_id=txn_id,
                 operations=[],
             )
-            removed = pinned is not None
-            if removed:
-                cur.execute("DELETE FROM pins WHERE span_id = ?", (resolved,))
+            applied_receipts: list[Receipt] = []
+            inert_receipts: list[Receipt] = []
+            removed: list[str] = []
+            for resolved_id in resolved:
+                if resolved_id not in pinned_rows:
+                    inert_receipts.append(
+                        Receipt(
+                            span_id=resolved_id, kind="unpin", effect="inert", reason="not_pinned"
+                        )
+                    )
+                    continue
+                cur.execute("DELETE FROM pins WHERE span_id = ?", (resolved_id,))
                 cur.execute(
                     "INSERT INTO pin_events (span_id, action, actor_origin, revision, created_at) "
                     "VALUES (?, 'unpin', ?, ?, ?)",
-                    (resolved, actor.value, revision, now),
+                    (resolved_id, actor.value, revision, now),
                 )
+                applied_receipts.append(
+                    Receipt(span_id=resolved_id, kind="unpin", effect="applied")
+                )
+                removed.append(resolved_id)
             cur.execute(
                 "INSERT INTO revisions (revision, parent_revision, base_revision, kind, head_hash, txn_id, "
                 "actor_origin, op_count, applied, inert, est_tokens_before, est_tokens_after, created_at) "
@@ -2300,8 +2423,8 @@ class ContextStore:
                     head_hash,
                     txn_id,
                     actor.value,
-                    1 if removed else 0,
-                    0 if removed else 1,
+                    len(applied_receipts),
+                    len(inert_receipts),
                     now,
                 ),
             )
@@ -2325,14 +2448,8 @@ class ContextStore:
             result = CommitResult(
                 ok=True,
                 revision=revision,
-                applied=(Receipt(span_id=resolved, kind="unpin", effect="applied"),)
-                if removed
-                else (),
-                inert=()
-                if removed
-                else (
-                    Receipt(span_id=resolved, kind="unpin", effect="inert", reason="not_pinned"),
-                ),
+                applied=tuple(applied_receipts),
+                inert=tuple(inert_receipts),
                 errors=(),
                 txn_id=txn_id,
                 head_hash=head_hash,
@@ -2340,13 +2457,23 @@ class ContextStore:
                 replayed=False,
                 base_revision=head,
             )
+            detail: dict[str, Any] = {
+                "span_ids": list(resolved),
+                "removed": removed,
+                "not_pinned": [
+                    receipt.span_id for receipt in inert_receipts if receipt.reason == "not_pinned"
+                ],
+                "txn_id": txn_id,
+            }
+            if len(resolved) == 1:
+                detail["span_id"] = resolved[0]
             cur.execute(
                 "INSERT INTO audit (revision, event, actor_origin, detail_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
                     revision,
                     "operator_unpin",
                     actor.value,
-                    canonical_json({"span_id": resolved, "removed": removed, "txn_id": txn_id}),
+                    canonical_json(detail),
                     now,
                 ),
             )
@@ -2358,7 +2485,7 @@ class ContextStore:
                     txn_id,
                     expected,
                     request_sha,
-                    canonical_json({"op": "unpin", "span_id": resolved}),
+                    canonical_json({"op": "unpin", "span_ids": resolved}),
                     actor.value,
                     now,
                     now,
@@ -2370,15 +2497,35 @@ class ContextStore:
         self._write_index()
         return result
 
-    def operator_unpin(self, span_id: str, *, expected_revision: int, txn_id: str) -> CommitResult:
-        """Operator-only convenience wrapper around :meth:`unpin`."""
+    def operator_unpin(
+        self,
+        span_ids: str | Sequence[str] | None = None,
+        *,
+        span_id: str | None = None,
+        expected_revision: int,
+        txn_id: str,
+    ) -> CommitResult:
+        """Operator-only convenience wrapper around :meth:`unpin`.
+
+        Accepts a single span id (`span_id=` or positional str) or a sequence
+        (`span_ids=` or positional sequence); a batch is unpinned atomically in
+        one revision.
+        """
 
         return self.unpin(
-            span_id,
+            span_ids,
+            span_id=span_id,
             expected_revision=expected_revision,
             txn_id=txn_id,
             actor_origin=ActorOrigin.OPERATOR.value,
         )
+
+    def operator_unpin_many(
+        self, span_ids: Sequence[str], *, expected_revision: int, txn_id: str
+    ) -> CommitResult:
+        """Explicit batch form of :meth:`operator_unpin` (same single revision)."""
+
+        return self.operator_unpin(span_ids, expected_revision=expected_revision, txn_id=txn_id)
 
     def pin_requires_operator(self, actor_origin: str) -> None:
         """Guard used by tool layers: agents cannot unpin, only operators."""
@@ -2397,7 +2544,7 @@ class ContextStore:
         """
 
         self._require_writable()
-        ops = coerce_operations(operations, actor_origin=ActorOrigin.AUX)
+        ops, raw_payload = _coerce_aux_proposal(operations)
         if len(ops) > self._config.max_aux_spans:
             raise StoreBudgetError(
                 "proposal touches too many spans",
@@ -2414,8 +2561,11 @@ class ContextStore:
                     details={"base": base, "head": head},
                 )
             self._plan(cur, ops, state_aware=False)
-            payload = [op.to_payload() for op in ops]
-            digest = canonical_sha256({"base": base, "origin": "aux", "operations": payload})
+            # Exact compatibility with hermes_clm.auxiliary.canonical_proposal_sha256:
+            # sha256(canonical JSON of {base_revision, operations[raw payload], origin}).
+            digest = canonical_sha256(
+                {"base_revision": base, "operations": raw_payload, "origin": "aux"}
+            )
             proposal_id = "prop_" + digest[:24]
             row = cur.execute(
                 "SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)
@@ -2424,7 +2574,7 @@ class ContextStore:
                 cur.execute(
                     "INSERT INTO proposals (proposal_id, proposal_sha256, base_revision, operations_json, "
                     "origin, created_revision, created_at) VALUES (?, ?, ?, ?, 'aux', ?, ?)",
-                    (proposal_id, digest, base, canonical_json(payload), head, self._now()),
+                    (proposal_id, digest, base, canonical_json(raw_payload), head, self._now()),
                 )
                 cur.execute(
                     "INSERT INTO audit (revision, event, actor_origin, detail_json, created_at) "
@@ -2538,11 +2688,28 @@ class ContextStore:
             try:
                 rev_row = self._head_row(cur)
                 counts = self._state_counts(cur)
-                health: dict[str, Any] = {"ok": True}
+                health: dict[str, Any] = {
+                    "ok": True,
+                    "hash_chain": {
+                        "ok": True,
+                        "checked": "head",
+                        "revision": int(rev_row["revision"]),
+                        "head_hash": str(rev_row["head_hash"]),
+                    },
+                }
                 try:
                     self._verify_head(cur, rev_row)
                 except CorruptStoreError as exc:
-                    health = {"ok": False, "error": exc.to_dict()}
+                    health = {
+                        "ok": False,
+                        "hash_chain": {
+                            "ok": False,
+                            "checked": "head",
+                            "revision": int(rev_row["revision"]),
+                            "head_hash": str(rev_row["head_hash"]),
+                        },
+                        "error": exc.to_dict(),
+                    }
                 staged = cur.execute(
                     "SELECT txn_id, base_revision, created_at FROM txns WHERE state = 'staged' "
                     "ORDER BY created_at DESC LIMIT 5"
@@ -2877,6 +3044,80 @@ class ContextStore:
             "archive_entries": len(rows),
         }
 
+    def verify_chain(self) -> dict[str, Any]:
+        """Bounded hash-chain verification (revision chain + archive chain).
+
+        Unlike :meth:`verify`, this does not re-hash every archived payload or
+        compare the derived checkpoint; it is the cheap integrity signal exposed
+        by ``status()["health"]["hash_chain"]`` (which checks only the head) and
+        by operator health tooling.
+        """
+
+        self._require_open()
+        cur = self._conn.cursor()
+        problems: list[dict[str, Any]] = []
+        archive_entries = 0
+        revisions_checked = 0
+        try:
+            head_row = self._head_row(cur)
+            revision = int(head_row["revision"])
+            head_hash = str(head_row["head_hash"])
+            rows = [
+                dict(row)
+                for row in cur.execute(
+                    "SELECT span_id, uid, content_sha256, payload_json, prev_hash, entry_hash, "
+                    "archive_id, revision FROM archive ORDER BY archive_id"
+                )
+            ]
+            archive_entries = len(rows)
+            from .archive import verify_chain
+
+            chain = verify_chain(rows)
+            if not chain["ok"]:
+                problems.extend(chain["problems"][:20])
+            prev_hash = GENESIS_HASH
+            revision_rows = cur.execute("SELECT * FROM revisions ORDER BY revision").fetchall()
+            for rev in revision_rows:
+                ops = [
+                    _op_payload_from_row(r)
+                    for r in cur.execute(
+                        "SELECT * FROM operations WHERE revision = ? ORDER BY ord",
+                        (rev["revision"],),
+                    )
+                ]
+                computed = revision_hash(
+                    prev_hash=prev_hash,
+                    revision=int(rev["revision"]),
+                    parent_revision=int(rev["parent_revision"]),
+                    base_revision=int(rev["base_revision"]),
+                    kind=str(rev["kind"]),
+                    actor_origin=str(rev["actor_origin"]),
+                    txn_id=rev["txn_id"],
+                    operations=ops,
+                )
+                if computed != rev["head_hash"]:
+                    problems.append(
+                        {
+                            "code": "revision_hash_mismatch",
+                            "revision": int(rev["revision"]),
+                            "expected": rev["head_hash"],
+                            "computed": computed,
+                        }
+                    )
+                prev_hash = str(rev["head_hash"])
+                revisions_checked += 1
+        finally:
+            cur.close()
+        return {
+            "ok": not problems,
+            "session_id": self._session_id,
+            "revision": revision,
+            "head_hash": head_hash,
+            "revisions_checked": revisions_checked,
+            "archive_entries": archive_entries,
+            "problems": problems,
+        }
+
     def _verify_state_consistency_from_scratch(self) -> list[dict[str, Any]]:
         """Consistency check against the replayed chain (used by recovery)."""
 
@@ -3124,7 +3365,12 @@ class ContextStore:
     # -- maintenance ------------------------------------------------------
     @classmethod
     def list_sessions(cls, hermes_home: str | os.PathLike[str]) -> list[dict[str, Any]]:
-        """Enumerate session stores (operator tooling: retention/purge)."""
+        """Enumerate session stores (operator tooling: retention/purge).
+
+        Entries include a best-effort ``pinned_count`` and ``revision`` read
+        read-only from each SQLite database.  Unreadable stores are still listed
+        with ``ok=False`` so retention tooling can refuse instead of guessing.
+        """
 
         root = sessions_root(hermes_home)
         if not root.is_dir():
@@ -3136,15 +3382,142 @@ class ContextStore:
             db = entry / DB_FILENAME
             if not db.is_file():
                 continue
+            meta = _read_session_meta(db)
             out.append(
                 {
                     "store_key": entry.name,
                     "db_bytes": db.stat().st_size,
                     "modified": int(db.stat().st_mtime),
-                    "session_id": _read_session_id_from_db(db),
+                    "session_id": meta["session_id"],
+                    "revision": meta["revision"],
+                    "pinned_count": meta["pinned_count"],
+                    "ok": meta["ok"],
                 }
             )
         return out
+
+    @classmethod
+    def purge_expired_sessions(
+        cls,
+        hermes_home: str | os.PathLike[str],
+        *,
+        keep: int | None = None,
+        retention_sessions: int = 32,
+        current_session_id: str | None = None,
+        include_pinned: bool = False,
+        include_current: bool = False,
+        max_purge: int = 64,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Purge the oldest session stores beyond a bounded retention window.
+
+        Exact semantics (deliberate, non-destructive by default):
+
+        * ``keep`` (default: ``retention_sessions``, matching
+          ``clm.retention_sessions``) is the number of **newest** sessions by
+          database mtime that are retained.  ``keep=0`` makes every otherwise
+          eligible session a candidate.
+        * Sessions with any pin rows are **never** purged unless
+          ``include_pinned=True`` is passed explicitly.  Pinned sessions are
+          exempt even when they fall outside the retention window.
+        * ``current_session_id`` is never purged unless ``include_current=True``
+          is passed explicitly.
+        * Unreadable session ids are listed but never purged (the store cannot
+          verify what it would delete).
+        * At most ``max_purge`` sessions are removed per call (bounded sweep);
+          leftovers are reported with ``reason="purge_limit"``.
+        * ``dry_run=True`` reports the same decision set without deleting.
+
+        This is operator tooling only: the store never expires sessions on its
+        own, and no engine/tool path calls it.
+        """
+
+        if isinstance(keep, bool) or (keep is not None and not isinstance(keep, int)):
+            raise ValidationError("keep must be an int", code="invalid_retention")
+        retain = retention_sessions if keep is None else keep
+        if isinstance(retain, bool) or not isinstance(retain, int) or retain < 0:
+            raise ValidationError(
+                "retention_sessions must be a non-negative int", code="invalid_retention"
+            )
+        if isinstance(max_purge, bool) or not isinstance(max_purge, int) or max_purge < 1:
+            raise ValidationError("max_purge must be a positive int", code="invalid_retention")
+        max_purge = min(max_purge, 1000)
+        if current_session_id is not None:
+            current_session_id = _validate_session_id(current_session_id)
+
+        sessions = cls.list_sessions(hermes_home)
+        ordered = sorted(sessions, key=lambda item: (-int(item["modified"]), item["store_key"]))
+        purged: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for index, item in enumerate(ordered):
+            session_id = item["session_id"]
+            if index < retain:
+                continue
+            if session_id is None or not item["ok"]:
+                skipped.append(
+                    {"store_key": item["store_key"], "session_id": None, "reason": "unreadable"}
+                )
+                continue
+            if current_session_id is not None and session_id == current_session_id:
+                if not include_current:
+                    skipped.append(
+                        {
+                            "store_key": item["store_key"],
+                            "session_id": session_id,
+                            "reason": "current",
+                        }
+                    )
+                    continue
+            if int(item["pinned_count"] or 0) > 0 and not include_pinned:
+                skipped.append(
+                    {"store_key": item["store_key"], "session_id": session_id, "reason": "pinned"}
+                )
+                continue
+            if len(purged) >= max_purge:
+                skipped.append(
+                    {
+                        "store_key": item["store_key"],
+                        "session_id": session_id,
+                        "reason": "purge_limit",
+                    }
+                )
+                continue
+            if dry_run:
+                removed = True
+            else:
+                try:
+                    removed = bool(cls.purge_session(hermes_home, session_id)["removed"])
+                except Exception as exc:  # report, never half-sweep silently
+                    skipped.append(
+                        {
+                            "store_key": item["store_key"],
+                            "session_id": session_id,
+                            "reason": "error",
+                            "error": type(exc).__name__,
+                        }
+                    )
+                    continue
+            purged.append(
+                {
+                    "store_key": item["store_key"],
+                    "session_id": session_id,
+                    "removed": removed,
+                    "pinned_count": int(item["pinned_count"] or 0),
+                }
+            )
+        return {
+            "ok": True,
+            "scanned": len(ordered),
+            "retained": retain,
+            "include_pinned": bool(include_pinned),
+            "include_current": bool(include_current),
+            "max_purge": max_purge,
+            "dry_run": bool(dry_run),
+            "purged": purged,
+            "purged_count": len(purged),
+            "skipped": skipped,
+            "limit_hit": any(item["reason"] == "purge_limit" for item in skipped),
+        }
 
     @classmethod
     def purge_session(cls, hermes_home: str | os.PathLike[str], session_id: str) -> dict[str, Any]:
@@ -3187,15 +3560,29 @@ def _message_text(message_json: str) -> str:
     return ""
 
 
-def _read_session_id_from_db(db_path: Path) -> str | None:
+def _read_session_meta(db_path: Path) -> dict[str, Any]:
+    """Best-effort read of session id, head revision and pinned count."""
+
+    out: dict[str, Any] = {
+        "session_id": None,
+        "revision": None,
+        "pinned_count": None,
+        "ok": False,
+    }
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
     except sqlite3.Error:
-        return None
+        return out
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'session_id'").fetchone()
-        return None if row is None else str(row[0])
-    except sqlite3.Error:
-        return None
+        out["session_id"] = None if row is None else str(row[0])
+        revision = conn.execute("SELECT MAX(revision) FROM revisions").fetchone()
+        out["revision"] = None if revision is None else int(revision[0] or 0)
+        pins = conn.execute("SELECT COUNT(*) FROM pins").fetchone()
+        out["pinned_count"] = 0 if pins is None else int(pins[0] or 0)
+        out["ok"] = out["session_id"] is not None
+        return out
+    except (sqlite3.Error, TypeError, ValueError):
+        return out
     finally:
         conn.close()

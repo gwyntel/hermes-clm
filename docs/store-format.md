@@ -10,13 +10,17 @@ Everything here is stdlib-only: no Hermes import, no provider/model configuratio
 ## 1. Layout
 
 ```text
-<hermes_home>/clm/sessions/<session-key>/
+<hermes_home>/clm/sessions/<slug>-<digest>/
 ├── session.db          authoritative SQLite (WAL, STRICT tables, triggers)
 ├── session.db-wal      WAL (transient)
 ├── session.db-shm      WAL index (transient)
 ├── store.lock          sibling flock file; exactly one writer
 └── active.json         DERIVED index only; never authoritative, never a payload copy
 ```
+
+The directory name is exactly `<slug>-<digest>` as defined in *Session key derivation*
+below, under `<hermes_home>/clm/sessions/` (never a bare session id). Operator tooling may
+enumerate these directories with `ContextStore.list_sessions(hermes_home)`.
 
 * Directories `0700`, every file `0600` (re-applied on open, so a loose umask or a
   pre-existing directory cannot widen access).
@@ -230,15 +234,21 @@ idempotent: scrubbed text contains no match for the same rules twice. Raw in thi
 | `rewrite` | replaces `content` text | role/tool structure preserved; refused for protected/pinned/multimodal; bounded by `max_rewrite_bytes` |
 | `pin` | adds a pin (one-way for agents) | inert `already_pinned` / `not_active` |
 | `restore` | reinstate from dropped/offloaded | inert `uid_absent` when the host no longer has the UID |
-| `boundary` | audit/snapshot marker | no span ids, no state change, revision kind `boundary` |
+| `boundary` | audit/snapshot marker | no span ids, no state change, revision kind `boundary`; optional string `label` (or `replacement`) recorded as boundary provenance only |
 
 Inert reasons are explicit in receipts: `already_active`, `not_active`, `already_pinned`,
 `uid_absent`, `pinned`, `not_pinned`.
 
+A boundary marker never targets spans and never becomes active content. Its optional
+`label`/`replacement` must be a string (non-strings raise `ValidationError(invalid_replacement)`);
+the label is persisted in `operations.replacement` and mirrored in provenance
+`{"label": ...}`, and commit audit records `boundary_labels` for inspectability.
+
 ### 7.2 Batch validation (before anything is written)
 
 * closed kind set; unknown fields rejected; `span_ids` unique across the whole batch
-  (`duplicate_span`); non-empty except `boundary`.
+  (`duplicate_span`); non-empty except `boundary`. `label` is accepted only for `boundary`
+  and only as a string.
 * every span must exist for this session (`unknown_span`) — unknown/other-session ids never leak.
 * protected spans refuse `drop`/`offload`/`rewrite` (`protected_span`), pinned spans refuse the same
   (`span_pinned`); `rewrite` requires `editable` text (`not_editable`).
@@ -286,10 +296,17 @@ is reported by `verify()` and repaired by `recover()`.
 ## 8. Pins and authority
 
 * Agents may `pin` (one-way). There is no agent unpin operation; the kind set has no `unpin`.
-* `unpin(span_id, expected_revision, txn_id, actor_origin)` requires `actor_origin="operator"` and
-  raises `PinAuthorityError(pin_authority)` otherwise; `operator_unpin(...)` is the convenience
-  wrapper for the operator command path. Both write a revision (`kind='operator'`) so the head
-  ordering, audit and idempotency stay uniform.
+* `unpin(span_id_or_ids, *, expected_revision, txn_id, actor_origin)` requires
+  `actor_origin="operator"` and raises `PinAuthorityError(pin_authority)` otherwise.
+  It accepts a single id (`span_ids="sp_1"` or the `span_id=` keyword) or a sequence
+  (`span_ids=["sp_1", "sp_2"]`); `operator_unpin(...)`/`operator_unpin_many(...)` are the
+  operator command convenience wrappers. Repeating `span_id` is a validation error, and
+  duplicates in a sequence collapse. A batch is validated and applied **atomically in
+  exactly one revision/transaction**: any unknown span aborts before a pin is removed.
+  Each removed pin writes a `pin_events` row; non-pinned targets are inert (`not_pinned`).
+  The revision kind is `operator` and the head/audit/idempotency ordering is identical to
+  a normal commit; `txn_id` replay is signature-checked (single-target signatures keep the
+  legacy `{op:"unpin",span_id}` shape).
 * Pinning never changes a span's `origin` or authority: a pinned aux summary is still an untrusted
   aux summary. Unpinning of a non-pinned span is inert (`not_pinned`).
 * Pins are current state, not revision state: they survive `revert`.
@@ -298,12 +315,26 @@ is reported by `verify()` and repaired by `recover()`.
 ## 9. Proposals
 
 `create_proposal(operations, base_revision)` accepts aux-authored operations only
-(`actor_origin="aux"`; anything else is `actor_mismatch`), validates them structurally (unknown
-span, protected/pinned, group completeness, rewrite limits), bounds them by `max_aux_spans`
-(`too_many_aux_spans`), and stores an immutable record keyed by
-`proposal_id = "prop_" + sha256(canonical({base, origin, operations}))[:24]`, with
-`proposal_sha256` over the same canonical payload. Creating a proposal never changes the head and
-never applies anything.
+(`actor_origin="aux"`; anything else is `actor_mismatch`). A raw mapping without
+`actor_origin` defaults to `aux` — this is the shape `AuxCompressor` sends. Operations are
+validated structurally (unknown span, protected/pinned, group completeness, rewrite limits)
+and bounded by `max_aux_spans` (`too_many_aux_spans`), then stored immutably. The identity
+is **exactly** the auxiliary helper:
+
+```text
+proposal_sha256 = sha256(canonical_json({
+    "base_revision": <int>,
+    "operations": [<raw payload exactly as supplied>],
+    "origin": "aux",
+}))
+# canonical_json = sorted keys, compact separators, UTF-8
+proposal_id = "prop_" + proposal_sha256[:24]
+```
+
+Raw payload means the caller's operation mappings are hashed without store-added
+`actor_origin`/`provenance` fields, so `hermes_clm.auxiliary.canonical_proposal_sha256`
+and the store agree byte-for-byte. Creating a proposal never changes the head and never
+applies anything.
 
 `accept_proposal(proposal_id, proposal_sha256, base_revision, txn_id)` requires the exact hash and
 base revision (`proposal_hash_mismatch`, `proposal_base_mismatch`), and refuses a proposal whose
@@ -330,7 +361,8 @@ Verification levels (deliberate cost/coverage trade):
 | `snapshot()` | head revision hash (2 queries) | O(1) per call |
 | `snapshot()` with `snapshot_verify_hashes=True` | + payload hash of every current span | O(spans) |
 | `retrieve(span_id)` | payload hash of that span | O(1) |
-| `status()` | head revision hash + counts | O(1) |
+| `status()` | head revision hash + counts; `health.hash_chain` reports `{ok, checked:"head", revision, head_hash}` | O(1) |
+| `verify_chain()` | full archive chain + full revision chain (no payload re-hash) | O(revisions+archive) |
 | `verify()` | `PRAGMA integrity_check`, full archive chain, every payload hash, every revision hash, checkpoint-vs-replay consistency | full scan |
 | `recover()` | `verify()` + checkpoint rebuild + stale-txn expiry + index rebuild | full scan |
 
@@ -381,6 +413,30 @@ from SQLite. `index_status()` reports `ok`/`stale`/`rebuilt`/`missing_or_corrupt
 | `stale_txn_ttl_seconds` (3600) | staged-transaction age before recovery expires it |
 | `retention_sessions` (32) | declared retention for operator purge; the store never deletes automatically |
 
+### 12.1 Retention purge (operator-only, opt-in)
+
+`ContextStore.purge_expired_sessions(hermes_home, *, keep=None, retention_sessions=32,
+current_session_id=None, include_pinned=False, include_current=False, max_purge=64,
+dry_run=False)` and `ContextStore.list_sessions(hermes_home)` are the explicit retention
+surface for `clm.retention_sessions`. Exact semantics:
+
+* `list_sessions` enumerates `<home>/clm/sessions/<slug>-<digest>` directories and reports
+  `store_key`, `session_id`, `revision`, `pinned_count`, `modified`, `db_bytes`, `ok`
+  (read read-only; unreadable stores are listed with `ok=False` and never auto-deleted).
+* `keep` defaults to `retention_sessions` (the engine passes `clm.retention_sessions`);
+  it is the number of **newest** sessions (by `session.db` mtime) retained. `keep=0`
+  makes every otherwise eligible session a candidate.
+* A session with **any** `pins` rows is skipped unless `include_pinned=True` is passed
+  explicitly. A `current_session_id` is skipped unless `include_current=True` is passed
+  explicitly. This is the "never purge current/pinned without an explicit request" rule.
+* Unverifiable/unreadable stores are always skipped (`reason="unreadable"`).
+* At most `max_purge` stores are removed per call (bounded sweep); overflow is reported
+  with `reason="purge_limit"` and `limit_hit=True`.
+* `dry_run=True` computes the same decision set without deleting.
+* The report is JSON-serializable: `ok`, `scanned`, `retained`, `purged`, `purged_count`,
+  `skipped`, `dry_run`, `limit_hit`. No engine/tool path calls this automatically; the
+  store never expires sessions on its own.
+
 All read surfaces are strictly session-scoped — they take no session argument and cannot address
 another store. `inspect` returns ≤ `limit` spans with 240-char previews; `search` returns snippets
 and opaque cursors (base64 `{v:1, after:seq}`) that are rejected if tampered; `retrieve` returns the
@@ -424,12 +480,14 @@ Additions, not replacements — nothing above was changed:
 * `for_session(..., config=StoreConfig | Mapping | None)` keyword: limits are injected (the engine
   owns `clm.*` parsing; the store never reads Hermes config). Unknown config keys raise
   `ValidationError(unknown_config)`.
-* `unpin(span_id, *, expected_revision, txn_id, actor_origin)` and
-  `operator_unpin(span_id, *, expected_revision, txn_id)` — the operator unpin path the manual
-  command needs. `pin_requires_operator(actor_origin)` is available as a guard for tool layers.
-* `verify()`, `rebuild_state()`, `rebuild_index()`, `index_status()`,
+* `unpin(span_ids, *, span_id=None, expected_revision, txn_id, actor_origin)` and
+  `operator_unpin(...)` / `operator_unpin_many(...)` — the operator unpin path the manual
+  command needs, accepting one id or a sequence applied atomically in one revision.
+  `pin_requires_operator(actor_origin)` is available as a guard for tool layers.
+* `verify()`, `verify_chain()`, `rebuild_state()`, `rebuild_index()`, `index_status()`,
   `expire_staged_transactions(*, ttl_seconds=None)`, `ContextStore.list_sessions(home)`,
-  `ContextStore.purge_session(home, session_id)`, plus `recovery.recover`, `recover_session`,
+  `ContextStore.purge_session(home, session_id)`,
+  `ContextStore.purge_expired_sessions(home, ...)`, plus `recovery.recover`, `recover_session`,
   `verify_session`, `rebuild_index`.
 * `ArchivedSpan` extra fields: `role`, `editable`, `present`, `current`, `state`, `rewrite_text`,
   `rewrite_sha256`, `pinned`, `est_tokens`, `version`, `seq`, `created_revision`, plus
@@ -522,6 +580,11 @@ cd tests/unit && python3 -m unittest discover -s . -p 'test_*.py'
 | `test_store_index.py` | `active.json` shape, tracking, self-healing, never authoritative |
 | `test_store_locking.py` | WAL/pragmas, private modes, single writer, concurrent CAS loser |
 | `test_store_retrieval.py` | bounded inspect/search/retrieve, cursor tamper rejection |
+| `test_store_health_layout.py` | `<home>/clm/sessions/<slug>-<digest>` layout, `status().health.hash_chain`, `verify_chain()` tamper detection |
+| `test_store_boundary.py` | boundary label accepted as string/provenance, non-string refused, never active content |
+| `test_store_unpin_many.py` | single/batch operator unpin, one-revision atomicity, authority, idempotent replay |
+| `test_store_retention.py` | `list_sessions` metadata, bounded `purge_expired_sessions`, pinned/current exemptions, dry run |
+| `test_store_proposal_hash_compat.py` | store hash byte-equals `auxiliary.canonical_proposal_sha256` (raw payload, `base_revision` key, golden digest) |
 | `test_store_api_contract.py` | exact documented signatures/result fields; closed-handle refusals |
 | `test_archive_redaction.py` | every redaction rule, idempotence, archive hash chain verification |
 | `test_recovery_crash.py` | `os._exit` crash mid-stage/commit/ingest: WAL rollback, no partial rows, stale-txn expiry |
@@ -539,8 +602,9 @@ library call, so the assertions are about real SQLite recovery, not simulated ex
   batch" unless `assume_full_history` matches the caller's actual behaviour.
 * Schema migrations: only version 1 exists; a newer `schema_version` is refused
   (`schema_too_new`) rather than guessed at.
-* `retention_sessions` is a declared limit for the operator purge tooling; the store never
-  deletes sessions on its own.
+* `retention_sessions` is a declared limit for the operator purge tooling
+  (`ContextStore.purge_expired_sessions`); the store never deletes sessions on its own, and
+  current/pinned sessions require an explicit `include_current`/`include_pinned` request.
 * There is no per-message size cap: a single archived message is bounded only by caller memory and
   SQLite limits. Host history size is the host's contract; redaction bounds neither size nor count.
   Rewrites (agent-authored text) *are* bounded by `max_rewrite_bytes`.
