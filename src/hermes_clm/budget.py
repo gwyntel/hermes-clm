@@ -84,7 +84,10 @@ def estimate_message_tokens(message: Any) -> int:
 
 def estimate_messages_tokens(messages: Iterable[Any]) -> int:
     """Rough token count for a message list."""
-    return sum(estimate_message_tokens(message) for message in messages or ())
+    total = 0
+    for message in messages or ():
+        total += estimate_message_tokens(message)
+    return total
 
 
 class TokenCalibration:

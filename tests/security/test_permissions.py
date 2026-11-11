@@ -11,7 +11,6 @@ import os
 import stat
 
 import pytest
-
 from _support import contract as C
 from _support.assertions import expect_refusal, msg
 

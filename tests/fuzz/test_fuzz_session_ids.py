@@ -45,9 +45,21 @@ def test_random_session_ids_cannot_escape_the_store_root(home):
         assert os.path.commonpath([str(directory), str(sessions_root)]) == str(sessions_root), (
             f"accepted id {candidate!r} resolved outside the sessions root: {directory}"
         )
-        assert directory.name == candidate, (
-            f"accepted id {candidate!r} was silently sanitised to {directory.name!r}"
-        )
+        if directory.name != candidate:
+            # Every id receives a readable slug plus a collision-resistant digest.
+            # The raw id is never a path component; the mapping must be stable.
+            if (
+                all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in candidate)
+                and len(candidate) <= 64
+            ):
+                assert directory.name.startswith(candidate), (
+                    f"safe session id {candidate!r} lost its readable slug: {directory.name!r}"
+                )
+            again = C.for_session(home, candidate)
+            C.close(again)
+            assert C.session_dir(home, candidate).resolve() == directory, (
+                f"hashed alias for {candidate!r} is not stable"
+            )
     # a corpus of pure alphabet strings will accept some; that is fine. What matters is
     # that none escaped. Sanity-check that the loop was not a no-op.
     assert accepted or _iterations() == 0

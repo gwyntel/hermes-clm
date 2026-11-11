@@ -699,8 +699,6 @@ def test_service_revision_is_zero_without_a_store():
 
 
 def test_service_delegates_proposal_creation_and_acceptance():
-    from hermes_clm.auxiliary import canonical_proposal_sha256
-
     service, store = _service_with(_RecordingStore(revision=3))
     operations = [{"kind": "rewrite", "span_ids": ["t1"], "replacement": "short"}]
 
@@ -709,20 +707,18 @@ def test_service_delegates_proposal_creation_and_acceptance():
     assert proposal["proposal_id"] == "prop_1"
     assert proposal["base_revision"] == 3
     assert store.calls[0][1]["base"] == 3
-    # The reviewed hash is the aux canonical form; the store digest rides beside it.
-    aux_hash = canonical_proposal_sha256(operations, base_revision=3)
-    assert proposal["proposal_sha256"] == aux_hash
-    assert proposal["store_proposal_sha256"] == "a" * 64
-    # Aux-originated operations are stamped for the store's actor check.
-    assert store.calls[0][1]["operations"] == [{**operations[0], "actor_origin": "aux"}]
+    # The store owns proposal identity; its hash is surfaced unchanged.
+    assert proposal["proposal_sha256"] == "a" * 64
+    assert "store_proposal_sha256" not in proposal
+    # The store defaults a missing actor to aux; the engine adds no fields.
+    assert store.calls[0][1]["operations"] == operations
 
     accepted = service.accept_proposal(
-        proposal_id="prop_1", proposal_sha256=aux_hash, base_revision=3, txn_id="txn-acc"
+        proposal_id="prop_1", proposal_sha256="a" * 64, base_revision=3, txn_id="txn-acc"
     )
     assert accepted["ok"] is True
     assert store.calls[1][0] == "accept_proposal"
     assert store.calls[1][1]["txn_id"] == "txn-acc"
-    # The aux digest is translated to the digest the store recorded.
     assert store.calls[1][1]["proposal_sha256"] == "a" * 64
 
 

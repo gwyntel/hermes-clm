@@ -11,8 +11,6 @@ import ast
 import pathlib
 import re
 
-import pytest
-
 TEST_DIR = pathlib.Path(__file__).resolve().parent
 REVIEW_IDS = [f"T{n}" for n in range(1, 50)]
 RANGE_RE = re.compile(r"^(T(\d+))(?:\.\.(T(\d+)))?$")

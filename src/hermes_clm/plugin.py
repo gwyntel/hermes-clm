@@ -140,7 +140,7 @@ def build_engine(config: Mapping[str, Any] | None = None) -> Any:
     try:
         # The engine accepts a mapping by contract (`EngineConfig.from_mapping`);
         # its constructor annotation still says EngineConfig until the engine fix.
-        engine = constructor(config=cfg)  # type: ignore[arg-type]
+        engine = constructor(config=cfg)
     except AttributeError as exc:
         adapter = engine_config(cfg) if cfg and "hermes_home" in str(exc) else None
         if adapter is None:

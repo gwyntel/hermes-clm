@@ -14,7 +14,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from . import _defect as D
 from .models import (
@@ -528,7 +528,7 @@ def _op_kwargs(op):
             "actor_origin": op.get("actor_origin", "aux"),
         }
     return {
-        "kind": getattr(op, "kind"),
+        "kind": op.kind,
         "span_ids": tuple(getattr(op, "span_ids", ()) or ()),
         "replacement": getattr(op, "replacement", None),
         "actor_origin": getattr(op, "actor_origin", "aux"),
@@ -541,3 +541,11 @@ def _tighten_dir(path: Path, *, strict: bool = False):
     except OSError:
         if strict:
             raise
+
+
+def session_dir(hermes_home, session_id) -> Path:
+    return Path(hermes_home) / "clm" / "sessions" / str(session_id)
+
+
+def sessions_root(hermes_home) -> Path:
+    return Path(hermes_home) / "clm" / "sessions"

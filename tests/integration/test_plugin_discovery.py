@@ -82,9 +82,10 @@ if engine is not None:
     result["tool_schemas"] = [schema.get("name") for schema in schemas]
     result["schema_duplicates"] = len(schemas) - len(set(result["tool_schemas"]))
     result["unknown_tool"] = json.loads(engine.handle_tool_call("clm_not_a_tool", {}))
-    status = json.loads(engine.handle_tool_call("clm_status", {}))
-    result["status"] = status
-    result["engine_config"] = status.get("config")
+    result["status"] = engine.get_status()
+    result["engine_config"] = (
+        engine.config.to_dict() if hasattr(getattr(engine, "config", None), "to_dict") else None
+    )
 
 # A second load must produce a usable engine and must not raise.
 second = load_context_engine(name) if engine_dir else None

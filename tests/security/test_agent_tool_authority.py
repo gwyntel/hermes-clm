@@ -7,10 +7,8 @@ surface in docs/architecture.md. Handlers return JSON strings and reject unknown
 from __future__ import annotations
 
 import inspect
-import json
 
 import pytest
-
 from _support import contract as C
 
 C.need(C.TOOLS_MOD)

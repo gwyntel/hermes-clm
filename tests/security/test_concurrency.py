@@ -7,12 +7,10 @@ the committing transaction).
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 
 import pytest
-
 from _support import contract as C
 from _support.assertions import assert_strings_absent, expect_refusal, msg, run_child
 
@@ -162,8 +160,8 @@ def test_pin_created_between_stage_and_commit_blocks_the_commit(home, sid):
     assert C.res_ok(C.commit(store, txn_id="t38-pin", expected_revision=revision))
     pinned_rev = C.snap_revision(C.snapshot(store))
 
-    result = C.commit(store, txn_id="t38-drop", expected_revision=revision)
-    assert not C.res_ok(result), (
+    result = expect_refusal(lambda: C.commit(store, txn_id="t38-drop", expected_revision=revision))
+    assert result, (
         "commit staged before pin creation was applied: pin not re-checked inside the "
         "write transaction (I23 TOCTOU)"
     )

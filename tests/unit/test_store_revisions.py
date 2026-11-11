@@ -6,7 +6,7 @@ import unittest
 
 import store_testkit as kit
 
-from hermes_clm.errors import ValidationError
+from hermes_clm.errors import ConflictError, ValidationError
 
 
 class RevisionTests(kit.StoreTestCase):
@@ -74,19 +74,23 @@ class RevisionTests(kit.StoreTestCase):
         )
         self.assertEqual([r.span_id for r in result.applied], [self.ids["u-a2"]])
 
-    def test_pins_survive_revert(self) -> None:
+    def test_revert_across_a_pin_is_refused_and_pin_survives(self) -> None:
         self.commit(self.store, [self.pin(self.ids["u-a2"])], "txn-pin")
         self.commit(self.store, [self.drop([self.ids["u-a1"], self.ids["u-t1"]])], "txn-drop")
-        self.store.revert(
-            target_revision=1,
-            expected_revision=self.store.snapshot().revision,
-            txn_id="txn-revert",
-            actor_origin="agent",
-        )
+        head = self.store.snapshot().revision
+        with self.assertRaises(ConflictError) as raised:
+            self.store.revert(
+                target_revision=1,
+                expected_revision=head,
+                txn_id="txn-revert",
+                actor_origin="agent",
+            )
+        self.assertEqual(raised.exception.code, "span_pinned")
+        self.assertEqual(self.store.snapshot().revision, head)
         snapshot = self.store.snapshot()
         self.assertIn(self.ids["u-a2"], snapshot.pins, "pins are current state, not revision state")
         self.assertIs(snapshot.span(self.ids["u-a2"]).state, kit.SpanState.ACTIVE)
-        # the pin still protects the span after the revert
+        # the pin still protects the span after the refused revert
         with self.assertRaises(Exception) as ctx:
             self.commit(self.store, [self.drop([self.ids["u-a2"]])], "txn-after")
         self.assertEqual(getattr(ctx.exception, "code", None), "span_pinned")

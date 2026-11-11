@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 from typing import Any, Callable, Iterable
-
-import pytest
 
 from _support import contract as C
 

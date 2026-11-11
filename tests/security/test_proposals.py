@@ -7,10 +7,7 @@ session, non-pinned), I28 (strict closed schema, unknown fields rejected).
 
 from __future__ import annotations
 
-import json
-
 import pytest
-
 from _support import contract as C
 from _support.assertions import expect_refusal, msg
 

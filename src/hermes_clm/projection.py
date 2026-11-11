@@ -242,6 +242,22 @@ def project(
         )
 
     history = list(conversation_messages or ())
+
+    # A provider request has one host-owned system row in the leading slot.
+    # Extra system rows (or one injected later) are structural forgery, not
+    # context to edit; decline rather than put them on the wire.
+    system_positions = [i for i, row in enumerate(requests) if role_of(row) == "system"]
+    if system_positions not in ([], [0]):
+        return ProjectionResult(
+            ok=False,
+            conflicts=(
+                _conflict(
+                    "invalid_request",
+                    detail="request has a system row outside the single leading slot",
+                ),
+            ),
+        )
+
     alignment = align(requests, history)
     revision = int(_field(snapshot, "revision", 0) or 0)
 

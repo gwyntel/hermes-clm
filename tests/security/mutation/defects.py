@@ -12,7 +12,10 @@ PROBES = [
         "id": "M1",
         "invariant": "I1/I2",
         "t": "T1",
-        "nodeid": "tests/security/test_paths.py::test_bad_session_id_refused_before_any_filesystem_use",
+        "nodeid": (
+            "tests/security/test_paths.py::"
+            "test_hostile_session_id_never_escapes_and_is_refused_or_hashed"
+        ),
         "defect": "session-id validation removed: a host-supplied id is joined onto the "
         "store path and traverses out of the sessions root",
     },

@@ -29,7 +29,6 @@ from .auxiliary import (
     AuxCompressor,
     AuxLimits,
     bound_timeout,
-    canonical_proposal_sha256,
 )
 from .budget import TokenCalibration
 from .errors import CLMError
@@ -111,7 +110,14 @@ class _StandaloneEngineBase:
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs: Any) -> str:
         """Reject unknown tools with a JSON error string."""
-        return json.dumps({"error": f"Unknown context engine tool: {name}"})
+        message = f"Unknown context engine tool: {name}"
+        return json.dumps(
+            {
+                "ok": False,
+                "error": message,
+                "errors": [{"code": "unknown_tool", "message": message}],
+            }
+        )
 
     def on_session_start(self, session_id: str, **kwargs: Any) -> None:
         """No-op."""
@@ -157,7 +163,7 @@ def _load_engine_base() -> type:
         return _StandaloneEngineBase
 
 
-_EngineBase = _load_engine_base()
+_EngineBase: Any = _load_engine_base()
 
 
 def _config_value(mapping: Mapping[str, Any], key: str, default: Any) -> Any:
@@ -598,27 +604,13 @@ class ToolService:
         if not callable(create):
             raise RuntimeError("clm store does not implement create_proposal()")
         plain: list[dict[str, Any]] = []
-        prepared: list[Any] = []
         for operation in operations:
-            if isinstance(operation, Mapping):
-                item = {
-                    key: operation[key] for key in _PROPOSAL_OPERATION_FIELDS if key in operation
-                }
-                plain.append(item)
-                prepared.append({**item, "actor_origin": "aux"})
-            else:  # pragma: no cover - EditOperation instances pass through
-                prepared.append(operation)
-        payload = _payload(create(prepared, base_revision=base))
-        store_hash = payload.get("proposal_sha256")
-        proposal_id = payload.get("proposal_id")
-        if plain and isinstance(store_hash, str) and isinstance(proposal_id, str):
-            aux_hash = canonical_proposal_sha256(plain, base_revision=base)
-            self._proposal_hashes[(proposal_id, aux_hash)] = store_hash
-            # The hash the agent reviews and echoes back is the auxiliary layer's
-            # canonical digest; the store's own digest travels beside it and both
-            # are accepted by ``accept_proposal``.
-            payload["store_proposal_sha256"] = store_hash
-            payload["proposal_sha256"] = aux_hash
+            if not isinstance(operation, Mapping):
+                raise TypeError("proposal operations must be mappings")
+            plain.append(
+                {key: operation[key] for key in _PROPOSAL_OPERATION_FIELDS if key in operation}
+            )
+        payload = _payload(create(plain, base_revision=base))
         return payload
 
     def accept_proposal(
@@ -629,16 +621,11 @@ class ToolService:
         base_revision: int,
         txn_id: str,
     ) -> dict[str, Any]:
-        """Stage an accepted proposal; commit stays a separate step.
-
-        Accepts either digest recorded for this proposal: the store's own or the
-        auxiliary layer's canonical form of exactly those operations.
-        """
-        stored_hash = self._proposal_hashes.get((proposal_id, proposal_sha256))
+        """Stage an accepted proposal; commit stays a separate step."""
         return self._call_store(
             "accept_proposal",
             proposal_id=proposal_id,
-            proposal_sha256=stored_hash or proposal_sha256,
+            proposal_sha256=proposal_sha256,
             base_revision=base_revision,
             txn_id=txn_id,
         )
@@ -1449,7 +1436,14 @@ class CLMEngine(_EngineBase):
         try:
             handler = self._tool_handlers_by_name().get(str(name))
             if handler is None:
-                return json.dumps({"ok": False, "error": f"Unknown context engine tool: {name}"})
+                message = f"Unknown context engine tool: {name}"
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": message,
+                        "errors": [{"code": "unknown_tool", "message": message}],
+                    }
+                )
             payload: dict[str, Any]
             if isinstance(args, Mapping):
                 payload = dict(args)

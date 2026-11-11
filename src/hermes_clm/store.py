@@ -135,7 +135,7 @@ class StoreConfig:
     busy_timeout_ms: int = 5_000
     stale_txn_ttl_seconds: int = 3_600
     assume_full_history: bool = True
-    snapshot_verify_hashes: bool = False
+    snapshot_verify_hashes: bool = True
     clock: Callable[[], str] | None = field(default=None, compare=False)
     extra_redactions: tuple[RedactionRule, ...] = ()
 
@@ -146,7 +146,7 @@ def _coerce_config(config: StoreConfig | Mapping[str, Any] | None) -> StoreConfi
     if isinstance(config, StoreConfig):
         return config
     if isinstance(config, Mapping):
-        known = {f for f in StoreConfig.__dataclass_fields__}  # type: ignore[attr-defined]
+        known = {f for f in StoreConfig.__dataclass_fields__}
         unknown = set(config) - known
         if unknown:
             raise ValidationError(
@@ -252,6 +252,20 @@ def _ensure_private_dir(path: Path, *, root: Path) -> None:
     _assert_plain(path, kind="directory")
 
 
+def _assert_single_link(path: Path) -> None:
+    """Refuse a store file with another hard link: its bytes are not private."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+        raise PathSafetyError(
+            "store file has multiple hard links",
+            code="hardlink_refused",
+            details={"path": path.name, "nlink": st.st_nlink},
+        )
+
+
 def _harden_file(path: Path) -> None:
     try:
         st = os.lstat(path)
@@ -260,6 +274,12 @@ def _harden_file(path: Path) -> None:
     if stat.S_ISLNK(st.st_mode):
         raise PathSafetyError(
             "store file is a symlink", code="symlink_refused", details={"path": path.name}
+        )
+    if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+        raise PathSafetyError(
+            "store file has multiple hard links",
+            code="hardlink_refused",
+            details={"path": path.name, "nlink": st.st_nlink},
         )
     if stat.S_IMODE(st.st_mode) != 0o600:
         os.chmod(path, 0o600)
@@ -583,7 +603,8 @@ class ContextStore:
         root = sessions_root(home)
         directory = session_dir(home, sid)
         if not read_only:
-            _ensure_private_dir(root, root=root.parent)
+            _ensure_private_dir(home / STORE_DIRNAME, root=home)
+            _ensure_private_dir(root, root=home / STORE_DIRNAME)
             _ensure_private_dir(directory, root=root)
         else:
             if not directory.exists():
@@ -595,6 +616,7 @@ class ContextStore:
             _assert_plain(directory, kind="directory")
         _assert_contained(root, directory)
         db_path = directory / DB_FILENAME
+        _assert_single_link(db_path)
         lock_fd: int | None = None
         conn: sqlite3.Connection | None = None
         try:
@@ -932,6 +954,41 @@ class ContextStore:
             est_tokens=est,
         )
 
+    def _tombstone_span(self, row: Mapping[str, Any], *, pinned: bool, reason: str) -> ArchivedSpan:
+        """An explicit non-authoritative stand-in for an unreadable payload.
+
+        The row stays archived and its identity/hash are preserved. Only the
+        unreadable bytes are replaced, so projection can continue with an
+        auditable gap instead of either serving corrupt data or losing every
+        other span.
+        """
+
+        span_id = str(row["span_id"])
+        uid = str(row["uid"])
+        marker = f"[clm.unreadable payload span={span_id} reason={reason}]"
+        message = {"role": str(row["role"]), "content": marker, "message_uid": uid}
+        return ArchivedSpan(
+            span_id=span_id,
+            uid=uid,
+            message=message,
+            origin=SpanOrigin(row["origin"]),
+            protected=True,
+            content_sha256=str(row["content_sha256"]),
+            group_id=row["group_id"],
+            aliases=(),
+            seq=int(row["seq"]),
+            version=int(row["version"]),
+            created_revision=int(row["created_revision"]),
+            editable=False,
+            present=bool(row["present"]) if row["present"] is not None else False,
+            current=True,
+            state=SpanState(row["state"] or SpanState.ACTIVE.value),
+            rewrite_text=None,
+            rewrite_sha256=None,
+            pinned=pinned,
+            est_tokens=_tokens_for_text(marker),
+        )
+
     def _pin_ids(self, cur: sqlite3.Cursor) -> set[str]:
         return {str(row[0]) for row in cur.execute("SELECT span_id FROM pins")}
 
@@ -970,8 +1027,25 @@ class ContextStore:
             "LEFT JOIN span_state st ON st.span_id = s.span_id ORDER BY s.seq"
         ):
             if verify:
-                self._verify_payload(row)
-            span = self._span_from_row(row, pinned=str(row["span_id"]) in pins, current=True)
+                try:
+                    self._verify_payload(row)
+                except (CorruptStoreError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    reason = getattr(exc, "code", None) or type(exc).__name__
+                    spans[str(row["span_id"])] = self._tombstone_span(
+                        row,
+                        pinned=str(row["span_id"]) in pins,
+                        reason=str(reason),
+                    )
+                    continue
+            try:
+                span = self._span_from_row(row, pinned=str(row["span_id"]) in pins, current=True)
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                spans[str(row["span_id"])] = self._tombstone_span(
+                    row,
+                    pinned=str(row["span_id"]) in pins,
+                    reason=type(exc).__name__,
+                )
+                continue
             spans[span.span_id] = span
         return spans
 
@@ -1078,7 +1152,7 @@ class ContextStore:
             cur = self._conn.cursor()
             try:
                 rev_row = self._head_row(cur)
-                self._verify_head(cur, rev_row)
+                self._verify_head(cur, dict(rev_row))
                 revision = int(rev_row["revision"])
                 spans = self._load_current_spans(cur)
                 pins = self._load_pins(cur)
@@ -1171,7 +1245,7 @@ class ContextStore:
                 seen.append(uid)
                 message = outcome.message
                 role = str(message.get("role", ""))
-                role_key = role.strip().lower()
+                role_key = role
                 origin = origin_for_role(role_key)
                 content_json = canonical_json(message)
                 content_sha = sha256_hex(content_json)
@@ -1181,7 +1255,7 @@ class ContextStore:
                     group_id: str | None = "grp_" + sha256_hex(uid)[:16]
                     for call in tool_calls:
                         if isinstance(call, Mapping) and call.get("id"):
-                            group_map[str(call["id"])] = group_id
+                            group_map[str(call["id"])] = str(group_id)
                 elif role_key in {"tool", "function"}:
                     call_id = message.get("tool_call_id", message.get("tool_use_id"))
                     group_id = group_map.get(str(call_id)) if call_id is not None else None
@@ -1525,7 +1599,7 @@ class ContextStore:
                     inert=(),
                     txn_id=txn_id,
                     staged_sha256=str(existing["staged_sha256"]),
-                    staged_operations=ops,
+                    staged_operations=tuple(ops),
                     replayed=True,
                     already_committed=True,
                 )
@@ -1647,7 +1721,7 @@ class ContextStore:
                     code="stale_stage",
                     details={"base_revision": int(txn["base_revision"]), "current": head},
                 )
-            ops = self._decode_staged_ops(txn)
+            ops = self._decode_staged_ops(dict(txn))
             planned = self._plan(cur, ops)
             result = self._apply(
                 cur,
@@ -2063,6 +2137,18 @@ class ContextStore:
                     details={"target": target, "head": head},
                 )
             desired = self._replay_states(cur, target)
+            crossed_pins = [
+                str(row["span_id"])
+                for row in cur.execute(
+                    "SELECT span_id FROM pins WHERE revision > ? ORDER BY span_id", (target,)
+                )
+            ]
+            if crossed_pins:
+                raise ConflictError(
+                    "revert would cross a pin committed after the target revision",
+                    code="span_pinned",
+                    details={"target_revision": target, "span_ids": crossed_pins},
+                )
             current = {
                 str(row["span_id"]): (SpanState(row["state"]), row["rewrite_text"])
                 for row in cur.execute("SELECT span_id, state, rewrite_text FROM span_state")
@@ -2698,7 +2784,7 @@ class ContextStore:
                     },
                 }
                 try:
-                    self._verify_head(cur, rev_row)
+                    self._verify_head(cur, dict(rev_row))
                 except CorruptStoreError as exc:
                     health = {
                         "ok": False,
@@ -2815,7 +2901,7 @@ class ContextStore:
                     ),
                 }
             )
-        next_cursor = _encode_cursor(items[-1]["seq"]) if len(rows) > n else None
+        next_cursor = _encode_cursor(int(str(items[-1]["seq"]))) if len(rows) > n else None
         return {
             "ok": True,
             "session_id": self._session_id,
@@ -2873,7 +2959,7 @@ class ContextStore:
                     "snippet": _preview(snippet, 200),
                 }
             )
-        next_cursor = _encode_cursor(items[-1]["seq"]) if len(rows) > n else None
+        next_cursor = _encode_cursor(int(str(items[-1]["seq"]))) if len(rows) > n else None
         return {
             "ok": True,
             "session_id": self._session_id,

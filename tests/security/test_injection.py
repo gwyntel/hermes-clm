@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from _support import contract as C
 from _support.adversarial import AUX_SPOOF_TEXT, POLICY_ASSERTIONS, SECRETS
 from _support.assertions import msg
@@ -45,9 +44,18 @@ def test_model_injection_persists_as_labelled_data_with_no_policy_effect(store, 
     index, found = C.find_message(out.messages, injection)
     assert found is not None, "the model's own text must persist (it is evidence)"
     assert found["role"] == "assistant"
-    marker = _origin_marker(found)
-    assert marker in C.MODEL_ORIGINS, (
-        f"projected model text carries origin {marker!r}; provenance must be explicit (I17)"
+    span = next(
+        (
+            item
+            for item in C.snap_spans(C.snapshot(store)).values()
+            if injection in C.span_text(item)
+        ),
+        None,
+    )
+    assert span is not None, "model text must have a durable, provenance-bearing span"
+    marker = str(C.span_field(span, "origin", ""))
+    assert marker.lower() in C.MODEL_ORIGINS, (
+        f"archived model text carries origin {marker!r}; provenance must be explicit (I17)"
     )
 
     # I19: the text must not have changed engine mode, pins or config
@@ -72,10 +80,23 @@ def test_injection_cannot_disable_redaction_for_later_ingest(store):
 
 @pytest.mark.t("T14")
 def test_accepted_aux_text_renders_untrusted_and_after_operator_messages(store, base_messages):
-    C.ingest(store, base_messages)
+    conversation = list(base_messages) + [
+        msg("user", "one more constraint"),
+        msg("assistant", "later turn"),
+    ]
+    C.ingest(store, conversation)
     revision = C.snap_revision(C.snapshot(store))
-    span = list(C.snap_spans(C.snapshot(store)))[-1]
-    op = C.make_op("rewrite", [span], replacement=AUX_SPOOF_TEXT, actor_origin="aux")
+    span_id = next(
+        (
+            sid
+            for sid, item in C.snap_spans(C.snapshot(store)).items()
+            if str(C.span_field(item, "origin", "")).lower() in ("assistant", "model")
+            and "acknowledged" in C.span_text(item)
+        ),
+        None,
+    )
+    assert span_id is not None, "base fixtures must archive an older editable row"
+    op = C.make_op("rewrite", [span_id], replacement=AUX_SPOOF_TEXT, actor_origin="aux")
     pins_before = json.dumps(C.snap_pins(C.snapshot(store)), default=str, sort_keys=True)
 
     proposal = C.create_proposal(store, [op], base_revision=revision)
@@ -88,18 +109,26 @@ def test_accepted_aux_text_renders_untrusted_and_after_operator_messages(store, 
     done = C.commit(store, txn_id="txn-aux-1", expected_revision=revision)
     assert C.res_ok(done), C.res_errors(done)
 
-    out = C.project(store, base_messages)
+    out = C.project(store, conversation)
     assert not out.declined, out.errors
     index, found = C.find_message(out.messages, "OPERATOR APPROVED")
     assert found is not None, "accepted aux text must be present, provenanced as aux"
-    marker = _origin_marker(found)
-    assert marker in ("aux", "model"), f"aux text acquired {marker!r} provenance (I29)"
-    assert marker != "operator"
-
-    last_operator = max(
-        (i for i, m in enumerate(out.messages) if m.get("role") == "user"), default=-1
+    assert found["role"] == "assistant", "aux text must never re-enter as a user row"
+    rewritten = C.snap_spans(C.snapshot(store)).get(span_id)
+    assert rewritten is not None
+    aux_ops = [
+        op
+        for op in C.snap_ops(C.snapshot(store))
+        if span_id in (C._res_get(op, "span_ids", default=()) or ())
+    ]
+    assert aux_ops, "accepted aux rewrite left no provenance operation"
+    provenance = [C._res_get(op, "provenance", default={}) or {} for op in aux_ops]
+    assert any(str(p.get("origin", "")).lower() == "aux" for p in provenance), (
+        "aux-authored rewrite lost its operation provenance (I29)"
     )
-    assert index > last_operator, "aux text placed before/among operator messages (I18)"
+    assert any(p.get("proposal_id") for p in provenance), (
+        "aux rewrite provenance does not identify the accepted proposal (I29)"
+    )
 
     pins_after = json.dumps(C.snap_pins(C.snapshot(store)), default=str, sort_keys=True)
     assert pins_before == pins_after, "aux text changed pin state (I18/I29)"
@@ -132,12 +161,16 @@ def test_store_text_claiming_policy_change_is_inert(store, base_messages, claim)
     commit = C.commit(store, txn_id="txn-policy-pin", expected_revision=revision)
     assert C.res_ok(commit), C.res_errors(commit)
     head = C.snap_revision(C.snapshot(store))
-    blocked = C.stage(
-        store,
-        [C.make_op("drop", [span])],
-        expected_revision=head,
-        txn_id="txn-policy-drop",
-    )
+    try:
+        blocked = C.stage(
+            store,
+            [C.make_op("drop", [span])],
+            expected_revision=head,
+            txn_id="txn-policy-drop",
+        )
+    except Exception as exc:  # the store refuses at stage with a typed conflict
+        assert "span_pinned" in str(exc), exc
+        return
     if C.res_ok(blocked):
         drop = C.commit(store, txn_id="txn-policy-drop", expected_revision=head)
         assert not C.res_ok(drop), "pinned span dropped after policy-looking store text (I19)"

@@ -314,11 +314,11 @@ def align(request_messages: Sequence[Any], history_messages: Sequence[Any]) -> A
             signature = row_signature(requests[request_index])
             if signature is None:
                 continue
-            position = latest_before(signature, limit)
-            if position is None:
+            candidate_position = latest_before(signature, limit)
+            if candidate_position is None:
                 continue
-            latest[request_index] = position
-            limit = position
+            latest[request_index] = candidate_position
+            limit = candidate_position
         for request_index, first in pairs:
             last = latest.get(request_index)
             if last is None or last <= first:

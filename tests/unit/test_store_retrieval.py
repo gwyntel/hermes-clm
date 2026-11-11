@@ -166,8 +166,10 @@ class RetrieveTests(kit.StoreTestCase):
         reopened = self.open_store(
             "verify-session", config=StoreConfig(snapshot_verify_hashes=True)
         )
-        with self.assertRaises(CorruptStoreError):
-            reopened.snapshot()
+        snapshot = reopened.snapshot()
+        by_uid = {span.uid: span for span in snapshot.spans.values()}
+        self.assertIn("unreadable", str(by_uid["u-a2"].message))
+        self.assertEqual(by_uid["u-t1"].message.get("content"), "content of a.py")
 
 
 if __name__ == "__main__":  # pragma: no cover

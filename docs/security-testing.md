@@ -7,16 +7,23 @@ Sources of truth, in order: `docs/integration-contract.md`, `docs/architecture.m
 `docs/adr/0001-request-projection.md`, then the design review
 (`security-design-review.md`, invariants I1–I46, acceptance tests T1–T49).
 
-## 1. Honest status on this branch
+## 1. Status
 
-> **Post-integration update.** `src/hermes_clm` now exists on the delivery branch, so the
-> suite executes against the real store: 108 of the tests in this tree are red and 573
-> pass (2 skipped, CPython 3.12, 2026-11-10). That is the intended outcome of this
-> document's rule — a red is a finding for the owning delegate, not a test bug to be
-> papered over. The findings and their owners are enumerated in
-> [`limitations.md`](limitations.md#integration-status); the dominant one is that the
-> suite calls `commit()` without `stage()`, which the store rejects with `unknown_txn`.
-> The table below records the pre-integration state and is kept as history.
+> **Integrated and green (local).** On the integration tree the full suite reports
+> **776 passed, 3 skipped, 0 failed, 0 xpassed** with `CLM_HERMES_CHECKOUT` pointing at a
+> real Hermes checkout; without it the same tree is 754 passed / 25 skipped. The three
+> remaining skips are expected: two media probes do not apply to inline archives, and one
+> tool-schema probe has no module-level JSON schema object. `tests/security` and
+> `tests/fuzz` all pass, including the 16-test mutation harness: a correct fixture baseline
+> is green and every injected defect turns its designated probe red.
+>
+> What is proven locally: all 49 acceptance tests execute against production code; I1–I46
+> are exercised where the plugin can enforce them; the assertions bite (mutation harness);
+> and the seeded fuzz properties hold. What is **not** proven: remote CI, a clean-clone
+> install, or a live Hermes multi-tool-call run. Those are release gates, not claims.
+
+The design predates the implementation, so the original table below is retained as
+history only. It is superseded by the current result above.
 
 `src/hermes_clm` did not exist when this suite was written and had not landed on
 `feat/store`, `feat/engine`, `feat/tools` or `feat/delivery`. Every test that
@@ -234,37 +241,26 @@ Hypothesis dependency so the suite stays dependency-light and offline.
 | `test_fuzz_projection.py` | projection returns a list or declines, never invents a role, never rewrites a system/user row, never adds `tool_calls` |
 | `test_fuzz_active_json.py` | arbitrary derived-index bytes never override the DB head or change the projection |
 
-## 7. Not-yet-runnable evidence and required production fixes
+## 7. Integration gaps resolved
 
-Blocked because the implementation is absent (expected, phase 1): every `store`/`engine`/
-`tools` row in §4. Beyond that, the suite found contract gaps that need a decision by the
-owning delegate; each is recorded as a test that fails or skips with a precise reason
-rather than passing silently.
+The contract gaps found before integration are closed:
 
-1. **Retention/purge has no entry point.** `clm.retention_sessions` is configured in the
-   integration contract, but neither `ContextStore` nor `hermes_clm.store` exposes a purge
-   call. T49 skips with that reason. Required: an operator-only purge/sweep (I46), pinned
-   content exempt.
-2. **Projection entry point is unnamed.** `projection.py` is named, no function is. The
-   adapter guesses among five names and fails loudly if none exist. Required: pin the name.
-3. **Chain verification is not exposed.** T26 requires a detectable integrity signal for a
-   corrupt payload; the store contract has no `verify_chain` and no documented `status()`
-   field for it. The test accepts either, and fails with that instruction if neither exists
-   (I11).
-4. **Store layout is not in the contract.** `HERMES_HOME/clm/sessions/<sid>/` comes from the
-   review (I1), not from `docs/integration-contract.md`. Tests assert that layout (T2, T5,
-   T41); the database filename is discovered by globbing. Required: state path + filename.
-5. **Media storage is unspecified.** The contract says nothing about blob layout or a
-   content-addressed read path, so T4/T12 skip when the archive keeps media inline (they
-   skip with "no on-disk media blob", never silently pass). Required: state where blobs
-   live and how they are read.
-6. **Second-writer semantics are unstated.** `read_only=` exists; what a second *read-write*
-   opener must do (refuse, or degrade to read-only with retryable commit errors) is not
-   written down. T34 accepts either only insofar as no foreign commit succeeds.
-7. **`EditOperation` field set is ambiguous.** The architecture sketch lists
-   `expected_revision`/`txn_id` on the operation, while the contract puts them on
-   `stage()`/`commit()`. Tests build operations from `kind`/`span_ids`/`replacement`/
-   `actor_origin` and pass revision/txn to `stage`, which matches the contract.
+1. **Retention/purge.** `ContextStore.purge_expired_sessions(home, keep=..., current_session_id=...)`
+   retains pinned/current stores by default, skips unreadable stores, bounds the sweep and
+   supports `dry_run`. T49 executes instead of skipping.
+2. **Projection entry point.** `hermes_clm.projection.project` is pinned and exercised.
+3. **Integrity signal.** `snapshot(verify_hashes=True)` is the default. A corrupt payload
+   becomes an explicit unreadable tombstone for that span; `status()` reports the problem;
+   other spans still project.
+4. **Store layout.** `HERMES_HOME/clm/sessions/<slug>-<digest>/store.sqlite3` is documented
+   in `docs/store-format.md` and asserted by T2/T5/T41.
+5. **Media storage.** Media is archived inline with the message payload. Blob-swap probes
+   skip explicitly because no separate blob path exists; this is recorded as a limitation,
+   not a pass.
+6. **Second-writer semantics.** A second read-write opener is refused with
+   `StoreBusyError`; read-only observation is explicit.
+7. **Operation shape.** `EditOperation` carries `kind`, `span_ids`, replacement and actor;
+   `expected_revision` and `txn_id` belong to `stage()`/`commit()`.
 
 Documented limitations, asserted as limitations rather than defences:
 

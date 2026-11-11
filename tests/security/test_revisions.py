@@ -11,7 +11,6 @@ import json
 import sqlite3
 
 import pytest
-
 from _support import contract as C
 from _support.assertions import expect_refusal, msg
 
@@ -42,15 +41,26 @@ def test_two_staged_txns_from_the_same_revision_exactly_one_wins(home, sid):
 
     first = C.commit(store, txn_id="cas-a", expected_revision=revision)
     assert C.res_ok(first), C.res_errors(first)
-    second = C.commit(store, txn_id="cas-b", expected_revision=revision)
-    assert not C.res_ok(second), (
-        "second commit from a stale expected_revision must be rejected (I7)"
-    )
+    second = expect_refusal(lambda: C.commit(store, txn_id="cas-b", expected_revision=revision))
+    assert second, "second commit from a stale expected_revision must be rejected (I7)"
 
     snap = C.snapshot(store)
     assert C.snap_revision(snap) == revision + 1
-    assert spans[0] not in C.snap_spans(snap)
-    assert spans[1] in C.snap_spans(snap), "stale commit applied (last-writer-wins)"
+    current = C.snap_spans(snap)
+    first_state = (
+        str(C.span_field(current[spans[0]], "state", "") or "")
+        if spans[0] in current
+        else "dropped"
+    )
+    second_state = (
+        str(C.span_field(current[spans[1]], "state", "") or "")
+        if spans[1] in current
+        else "dropped"
+    )
+    if not second_state:
+        second_state = "active"  # fixture snapshots omit state for live rows
+    assert first_state == "dropped", "first commit did not apply"
+    assert second_state == "active", "stale commit applied (last-writer-wins)"
     C.close(store)
 
 
@@ -119,14 +129,26 @@ def test_single_byte_payload_flip_tombstones_only_that_span(home, sid):
     store = _store_with_rows(home, sid, texts=("KEEP-ME-11", "FLIP-ME-22", "KEEP-ME-33"))
     spans = list(C.snap_spans(C.snapshot(store)))
     assert len(spans) == 3
+    seeded = [
+        dict(C._res_get(C.snap_spans(C.snapshot(store))[span_id], "message")) for span_id in spans
+    ]
     db = C.db_path(home, sid)
     tail = store
-    before = C.project(tail, [msg("assistant", "request")])
+    before = C.project(tail, seeded, seeded)
+    assert "KEEP-ME-11" in before.text and "KEEP-ME-33" in before.text
+    C.close(store)
 
     conn = sqlite3.connect(str(db), timeout=10)
     conn.isolation_level = None
     flipped = False
     try:
+        for trigger in [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='spans'"
+            ).fetchall()
+        ]:
+            conn.execute(f'DROP TRIGGER "{trigger}"')
         for table, column in C.find_payload_column(conn):
             rows = conn.execute(f'SELECT rowid, "{column}" FROM "{table}"').fetchall()
             for rowid, value in rows:
@@ -150,7 +172,12 @@ def test_single_byte_payload_flip_tombstones_only_that_span(home, sid):
         conn.close()
     assert flipped, "could not locate and flip a payload row"
 
-    after = C.project(tail, [msg("assistant", "request")])
+    tail = C.for_session(home, sid)
+    after = C.project(
+        tail,
+        [dict(C._res_get(span, "message")) for span in C.snap_spans(C.snapshot(tail)).values()],
+        [dict(C._res_get(span, "message")) for span in C.snap_spans(C.snapshot(tail)).values()],
+    )
     if after.declined:
         return  # refusing to project is fail-closed
     text = after.text
@@ -160,13 +187,13 @@ def test_single_byte_payload_flip_tombstones_only_that_span(home, sid):
     gaps = [m for m in after.messages if C.is_gap_marker(C.content_of(m))]
     assert gaps, "corrupt payload must render an explicit gap marker, never silent omission (I32)"
     assert "FLIP-ME-22" not in text, "corrupt span projected from unverified bytes"
-    health = C.status(store)
+    health = C.status(tail)
     blob = json.dumps(health, default=str).lower()
     assert any(word in blob for word in ("chain", "integrity", "checksum", "corrupt")), (
         "status() exposes no integrity signal for a detected corruption (I11): "
         f"keys={sorted(health) if isinstance(health, dict) else health!r}"
     )
-    C.close(store)
+    C.close(tail)
 
 
 @pytest.mark.t("T27")
@@ -176,10 +203,18 @@ def test_consistent_chain_rewrite_is_undetected_without_an_anchor(home, sid):
     update docs/security-testing.md rather than pretending the limit disappeared."""
     store = _store_with_rows(home, sid, texts=("ORIGINAL-A", "ORIGINAL-B"))
     db = C.db_path(home, sid)
+    C.close(store)
     conn = sqlite3.connect(str(db), timeout=10)
     conn.isolation_level = None
     rewritten = False
     try:
+        for trigger in [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='spans'"
+            ).fetchall()
+        ]:
+            conn.execute(f'DROP TRIGGER "{trigger}"')
         for table, column in C.find_payload_column(conn):
             rows = conn.execute(f'SELECT rowid, "{column}" FROM "{table}"').fetchall()
             for rowid, value in rows:
@@ -199,11 +234,20 @@ def test_consistent_chain_rewrite_is_undetected_without_an_anchor(home, sid):
                     ):
                         try:
                             new_text = text.replace("ORIGINAL-A", "REWRITTEN-A")
+                            parsed = json.loads(new_text)
+                            digest = hashlib.sha256(
+                                json.dumps(
+                                    parsed,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                    ensure_ascii=False,
+                                ).encode()
+                            ).hexdigest()
                             conn.execute(
                                 f'UPDATE "{table}" SET "{candidate}" = ? WHERE rowid = ?',
-                                (hashlib.sha256(new_text.encode()).hexdigest(), rowid),
+                                (digest, rowid),
                             )
-                        except sqlite3.Error:
+                        except (sqlite3.Error, json.JSONDecodeError):
                             pass
                 break
             if rewritten:
@@ -213,13 +257,14 @@ def test_consistent_chain_rewrite_is_undetected_without_an_anchor(home, sid):
     if not rewritten:
         pytest.skip("could not locate a payload row to rewrite (schema drift)")
 
-    out = C.project(store, [msg("assistant", "request")])
-    if out.declined:
-        pytest.skip("projection declined after tamper; the limitation is then unobservable here")
-    detected = "REWRITTEN-A" not in out.text
-    if detected:
-        pytest.skip(
-            "consistent rewrite WAS detected: an anchor exists, so the documented "
-            "limitation in docs/security-testing.md T27 is now stale - update the doc"
-        )
+    store = C.for_session(home, sid)
+    seeded = [
+        dict(C._res_get(span, "message") or {}) for span in C.snap_spans(C.snapshot(store)).values()
+    ]
+    out = C.project(store, seeded, seeded)
+    assert not out.declined, "projection declined after a consistent same-UID rewrite"
+    assert "REWRITTEN-A" in out.text, (
+        "the unanchored chain detected a consistent rewrite; update docs/security-testing.md "
+        "and make this an assertion of the stronger guarantee"
+    )
     C.close(store)

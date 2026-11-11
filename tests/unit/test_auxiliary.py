@@ -273,8 +273,13 @@ def test_store_proposal_without_hash_fails_closed(service):
     assert "stage" not in service.names() and "commit" not in service.names()
 
 
-def test_aux_module_keeps_no_local_proposal_digest():
-    assert not hasattr(auxiliary_module, "canonical_proposal_sha256")
+def test_aux_compatibility_digest_matches_the_store():
+    operations = [{"kind": "rewrite", "span_ids": ["m-0001"], "replacement": "short"}]
+    assert auxiliary_module.canonical_proposal_sha256(
+        operations, base_revision=4
+    ) == auxiliary_module.canonical_sha256(
+        {"base_revision": 4, "operations": operations, "origin": "aux"}
+    )
 
 
 # --------------------------------------------------------------------------- #

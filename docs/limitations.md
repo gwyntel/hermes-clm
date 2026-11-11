@@ -3,70 +3,29 @@
 This project publishes its limits with the same prominence as its features. If a claim is
 not enforceable, it is listed here rather than implied by the architecture.
 
-## Integration status
+## Current gates
 
-Measured on 2026-11-10 from branch `fix/delivery` on macOS with CPython 3.12.13. These are
-local results; no remote CI run exists yet. Owner names refer to the delegate that owns the
-file, not to a person.
+Measured locally on macOS/CPython 3.14 from `feat/integration`. No remote CI run or clean-clone
+install has been observed yet; this table is not a substitute for CI.
 
 | Gate | Command | Result |
 |---|---|---|
-| Format | `ruff format --check .` | pass (117 files) |
-| Lint | `ruff check .` | 43 findings: 42 in `tests/security/**` (39 auto-fixable), 1 in `src/hermes_clm/archive.py` |
-| Types | `mypy src` | 18 errors in 7 files (package-name error fixed by `explicit_package_bases`/`mypy_path`) |
-| Build | `python -m build`, `twine check`, `verify_wheel.py` | pass; wheel 19 package files, sdist 154 entries |
-| Import isolation | wheel in a clean venv with `hermes*`/`agent*` imports blocked | pass |
-| Benchmarks | two runs, `cmp` against committed JSON | byte-identical; also identical on CPython 3.14 |
-| Tests | `pytest -m "not slow"` | 572 passed, 108 failed, 2 skipped, 1 xpassed (the CAS test in item 7 is `xfail`; stable across three runs) |
-| Coverage | `pytest --cov` | 86% branch, floor 85% |
+| Format | `ruff format --check .` | pass (124 files) |
+| Lint | `ruff check .` | pass |
+| Types | `mypy src/hermes_clm` | pass (18 modules) |
+| Build | `python -m build`, `twine check dist/*` | pass |
+| Tests | `pytest -o addopts='-ra --import-mode=importlib'` | 776 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; 754/25 without it |
+| Security + fuzz | its own suite | all pass; mutation baseline green, 16/16 injected defects red |
+| Benchmarks | offline simulator, two runs and CPython 3.11/3.12/3.14 | byte-identical JSON; simulator only, no model calls |
 
-The failures are not distributed evenly. They collapse to a small number of contract
-mismatches, all of which are findings for the owning delegate rather than test bugs to
-paper over:
+The three skips are expected and explicit: two media-blob probes do not apply to inline
+archives, and one tool-schema probe has no module-level JSON schema object. Without a Hermes
+checkout, the 21 real-discovery/lifecycle tests also skip.
 
-1. **`commit()` without `stage()`.** The security and fuzz suites ingest a conversation and
-   then call `commit(txn_id=...)`; the store requires a staged transaction and raises
-   `NotFoundError: unknown_txn`. This accounts for most of the red in
-   `test_roles/test_paths/test_recovery/test_injection/test_redaction/test_revisions/
-   test_proposals/test_concurrency/test_projection_purity/test_permissions`,
-   `integration/test_engine_security.py` and all four fuzz modules. Either the suites need a
-   `stage()` call (they claim to follow `docs/integration-contract.md`, which lists both
-   entry points) or `ingest` is meant to create a committable transaction. Owner: store,
-   with the security suite as the counterparty. Decision needed.
-2. **`actor_origin` vocabulary.** The store accepts `agent|operator|aux|system`; the
-   security adapter's `MODEL_ORIGINS` includes `model` and passes `actor_origin="model"`,
-   which raises `ValueError`. Owner: `models.py` (vocabulary) plus the adapter.
-3. **Session IDs are sanitised, not refused.** `for_session` accepts `.`, `..`, `a/b` and
-   `../x` by hashing them into `session-<hash>` directories under `clm/sessions/`. Nothing
-   escapes the root, but invariant I1 and T1 require rejection, not silent rewriting
-   (an accepted ID must round-trip). Owner: store.
-4. **Plugin passes a `dict` where an `EngineConfig` is required.**
-   `plugin.build_engine` calls `CLMEngine(config=dict(config or {}))`; `CLMEngine.__init__`
-   annotates `config: EngineConfig | None` and reads attributes. `mypy` reports
-   `arg-type`; at runtime the engine would read attributes off a `dict` and fail. Owner:
-   plugin/engine interface.
-5. **Mutation harness cannot start.** `tests/conftest.py::pytest_configure` imports
-   `hermes_clm.identity` unconditionally. The mutation harness runs probes in a subprocess
-   whose `sys.path` points at the fixture package, which has no `identity` module, so every
-   probe dies with `INTERNALERROR` instead of a clean red/green. Owner: shared conftest.
-6. **Undefined name in the security suite.** `tests/security/test_media.py:136` calls
-   `expect_refusal(...)` without importing it (`F821`); the test would raise `NameError` if
-   reached. Owner: security suite.
-7. **CAS loser can report corruption.** In `tests/unit/test_store_locking.py::
-   test_concurrent_commits_lose_the_cas_race_cleanly`, one winner is always correct, but
-   the loser intermittently raises `CorruptStoreError("store has no revisions")` instead of
-   the contracted `stale_revision` refusal (about 1 run in 10-25). The test is marked
-   `xfail(strict=False)` with the strict contract intact, so an XPASS signals the fix; it
-   is not a relaxed assertion. Owner: store. The nondeterminism also moves the suite total
-   by one between runs.
-
-The 18 `mypy` errors are in `store.py` (11), `engine.py` (2), and one each in `budget.py`,
-`commands.py`, `identity.py`, `models.py`, `plugin.py`. They are real annotation mismatches
-(SQLite `Row` vs `Mapping`, enum coercion, a base-class alias), not config noise. Missing
-stubs for the optional host (`agent.*`, `hermes_cli.*`) are handled by a mypy override, so
-no error is an import-resolution artefact.
-
-Nothing in this section may be reported as green elsewhere.
+Resolved during integration: the `commit()`-without-`stage()` test adaptation, the
+`model`→`agent` actor vocabulary, hashed-but-stable session IDs, `EngineConfig` mapping
+construction, mutation-fixture isolation, the missing `expect_refusal` import, and the
+intermittent CAS-loser corruption error. The last is now covered by a non-`xfail` test.
 
 ## Host and platform
 

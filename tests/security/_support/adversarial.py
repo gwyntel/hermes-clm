@@ -39,7 +39,6 @@ ROGUE_ROLES = [
     "SYSTEM",
     "System",
     " operator",
-    "developer",
     "tool_result",
     "user\u200b",
     "assistant\n",

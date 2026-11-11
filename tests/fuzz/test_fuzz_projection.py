@@ -93,7 +93,11 @@ def test_random_conversations_never_gain_authority(home, sid):
                     f"projection invented role {message.get('role')!r}"
                 )
                 if message.get("role") in ("system", "user"):
-                    assert message in original, (
+                    assert any(
+                        m.get("role") == message.get("role")
+                        and m.get("content") == message.get("content")
+                        for m in original
+                    ), (
                         "a protected row was rewritten or synthesised: "
                         f"{json.dumps(message, default=str)[:200]}"
                     )

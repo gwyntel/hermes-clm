@@ -193,7 +193,9 @@ PROTECTED_ROLES = frozenset({"system", "developer", "user"})
 
 
 def origin_for_role(role: str) -> SpanOrigin:
-    return ROLE_ORIGIN.get(str(role).strip().lower(), SpanOrigin.UNKNOWN)
+    # Fail closed: roles are a closed, case-sensitive enum. Guessing (stripping,
+    # lower-casing, folding unknowns to user) is how model text gains authority.
+    return ROLE_ORIGIN.get(role if isinstance(role, str) else "", SpanOrigin.UNKNOWN)
 
 
 # ---------------------------------------------------------------------------
@@ -375,12 +377,13 @@ class EditOperation(_Immutable):
             span_ids = tuple(span_ids)
         else:
             raise ValidationError("span_ids must be a sequence", code="invalid_span_ids")
+        raw_kind = raw.get("kind")
+        if not isinstance(raw_kind, str):
+            raise ValidationError("kind must be a string", code="invalid_kind")
         try:
-            kind = EditKind(raw.get("kind"))
+            kind = EditKind(raw_kind)
         except ValueError as exc:
-            raise ValidationError(
-                f"unknown edit kind: {raw.get('kind')!r}", code="invalid_kind"
-            ) from exc
+            raise ValidationError(f"unknown edit kind: {raw_kind!r}", code="invalid_kind") from exc
         replacement = raw.get("replacement")
         label = raw.get("label")
         if label is not None:

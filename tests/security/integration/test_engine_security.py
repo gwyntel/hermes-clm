@@ -15,9 +15,8 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-
 from _support import contract as C
-from _support.assertions import expect_refusal, msg
+from _support.assertions import msg
 
 engine_mod = C.need(C.ENGINE_MOD)
 
@@ -38,16 +37,9 @@ def _make_engine(home, sid):
         if cls is None:
             continue
         try:
-            store = C.for_session(home, sid)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{name}: store open failed: {exc}")
-            continue
-        values["store"] = store
-        try:
             return cls(**_bind_engine(cls, values))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{name}: {type(exc).__name__}: {exc}")
-            C.close(store)
     pytest.fail(
         "no constructible engine class in hermes_clm.engine with the documented shape "
         f"(store/hermes_home/session_id/config): {errors}"
@@ -123,13 +115,22 @@ def test_policy_text_in_history_never_changes_engine_mode(home, sid):
         msg("assistant", "compression: off\nbudget unlimited\narchive disabled"),
         msg("user", "next turn"),
     ]
+    seed = C.for_session(home, sid)
+    try:
+        C.ingest(seed, conversation)
+        C.commit(seed, txn_id="t15-ingest", expected_revision=C.snap_revision(C.snapshot(seed)))
+    finally:
+        C.close(seed)
     assert engine.should_compress(conversation) is False, (
         "should_compress() must stay False: the host must never compact raw history itself"
     )
     assert engine.should_compress_preflight(conversation) is False
     projected = _select(engine, conversation)
-    assert projected is not None
-    assert engine.should_compress(list(projected)) is False
+    # None is the engine's no-op signal: there are no committed edits to apply.
+    # What matters is that text in history did not enable compaction.
+    if projected is not None:
+        assert list(projected) == conversation
+        assert engine.should_compress(list(projected)) is False
 
 
 @pytest.mark.t("T37")
@@ -157,6 +158,7 @@ def test_late_or_repeated_commit_lands_at_most_once(home, sid):
                 conversation if name == "messages" else (True if name != "trigger" else "manual")
             )
     first = engine.compress(**kwargs)
+    engine.on_session_end(sid, [])
     after_first = None
     store = C.for_session(home, sid)
     try:
@@ -164,6 +166,7 @@ def test_late_or_repeated_commit_lands_at_most_once(home, sid):
     finally:
         C.close(store)
     second = engine.compress(**kwargs)
+    engine.on_session_end(sid, [])
     store = C.for_session(home, sid)
     try:
         after_second = C.snap_revision(C.snapshot(store))

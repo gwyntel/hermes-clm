@@ -30,14 +30,41 @@ from typing import Any
 
 from .tools import error_payload
 
+try:  # pragma: no cover - package import guard is exercised by the CLI
+    from .models import canonical_sha256
+except Exception:  # pragma: no cover
+    canonical_sha256 = None  # type: ignore[assignment]
+
 __all__ = [
     "AUX_TASK",
     "AuxCompressor",
     "AuxLimits",
     "bound_timeout",
+    "canonical_proposal_sha256",
     "default_aux_call",
     "extract_response_text",
 ]
+
+
+def canonical_proposal_sha256(
+    operations: Sequence[Mapping[str, Any]], *, base_revision: int
+) -> str:
+    """Digest a proposal exactly as the store does.
+
+    Kept as a public compatibility helper for callers that reviewed an
+    auxiliary proposal before the store owned proposal identity. The store
+    remains the authority; this function must produce the same bytes or a
+    reviewed proposal is not acceptable.
+    """
+    if canonical_sha256 is None:  # pragma: no cover
+        raise RuntimeError("hermes_clm.models is unavailable")
+    payload = {
+        "base_revision": int(base_revision),
+        "operations": [dict(operation) for operation in operations],
+        "origin": "aux",
+    }
+    return str(canonical_sha256(payload))
+
 
 #: Auxiliary task slot used for every compression request.
 AUX_TASK = "compression"

@@ -160,7 +160,7 @@ def _edit(
     if kind == "rewrite":
         if len(tokens) < 3:
             return _failure("usage", "usage: /clm edit rewrite <span_id> <text ...>")
-        span_ids = tokens[1:2]
+        span_ids = list(tokens[1:2])
         replacement = " ".join(tokens[2:])
 
     invalid = _validate_span_ids(span_ids)

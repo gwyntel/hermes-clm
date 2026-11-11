@@ -352,7 +352,10 @@ TRIGGERS: tuple[str, ...] = _APPEND_ONLY_TRIGGERS + _PROTECTED_TRIGGERS
 INDEXES: tuple[str, ...] = ()  # indexes are inline above
 
 
-def create_schema(conn: sqlite3.Connection) -> None:
+SqlExecutor = sqlite3.Connection | sqlite3.Cursor
+
+
+def create_schema(conn: SqlExecutor) -> None:
     """Create every table, index and trigger idempotently.
 
     Used at first open and by recovery when a crash interrupted creation.
@@ -373,7 +376,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def schema_version(conn: sqlite3.Connection) -> int:
+def schema_version(conn: SqlExecutor) -> int:
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     except sqlite3.DatabaseError:
@@ -386,12 +389,12 @@ def schema_version(conn: sqlite3.Connection) -> int:
         return -1
 
 
-def table_names(conn: sqlite3.Connection) -> set[str]:
+def table_names(conn: SqlExecutor) -> set[str]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     return {row[0] for row in rows}
 
 
-def require_schema(conn: sqlite3.Connection) -> None:
+def require_schema(conn: SqlExecutor) -> None:
     """Raise :class:`CorruptStoreError` when the schema is absent or newer."""
 
     found = schema_version(conn)

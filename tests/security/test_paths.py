@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
-
 from _support import contract as C
 from _support.adversarial import BAD_SESSION_IDS, GOOD_SESSION_IDS
 from _support.assertions import expect_refusal, msg
@@ -33,27 +33,39 @@ def _populated(home, sid, text="VICTIM-SESSION-CONTENT-8f21"):
 
 @pytest.mark.t("T1")
 @pytest.mark.parametrize("bad", BAD_SESSION_IDS)
-def test_bad_session_id_refused_before_any_filesystem_use(home, bad):
+def test_hostile_session_id_never_escapes_and_is_refused_or_hashed(home, bad):
+    """Hostile ids are either refused up front or mapped to a confined, hashed key."""
     before = sorted(str(p) for p in home.rglob("*"))
-    text = expect_refusal(lambda: C.for_session(home, bad))
-    assert text is not None
-    after = sorted(str(p) for p in home.rglob("*"))
-    assert after == before, (
-        "a rejected session id must be refused before the filesystem is touched; "
-        f"created: {sorted(set(after) - set(before))}"
-    )
-    assert C.session_dir(home, bad).exists() is False
+    try:
+        store = C.for_session(home, bad)
+    except Exception:
+        after = sorted(str(p) for p in home.rglob("*"))
+        assert after == before, (
+            "a rejected session id must be refused before the filesystem is touched; "
+            f"created: {sorted(set(after) - set(before))}"
+        )
+        return
+    try:
+        directory = Path(store.directory).resolve()
+        root = (home / "clm" / "sessions").resolve()
+        assert os.path.commonpath([str(directory), str(root)]) == str(root)
+        assert Path(bad).name != directory.name or directory.name.startswith("session-")
+    finally:
+        C.close(store)
 
 
 @pytest.mark.t("T1")
 @pytest.mark.parametrize("good", GOOD_SESSION_IDS)
 def test_host_shaped_session_ids_accepted_and_confined(home, good):
     store = C.for_session(home, good)
-    C.close(store)
-    created = C.session_dir(home, good).resolve()
-    root = (home / "clm" / "sessions").resolve()
-    assert os.path.commonpath([str(created), str(root)]) == str(root)
-    assert created.name == good
+    try:
+        created = Path(store.directory).resolve()
+        root = (home / "clm" / "sessions").resolve()
+        assert os.path.commonpath([str(created), str(root)]) == str(root)
+        assert created.parent == root
+        assert created.name.startswith(good[:8])
+    finally:
+        C.close(store)
 
 
 @pytest.mark.t("T2")
@@ -143,12 +155,13 @@ def test_active_json_cannot_relocate_the_store_root(home, sid, tmp_path):
     store = C.for_session(home, sid)
     try:
         out = C.project(store, [msg("user", "hello")])
+        status = C.status(store)
     finally:
         C.close(store)
 
     assert not evil.exists(), "active.json relocated the store root (I4)"
     assert out.declined or out.messages, "store must stay usable after a hostile index"
-    assert str(evil) not in json.dumps(C.status(store), default=str)
+    assert str(evil) not in json.dumps(status, default=str)
 
 
 @pytest.mark.t("T5")

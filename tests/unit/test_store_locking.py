@@ -9,7 +9,6 @@ import sys
 import threading
 import unittest
 
-import pytest
 import store_testkit as kit
 
 from hermes_clm.errors import ReadOnlyStoreError, StoreBusyError
@@ -102,16 +101,6 @@ class SingleWriterTests(kit.StoreTestCase):
 
 
 class ConcurrencyTests(kit.StoreTestCase):
-    # Known store defect: the CAS loser intermittently raises
-    # CorruptStoreError("store has no revisions") instead of the contracted
-    # stale_revision refusal (roughly 1 in 10-25 runs). Reported in
-    # docs/limitations.md, integration-status item 7. The assertion is the correct
-    # contract, so this is an expected failure, not a relaxed check: remove the marker
-    # when the store returns stale_revision, and an XPASS is that signal.
-    @pytest.mark.xfail(
-        strict=False,
-        reason="store raises CorruptStoreError('store has no revisions') for the CAS loser",
-    )
     def test_concurrent_commits_lose_the_cas_race_cleanly(self) -> None:
         store = self.open_store()
         ids = self.ingest(store)

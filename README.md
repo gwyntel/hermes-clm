@@ -11,13 +11,14 @@ rewritten, tool-call groups stay atomic, and system / user / pinned rows pass th
 byte-identically.
 
 > **Status: pre-release, integrated tree.** The engine, store, tools, plugin, benchmark
-> harness and packaging land on this branch together. Packaging, the CLI, the offline
-> benchmark and 572 passed / 108 failed / 2 skipped of the collected suite; `mypy src`
-> reports 18 type errors in 7 integrated modules and the security/fuzz suites report
-> contract findings against the store. Exact gate results and owners are in
-> [`docs/limitations.md`](docs/limitations.md#integration-status). Nothing here is a
-> released artifact, no CI run has been observed on a remote, and public APIs may change
-> before `v0.1.0`.
+> harness and packaging are integrated. Local gates: **776 passed, 3 skipped, 0 failed**
+> with `CLM_HERMES_CHECKOUT` set (754 passed, 25 skipped without the checkout);
+> `ruff check`, `ruff format --check`, `mypy src`, `python -m build` and
+> `twine check` pass. The remaining skips are two media-blob probes that do not apply to
+> inline archives and one tool-schema probe with no module-level schema object.
+> No remote CI run or released artifact exists yet; public APIs may change before `v0.1.0`.
+> Exact commands and remaining limitations are in
+> [`docs/limitations.md`](docs/limitations.md#current-gates).
 
 ## The problem
 

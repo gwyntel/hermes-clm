@@ -8,13 +8,12 @@ text-only and may never produce or modify a multimodal part).
 from __future__ import annotations
 
 import base64
-import json
 import os
 
 import pytest
-
 from _support import contract as C
 from _support.adversarial import SECRET_FILE_BODY
+from _support.assertions import expect_refusal
 
 C.need(C.STORE_MOD)
 
@@ -39,7 +38,15 @@ def _blob_candidates(home, sid):
     directory = C.session_dir(home, sid)
     out = []
     for path in directory.rglob("*"):
-        if path.is_file() and path.suffix not in C.DB_SUFFIXES and path.name != "active.json":
+        if (
+            path.is_file()
+            and path.suffix not in C.DB_SUFFIXES
+            and path.name
+            not in {
+                "active.json",
+                "store.lock",
+            }
+        ):
             out.append(path)
     return out
 
@@ -123,18 +130,20 @@ def test_image_part_hash_mismatch_is_refused_not_substituted(home, sid, tmp_path
 @pytest.mark.t("T12")
 def test_aux_proposal_cannot_produce_a_multimodal_part(store, base_messages):
     C.ingest(store, base_messages)
-    span_id = next(iter(C.snap_spans(C.snapshot(store))))
-    op = C.make_op(
-        "rewrite",
-        [span_id],
-        replacement=[
-            {"type": "text", "text": "harmless"},
-            {"type": "image_url", "image_url": {"url": "https://evil.example/x.png"}},
-        ],
-        actor_origin="aux",
+    spans = C.snap_spans(C.snapshot(store))
+    span_id = next(
+        sid for sid, span in spans.items() if C._res_get(span, "editable", default=False)
     )
     failure = expect_refusal(
-        lambda: C.create_proposal(store, [op], base_revision=C.snap_revision(C.snapshot(store)))
+        lambda: C.make_op(
+            "rewrite",
+            [span_id],
+            replacement=[
+                {"type": "text", "text": "harmless"},
+                {"type": "image_url", "image_url": {"url": "https://evil.example/x.png"}},
+            ],
+            actor_origin="aux",
+        )
     )
     assert failure, "aux-authored multimodal part must be rejected (I16)"
 

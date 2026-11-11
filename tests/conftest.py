@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 TESTS = ROOT / "tests"
 SECURITY = TESTS / "security"
-for candidate in (SRC, TESTS, SECURITY):
+MUTATION_FIXTURE = os.environ.get("CLM_MUTATION_FIXTURE") == "1"
+for candidate in (TESTS, SECURITY) if MUTATION_FIXTURE else (SRC, TESTS, SECURITY):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
@@ -37,7 +38,8 @@ def pytest_configure(config):  # noqa: D401 - pytest hook
     config.addinivalue_line(
         "markers", "t(*ids): design-review acceptance test ids covered (T1..T49)"
     )
-    importlib.import_module("hermes_clm.identity")
+    if not MUTATION_FIXTURE:
+        importlib.import_module("hermes_clm.identity")
 
 
 @pytest.fixture

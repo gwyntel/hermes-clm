@@ -8,14 +8,12 @@ I34/I35 (one txn per commit; index written after commit).
 from __future__ import annotations
 
 import json
-import os
 import random
 import sqlite3
 import subprocess
 import time
 
 import pytest
-
 from _support import contract as C
 from _support.assertions import expect_refusal, msg, run_child, subprocess_env
 
@@ -34,7 +32,6 @@ def _seed(home, sid, texts=("row-one", "row-two")):
 @pytest.mark.t("T22")
 def test_txn_staged_by_a_crashed_process_is_never_applied(home, sid):
     store = _seed(home, sid)
-    revision = C.snap_revision(C.snapshot(store))
     span = list(C.snap_spans(C.snapshot(store)))[0]
     C.close(store)
 
@@ -54,13 +51,21 @@ os._exit(9)  # crash with a staged transaction, never committed
         f"the child could not stage the transaction, so T22 is vacuous: {payload}"
     )
 
+    recovery = C.module("hermes_clm.recovery")
+    report = recovery.recover_session(home, sid)
+    assert report.ok, report.to_dict()
+
     store = C.for_session(home, sid)
     try:
-        after = C.snap_revision(C.snapshot(store))
-        result = C.commit(store, txn_id="orphan-txn", expected_revision=after)
-        assert not C.res_ok(result), (
-            "a staged txn from a crashed process applied retroactively (I8)"
+        discarded = store.expire_staged_transactions(ttl_seconds=0)
+        assert "orphan-txn" in discarded, (
+            f"explicit recovery did not discard the crashed writer's txn: {discarded!r}"
         )
+        after = C.snap_revision(C.snapshot(store))
+        result = expect_refusal(
+            lambda: C.commit(store, txn_id="orphan-txn", expected_revision=after)
+        )
+        assert result, "a staged txn from a crashed process applied retroactively (I8)"
         assert C.snap_revision(C.snapshot(store)) == after
         assert span in C.snap_spans(C.snapshot(store))
     finally:
@@ -121,7 +126,8 @@ def test_foreign_active_json_is_discarded(home, sid, other_home):
 
 @pytest.mark.t("T28")
 def test_sigkill_during_commit_leaves_a_consistent_head(home, sid):
-    _seed(home, sid)
+    seed = _seed(home, sid)
+    C.close(seed)
     db = C.db_path(home, sid)
     baseline = C.quick_check(db)
     assert baseline == ["ok"], baseline
@@ -227,12 +233,14 @@ def test_failed_quick_check_is_reported_and_never_repaired(home, sid):
         fh.write(b"NOT-A-SQLITE-DB\x00\x00")
     before = (db.stat().st_size, C.sha256_bytes(db.read_bytes()))
 
-    failure = None
+    broken = None
     try:
         broken = C.for_session(home, sid)
-    except Exception as exc:  # noqa: BLE001
-        failure = f"{type(exc).__name__}: {exc}"
-    else:
+    except Exception:  # noqa: BLE001
+        # Refusing to open a structurally corrupt database is the preferred
+        # fail-closed behaviour; the byte-identity assertion below still applies.
+        pass
+    if broken is not None:
         try:
             out = C.project(broken, [msg("assistant", "request")])
             assert out.declined, "structurally corrupt store still produced a projection (F3/I33)"
@@ -247,10 +255,21 @@ def test_failed_quick_check_is_reported_and_never_repaired(home, sid):
 def test_one_unreadable_payload_tombstones_and_the_rest_projects(home, sid):
     store = _seed(home, sid, ("PAYLOAD-A", "PAYLOAD-B", "PAYLOAD-C"))
     db = C.db_path(home, sid)
+    C.close(store)
     conn = sqlite3.connect(str(db), timeout=10)
     conn.isolation_level = None
     corrupted = False
     try:
+        # Simulate external corruption: the store's own append-only trigger
+        # correctly blocks UPDATE, so the evidence-producing test removes it.
+        triggers = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='spans'"
+            ).fetchall()
+        ]
+        for trigger in triggers:
+            conn.execute(f'DROP TRIGGER "{trigger}"')
         for table, column in C.find_payload_column(conn):
             for rowid, value in conn.execute(f'SELECT rowid, "{column}" FROM "{table}"').fetchall():
                 text = (
@@ -272,8 +291,16 @@ def test_one_unreadable_payload_tombstones_and_the_rest_projects(home, sid):
     if not corrupted:
         pytest.skip("could not locate the PAYLOAD-B row (schema drift)")
 
-    out = C.project(store, [msg("assistant", "request")])
+    store = C.for_session(home, sid)
+    snap = C.snapshot(store)
+    request = [
+        dict(C._res_get(span, "message"))
+        for span in C.snap_spans(snap).values()
+        if C._res_get(span, "message") is not None
+    ]
+    out = C.project(store, request, request)
     if out.declined:
+        C.close(store)
         return
     text = out.text
     assert ("PAYLOAD-A" in text) or ("PAYLOAD-C" in text), "one bad payload took out everything"

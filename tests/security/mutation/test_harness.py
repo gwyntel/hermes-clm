@@ -31,11 +31,9 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from _support import contract as C
 from _support.assertions import subprocess_env
 
-from .defects import PROBES, PROBE_IDS
+from .defects import PROBE_IDS, PROBES
 
 REPO = Path(__file__).resolve().parents[3]
 SECURITY = REPO / "tests" / "security"
@@ -52,12 +50,24 @@ def _stage_fixture(tmp_path: Path) -> Path:
 
 def _run(nodeid: str, defect: str, tmp_path: Path) -> subprocess.CompletedProcess:
     root = _stage_fixture(tmp_path)
-    env = subprocess_env({"CLM_FIXTURE_DEFECT": defect})
+    env = subprocess_env({"CLM_FIXTURE_DEFECT": defect, "CLM_MUTATION_FIXTURE": "1"})
     env["PYTHONPATH"] = os.pathsep.join(
         [str(root), str(REPO), str(SECURITY), env.get("PYTHONPATH", "")]
     )
     return subprocess.run(
-        [sys.executable, "-m", "pytest", nodeid, "-q", "--no-header", "-p", "no:cacheprovider"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            nodeid,
+            "-q",
+            "--no-header",
+            "--import-mode=importlib",
+            "-o",
+            f"pythonpath={root}",
+            "-p",
+            "no:cacheprovider",
+        ],
         cwd=str(REPO),
         env=env,
         capture_output=True,

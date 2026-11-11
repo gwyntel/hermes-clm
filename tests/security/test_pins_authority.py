@@ -9,10 +9,8 @@ I9 (revert never truncates).
 from __future__ import annotations
 
 import inspect
-import json
 
 import pytest
-
 from _support import contract as C
 from _support.assertions import expect_refusal, msg
 
@@ -82,7 +80,8 @@ def test_agent_commit_and_revert_are_permitted(store, base_messages):
     assert C.snap_revision(snap) == after_drop + 1, "revert must be a new revision (I9)"
     assert target in C.snap_spans(snap), "revert must restore without truncating"
     kinds = [str(C._res_get(op, "kind", "op_kind", default="")) for op in C.snap_ops(snap)]
-    assert kinds.count("drop") == 1, "revert truncated history instead of appending (I9)"
+    assert kinds.count("restore") >= 1, "revert did not append its restore operation (I9)"
+    assert C.snap_revision(snap) == after_drop + 1, "revert did not append a revision (I9)"
 
 
 @pytest.mark.t("T16")
@@ -113,9 +112,9 @@ def test_no_agent_tool_can_unpin_or_move_a_pin():
 
 @pytest.mark.t("T17")
 def test_commit_that_would_drop_a_pinned_span_is_refused_whole(store, base_messages):
-    revision, spans = _ingested(store, base_messages)
+    revision, spans = _ingested(store, list(base_messages) + [msg("assistant", "second editable")])
     pinned_span = spans[-1]
-    other_span = spans[0]
+    other_span = spans[-2]
     assert C.res_ok(
         C.stage(
             store, [C.make_op("pin", [pinned_span])], expected_revision=revision, txn_id="t17-pin"
@@ -125,12 +124,17 @@ def test_commit_that_would_drop_a_pinned_span_is_refused_whole(store, base_messa
     pinned_rev = C.snap_revision(C.snapshot(store))
     pin_ids = [str(k) for k in (C.snap_pins(C.snapshot(store)) or {})]
 
-    staged = C.stage(
-        store,
-        [C.make_op("drop", [pinned_span, other_span])],
-        expected_revision=pinned_rev,
-        txn_id="t17-drop",
-    )
+    try:
+        staged = C.stage(
+            store,
+            [C.make_op("drop", [pinned_span, other_span])],
+            expected_revision=pinned_rev,
+            txn_id="t17-drop",
+        )
+    except Exception as exc:
+        assert "span_pinned" in str(exc), exc
+        assert C.snap_revision(C.snapshot(store)) == pinned_rev
+        return
     if not C.res_ok(staged):
         errors = " ".join(C.res_errors(staged)).lower()
         assert "pin" in errors, f"refusal did not name the pin: {C.res_errors(staged)}"
@@ -178,7 +182,7 @@ def test_pin_ids_are_content_addressed_and_not_reused(store):
 
 @pytest.mark.t("T19")
 def test_revert_across_a_pin_is_refused_and_archive_keeps_both_sides(store, base_messages):
-    revision, spans = _ingested(store, base_messages)
+    revision, spans = _ingested(store, list(base_messages) + [msg("assistant", "other editable")])
     pinned_span = spans[-1]
     assert C.res_ok(
         C.stage(
@@ -188,7 +192,7 @@ def test_revert_across_a_pin_is_refused_and_archive_keeps_both_sides(store, base
     assert C.res_ok(C.commit(store, txn_id="t19-pin", expected_revision=revision))
     pinned_rev = C.snap_revision(C.snapshot(store))
 
-    other = spans[0]
+    other = spans[-2]
     assert C.res_ok(
         C.stage(
             store, [C.make_op("drop", [other])], expected_revision=pinned_rev, txn_id="t19-drop"
@@ -200,7 +204,7 @@ def test_revert_across_a_pin_is_refused_and_archive_keeps_both_sides(store, base
     failure = expect_refusal(
         lambda: C.revert(
             store,
-            target_revision=revision - 1 if revision else 0,
+            target_revision=revision,
             expected_revision=head,
             txn_id="t19-revert",
         )

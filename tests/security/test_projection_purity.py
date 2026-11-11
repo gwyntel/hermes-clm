@@ -7,12 +7,10 @@ or carrying a row into another session.
 from __future__ import annotations
 
 import copy
-import json
 
 import pytest
-
 from _support import contract as C
-from _support.assertions import disk_signature, msg
+from _support.assertions import disk_signature
 
 C.need(C.STORE_MOD, C.PROJECTION_MOD)
 

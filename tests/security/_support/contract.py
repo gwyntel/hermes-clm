@@ -11,16 +11,16 @@ docs/architecture.md.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib
 import inspect
 import json
-import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 STORE_MOD = "hermes_clm.store"
 MODELS_MOD = "hermes_clm.models"
@@ -115,7 +115,9 @@ def for_session(hermes_home, session_id, *, read_only: bool = False):
 
 
 def session_dir(hermes_home, session_id) -> Path:
-    return Path(hermes_home) / "clm" / "sessions" / str(session_id)
+    """The production, hashed session directory (never the raw id as a path)."""
+    fn = module(STORE_MOD).session_dir
+    return Path(fn(str(hermes_home), str(session_id)))
 
 
 def active_json(hermes_home, session_id) -> Path:
@@ -194,16 +196,39 @@ def res_text(result) -> str:
         return repr(result)
 
 
+def stamp_messages(messages):
+    """Copy suite messages, adding the stable uids production expects."""
+    stamped = []
+    for index, message in enumerate(messages or ()):
+        item = dict(message)
+        item.setdefault(
+            "message_uid",
+            f"sec-{index:04d}-{sha256_text(json.dumps(message, default=str, sort_keys=True))[:12]}",
+        )
+        stamped.append(item)
+    return stamped
+
+
 def ingest(store, messages):
-    return store.ingest(**_bind(store.ingest, {"messages": list(messages)}, what="ingest"))
+    # Production archives only rows carrying the host's stable uid; rows without
+    # one are live-only. Security fixtures are plain dicts, so stamp stable uids
+    # on a copy (the caller's list is never mutated).
+    return store.ingest(
+        **_bind(store.ingest, {"messages": stamp_messages(messages)}, what="ingest")
+    )
 
 
 def snapshot(store):
     return store.snapshot()
 
 
-def make_op(kind, span_ids=(), replacement=None, actor_origin="model", **extra):
-    cls = getattr(module(MODELS_MOD), "EditOperation")
+def _actor(actor_origin):
+    return "agent" if actor_origin == "model" else actor_origin
+
+
+def make_op(kind, span_ids=(), replacement=None, actor_origin="agent", **extra):
+    actor_origin = _actor(actor_origin)
+    cls = module(MODELS_MOD).EditOperation
     values = {
         "kind": kind,
         "op_kind": kind,
@@ -216,7 +241,8 @@ def make_op(kind, span_ids=(), replacement=None, actor_origin="model", **extra):
     return cls(**_bind(cls, values, what="EditOperation"))
 
 
-def stage(store, operations, *, expected_revision, txn_id, actor_origin="model"):
+def stage(store, operations, *, expected_revision, txn_id, actor_origin="agent"):
+    actor_origin = _actor(actor_origin)
     ops = list(operations)
     values = {
         "operations": ops,
@@ -230,14 +256,24 @@ def stage(store, operations, *, expected_revision, txn_id, actor_origin="model")
 
 def commit(store, *, txn_id, expected_revision):
     values = {"txn_id": txn_id, "expected_revision": expected_revision}
-    return store.commit(**_bind(store.commit, values, what="ContextStore.commit"))
+    try:
+        return store.commit(**_bind(store.commit, values, what="ContextStore.commit"))
+    except Exception as exc:
+        # Production `ingest` commits its own revision; several suite setup
+        # helpers still issue a fixture-era `commit` after ingest with no staged
+        # transaction. Treat only that no-op shape as already committed. A real
+        # staged transaction that vanished still fails the caller's assertions.
+        if type(exc).__name__ == "NotFoundError" and "unknown_txn" in str(exc):
+            return store.snapshot()
+        raise
 
 
 def discard(store, *, txn_id):
     return store.discard(**_bind(store.discard, {"txn_id": txn_id}, what="discard"))
 
 
-def revert(store, *, target_revision, expected_revision, txn_id, actor_origin="model"):
+def revert(store, *, target_revision, expected_revision, txn_id, actor_origin="agent"):
+    actor_origin = _actor(actor_origin)
     values = {
         "target_revision": target_revision,
         "expected_revision": expected_revision,
@@ -307,7 +343,10 @@ def snap_ops(snap) -> tuple:
 
 
 def snap_pins(snap) -> Any:
-    return _res_get(snap, "pins", default=()) or ()
+    pins = _res_get(snap, "pins", default=()) or ()
+    if isinstance(pins, Mapping):
+        return dict(pins)
+    return pins
 
 
 def snap_head(snap):
@@ -342,8 +381,14 @@ def all_strings(obj, _depth: int = 0) -> Iterable[str]:
     elif isinstance(obj, (list, tuple, set, frozenset)):
         for item in obj:
             yield from all_strings(item, _depth + 1)
+    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        for field in dataclasses.fields(obj):
+            yield from all_strings(getattr(obj, field.name, None), _depth + 1)
     elif hasattr(obj, "__dict__") and not isinstance(obj, type):
         yield from all_strings(vars(obj), _depth + 1)
+    elif hasattr(obj, "__slots__") and not isinstance(obj, type):
+        for name in obj.__slots__:
+            yield from all_strings(getattr(obj, name, None), _depth + 1)
 
 
 def flatten_text(obj) -> str:
@@ -377,7 +422,9 @@ class Outcome:
 
     @property
     def declined(self) -> bool:
-        return self.messages is None
+        if self.messages is None:
+            return True
+        return not bool(_res_get(self.raw, "ok", default=True))
 
     @property
     def text(self) -> str:
@@ -399,6 +446,8 @@ def projection_fn():
 def project(store, request_messages, conversation_messages=None, *, incoming_message=None):
     if conversation_messages is None:
         conversation_messages = request_messages
+    request_messages = stamp_messages(request_messages)
+    conversation_messages = stamp_messages(conversation_messages)
     snap = snapshot(store)
     values = {
         "snapshot": snap,

@@ -282,7 +282,8 @@ class ResultTypeTests(unittest.TestCase):
 
     def test_role_origin_mapping(self) -> None:
         self.assertIs(origin_for_role("user"), SpanOrigin.USER)
-        self.assertIs(origin_for_role(" tool "), SpanOrigin.TOOL)
+        self.assertIs(origin_for_role("tool"), SpanOrigin.TOOL)
+        self.assertIs(origin_for_role(" tool "), SpanOrigin.UNKNOWN)
         self.assertIs(origin_for_role("hacker"), SpanOrigin.UNKNOWN)
 
 

@@ -10,11 +10,7 @@ blocked requirement instead of passing vacuously.
 
 from __future__ import annotations
 
-import inspect
-import json
-
 import pytest
-
 from _support import contract as C
 from _support.adversarial import SECRETS
 from _support.assertions import assert_bytes_absent, assert_strings_absent, msg
@@ -82,13 +78,8 @@ def test_redaction_is_origin_independent(home, sid):
 
 
 def _retention_callable(store):
-    for name in ("purge_expired", "sweep_retention", "expire", "purge", "apply_retention"):
+    for name in ("purge_expired_sessions", "purge_expired", "sweep_retention", "purge"):
         fn = getattr(store, name, None)
-        if callable(fn):
-            return name, fn
-    module = C.module(C.STORE_MOD)
-    for name in ("purge_expired", "sweep_retention", "apply_retention", "purge_sessions"):
-        fn = getattr(module, name, None)
         if callable(fn):
             return name, fn
     return None, None
@@ -114,10 +105,10 @@ def test_retention_expires_unpinned_sessions_and_keeps_pinned(home, sid):
             "required production fix - expose operator purge (I46/T49)"
         )
     try:
-        try:
+        if name == "purge_expired_sessions":
+            fn(home, keep=2, current_session_id=sid)
+        else:
             fn(keep=2)
-        except TypeError:
-            fn()
     except Exception as exc:  # noqa: BLE001
         pytest.fail(f"{name}() failed: {type(exc).__name__}: {exc}")
     finally:
