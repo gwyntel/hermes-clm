@@ -1,0 +1,100 @@
+{
+  "id": "huge-output",
+  "title": "Huge tool output",
+  "description": "A 12k-character dump with a fact near the end; the harness measures offload, stub safety and exact retrieval.",
+  "budget_tokens": 4096,
+  "reserve_tokens": 512,
+  "steps": [
+    {
+      "index": 0,
+      "kind": "system",
+      "text": "You are a data engineer. Large tool output must be offloaded, never pasted into later turns. FACT[task]: find the bad record in the export.",
+      "facts": [
+        "task"
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "user",
+      "text": "Inspect the export and identify the malformed record."
+    },
+    {
+      "index": 2,
+      "kind": "assistant",
+      "text": "Streaming the export summary."
+    },
+    {
+      "index": 3,
+      "kind": "assistant",
+      "text": "Reading the full export dump.",
+      "group": "g1",
+      "tool_name": "bash",
+      "tool_args": "cat export.ndjson"
+    },
+    {
+      "index": 4,
+      "kind": "tool",
+      "text": "001 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n002 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n003 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n004 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n005 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n006 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n007 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n008 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n009 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n010 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n011 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n012 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n013 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n014 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n015 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n016 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n017 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n018 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n019 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n020 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n021 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n022 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n023 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n024 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n025 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n026 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n027 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n028 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n029 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n030 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n031 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n032 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n033 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n034 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n035 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n036 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n037 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n038 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n039 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n040 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n041 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n042 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n043 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n044 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n045 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n046 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n047 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n048 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n049 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n050 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n051 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n052 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n053 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n054 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n055 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n056 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n057 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n058 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n059 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n060 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n061 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n062 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n063 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n064 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n065 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n066 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n067 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n068 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n069 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n070 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n071 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n072 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n073 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n074 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n075 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n076 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n077 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n078 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n079 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n080 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n081 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n082 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n083 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n084 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n085 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n086 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n087 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n088 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n089 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n090 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n091 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n092 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n093 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\nFACT[detail]: record 8841 has an unquoted newline in field payload; its checksum is 6f2c1d and the source offset is 991,204.\nhe\n094 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n095 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n096 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n097 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n098 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n099 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n100 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n101 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n102 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n103 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n104 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n105 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n106 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n107 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n108 export dump: inspected the module, compared the failing path with the expected behaviour, and recorded the\n109 export d",
+      "group": "g1"
+    },
+    {
+      "index": 5,
+      "kind": "assistant",
+      "text": "The dump is large; extracting the malformed record and its neighbours."
+    },
+    {
+      "index": 6,
+      "kind": "assistant",
+      "text": "Filtering the offending record.",
+      "group": "g2",
+      "tool_name": "bash",
+      "tool_args": "grep -n '8841' export.ndjson | head"
+    },
+    {
+      "index": 7,
+      "kind": "tool",
+      "text": "001 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n002 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n003 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n004 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n005 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n006 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n007 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n008 grep output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n009 grep out",
+      "group": "g2"
+    },
+    {
+      "index": 8,
+      "kind": "assistant",
+      "text": "Confirming the checksum and offset from the archived detail."
+    },
+    {
+      "index": 9,
+      "kind": "assistant",
+      "text": "Recomputing the checksum.",
+      "group": "g3",
+      "tool_name": "bash",
+      "tool_args": "sha256sum export.ndjson"
+    },
+    {
+      "index": 10,
+      "kind": "tool",
+      "text": "001 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n002 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n003 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n004 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n005 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n006 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n007 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n008 checksum output: inspected the module, compared the failing path with the expected behaviour, and recorded\n009 checksum",
+      "group": "g3"
+    },
+    {
+      "index": 11,
+      "kind": "assistant",
+      "text": "Record 8841 is confirmed and the exact archived detail is retrievable."
+    }
+  ],
+  "facts": [
+    {
+      "id": "task",
+      "mode": "pinned",
+      "source_step": 0
+    },
+    {
+      "id": "detail",
+      "mode": "archive",
+      "source_step": 4
+    }
+  ],
+  "retrieval_step": 8,
+  "notes": [
+    "The fact is deliberately beyond the head of the dump so head truncation cannot preserve it."
+  ]
+}

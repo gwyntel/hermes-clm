@@ -1,0 +1,106 @@
+{
+  "id": "recovery",
+  "title": "Recovery after restart",
+  "description": "Offload an 8k-character manifest, crash, rebuild, and retrieve the exact archived bytes.",
+  "budget_tokens": 3072,
+  "reserve_tokens": 384,
+  "steps": [
+    {
+      "index": 0,
+      "kind": "system",
+      "text": "You are a long-running research agent. Archived details must remain retrievable after restarts. FACT[task]: recover the exact artifact digest.",
+      "facts": [
+        "task"
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "user",
+      "text": "Collect the artifact manifest, then continue after the restart."
+    },
+    {
+      "index": 2,
+      "kind": "assistant",
+      "text": "Reading the artifact manifest."
+    },
+    {
+      "index": 3,
+      "kind": "assistant",
+      "text": "Loading the full manifest.",
+      "group": "g1",
+      "tool_name": "bash",
+      "tool_args": "cat artifacts/manifest.json"
+    },
+    {
+      "index": 4,
+      "kind": "tool",
+      "text": "001 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n002 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n003 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n004 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n005 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n006 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n007 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n008 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n009 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n010 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n011 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n012 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n013 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n014 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n015 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n016 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n017 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n018 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n019 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n020 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n021 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n022 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n023 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n024 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n025 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n026 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n027 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n028 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n029 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n030 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n031 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n032 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n033 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n034 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n035 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n036 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n037 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n038 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n039 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n040 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n041 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n042 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n043 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n044 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n045 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n046 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n047 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n048 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n049 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n050 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n051 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n052 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n053 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n054 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n055 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n056 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n057 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n058 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n059 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n060 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n061 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n062 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n063 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n064 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n065 manifest dump: inspected the module, compared the failing path with the expected behaviour, \nFACT[artifact]: the signed artifact digest is sha256:9c1f0e77 and the build id is build-2026-11-04-3, stored at offset 144,201.\nand recorded t\n066 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n067 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n068 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n069 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n070 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n071 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n072 manifest dump: inspected the module, compared the failing path with the expected behaviour, and recorded t\n073 mani",
+      "group": "g1"
+    },
+    {
+      "index": 5,
+      "kind": "assistant",
+      "text": "The manifest is large; storing the digest and continuing with the audit."
+    },
+    {
+      "index": 6,
+      "kind": "assistant",
+      "text": "Checking the audit log.",
+      "group": "g2",
+      "tool_name": "bash",
+      "tool_args": "tail -n 80 audit.log"
+    },
+    {
+      "index": 7,
+      "kind": "tool",
+      "text": "001 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n002 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n003 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n004 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n005 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n006 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n007 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n008 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n009 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n010 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n011 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n012 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n013 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n014 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n015 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n016 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n017 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n018 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n019 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n020 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n021 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n022 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n023 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n024 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n025 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n026 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n027 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n028 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n029 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n030 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n031 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n032 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n033 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n034 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n035 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n036 audit log: inspected the module, compared the failing path with the expected behaviour, and recorded the r\n037 ",
+      "group": "g2"
+    },
+    {
+      "index": 8,
+      "kind": "user",
+      "text": "The process restarted. Recover the exact artifact digest from the store."
+    },
+    {
+      "index": 9,
+      "kind": "assistant",
+      "text": "Reopening the session store and retrieving the archived manifest span."
+    },
+    {
+      "index": 10,
+      "kind": "assistant",
+      "text": "Verifying the archive hash after restart.",
+      "group": "g3",
+      "tool_name": "bash",
+      "tool_args": "hermes-clm retrieve s0004"
+    },
+    {
+      "index": 11,
+      "kind": "tool",
+      "text": "001 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n002 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n003 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n004 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n005 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n006 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n007 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n008 retrieval output: inspected the module, compared the failing path with the expected behaviour, and recorde\n009 retrieva",
+      "group": "g3"
+    },
+    {
+      "index": 12,
+      "kind": "assistant",
+      "text": "Recovered sha256:9c1f0e77 from the archived span; audit continues."
+    }
+  ],
+  "facts": [
+    {
+      "id": "task",
+      "mode": "pinned",
+      "source_step": 0
+    },
+    {
+      "id": "artifact",
+      "mode": "archive",
+      "source_step": 4
+    }
+  ],
+  "crash_at_step": 8,
+  "retrieval_step": 8,
+  "notes": [
+    "Exact comparison is byte equality of the archived span, not substring matching."
+  ]
+}

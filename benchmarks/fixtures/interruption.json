@@ -1,0 +1,129 @@
+{
+  "id": "interruption",
+  "title": "Interruption and restart",
+  "description": "Crash at step 8, rebuild the projection from durable raw history and committed operations, then resume.",
+  "budget_tokens": 3072,
+  "reserve_tokens": 384,
+  "steps": [
+    {
+      "index": 0,
+      "kind": "system",
+      "text": "You are an operations agent. Every destructive step needs a verified backup. FACT[task]: migrate the queue index without dropping rows.",
+      "facts": [
+        "task"
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "user",
+      "text": "Start the migration and checkpoint before each write."
+    },
+    {
+      "index": 2,
+      "kind": "assistant",
+      "text": "Checking row counts and the current index definition."
+    },
+    {
+      "index": 3,
+      "kind": "assistant",
+      "text": "Reading the schema and row counts.",
+      "group": "g1",
+      "tool_name": "bash",
+      "tool_args": "sqlite3 queue.db '.schema' && sqlite3 queue.db 'select count(*)'"
+    },
+    {
+      "index": 4,
+      "kind": "tool",
+      "text": "001 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n002 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n003 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n004 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n005 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n006 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n007 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n008 sqlite output: inspected the module, compare\nFACT[state]: the queue holds 41,209 rows and the index build is at revision 7.\nd the failing path with the expected behaviour, and recorded t\n009 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n010 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n011 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n012 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n013 sqlite output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n014 sqlite output: inspected the module, compared the fai",
+      "group": "g1"
+    },
+    {
+      "index": 5,
+      "kind": "assistant",
+      "text": "Taking a checkpoint, then building the new index in a transaction."
+    },
+    {
+      "index": 6,
+      "kind": "assistant",
+      "text": "Creating the checkpoint.",
+      "group": "g2",
+      "tool_name": "bash",
+      "tool_args": "cp queue.db queue.db.bak && sha256sum queue.db"
+    },
+    {
+      "index": 7,
+      "kind": "tool",
+      "text": "001 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n002 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n003 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n004 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n005 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n006 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n007 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n008 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n009 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n010 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n011 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n012 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n013 checkpoint output: inspected the module, compared the failing path with the expected behaviour, and record\n014 checkpoint output: inspected the module, compared the",
+      "group": "g2"
+    },
+    {
+      "index": 8,
+      "kind": "user",
+      "text": "The host restarted during the index build; resume from the checkpoint."
+    },
+    {
+      "index": 9,
+      "kind": "assistant",
+      "text": "Reopening the store and verifying the last committed revision."
+    },
+    {
+      "index": 10,
+      "kind": "assistant",
+      "text": "Checking revision and index state after restart.",
+      "group": "g3",
+      "tool_name": "bash",
+      "tool_args": "sqlite3 queue.db 'pragma integrity_check'"
+    },
+    {
+      "index": 11,
+      "kind": "tool",
+      "text": "001 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n002 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n003 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n004 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n005 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n006 integrity output: inspected the module, c\nFACT[resume]: integrity_check returned ok and the last committed revision is 7, so the index build can resume without replaying rows.\nompared the failing path with the expected behaviour, and recorde\n007 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n008 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n009 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n010 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n011 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n012 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n013 integrity output: inspected the module, compared the failing path with the expected behaviour, and recorde\n014 integrity output: inspected the module, compared the ",
+      "group": "g3"
+    },
+    {
+      "index": 12,
+      "kind": "assistant",
+      "text": "Resuming the index build and verifying the final count."
+    },
+    {
+      "index": 13,
+      "kind": "assistant",
+      "text": "Finishing the build.",
+      "group": "g4",
+      "tool_name": "bash",
+      "tool_args": "sqlite3 queue.db 'create index ...'"
+    },
+    {
+      "index": 14,
+      "kind": "tool",
+      "text": "001 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n002 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n003 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n004 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n005 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n006 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n007 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n008 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n009 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n010 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n011 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n012 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n013 index build output: inspected the module, compared the failing path with the expected behaviour, and recor\n014 index build output: inspected the module, compared th",
+      "group": "g4"
+    },
+    {
+      "index": 15,
+      "kind": "assistant",
+      "text": "Index built; row count is unchanged and the checkpoint is intact."
+    }
+  ],
+  "facts": [
+    {
+      "id": "task",
+      "mode": "pinned",
+      "source_step": 0
+    },
+    {
+      "id": "state",
+      "mode": "extract",
+      "source_step": 4
+    },
+    {
+      "id": "resume",
+      "mode": "extract",
+      "source_step": 11
+    }
+  ],
+  "crash_at_step": 8,
+  "notes": [
+    "The crash rebuilds from raw history plus committed operations; no partial edit is replayed."
+  ]
+}
