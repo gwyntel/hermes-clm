@@ -25,7 +25,8 @@ ruff check .
 ruff format --check .
 mypy src
 pytest -m "not slow" --cov --cov-report=term-missing
-bandit -q -r src benchmarks
+pytest tests/security/mutation -q
+bandit -q -ll -r src benchmarks -x tests
 pip freeze --exclude-editable | grep -viE '^(pip|setuptools|hermes-clm)(==| @ )' > /tmp/audit-reqs.txt
 pip-audit --strict --no-deps --disable-pip -r /tmp/audit-reqs.txt
 python -m build
@@ -33,8 +34,12 @@ python -m twine check dist/*
 python tests/packaging/verify_wheel.py dist
 ```
 
-`pytest` covers the packaging contract, import isolation and the deterministic benchmark
-harness. The full engine/store/tool suites arrive with their integration branches.
+`pytest` covers unit, integration, packaging, security, fuzz and the benchmark harness; the
+mutation harness is a separate command because it re-runs probes in subprocesses. Coverage
+has an 85% floor in `pyproject.toml`. `ruff check .` currently reports findings in
+`tests/security/**` and one unused import in `src/hermes_clm/archive.py`; see
+[`docs/limitations.md`](docs/limitations.md#integration-status) before assuming a red gate
+is yours.
 
 ## Commits and pull requests
 

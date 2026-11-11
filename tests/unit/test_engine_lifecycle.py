@@ -8,6 +8,7 @@ import sys
 import textwrap
 
 import pytest
+
 from _clm_fakes import (
     StoreFactory,
     assemble,
@@ -15,7 +16,6 @@ from _clm_fakes import (
     make_store,
     snapshot_for,
 )
-
 from hermes_clm import budget as budget_module
 from hermes_clm.engine import (
     CLMEngine,
@@ -124,10 +124,20 @@ def test_importing_the_package_does_not_import_hermes():
     assert "agent" not in sys.modules
 
 
-def test_default_store_factory_is_lazy_and_import_error_is_contained():
+def test_default_store_factory_is_lazy_and_import_error_is_contained(monkeypatch):
     module = sys.modules[default_store_factory.__module__]
     source = open(str(module.__file__), encoding="utf-8").read()
     assert "importlib.import_module" in source
+    # The factory imports the store per call, so simulate the delivery unit being absent.
+    # Relying on the real store being missing made this pass only before the merge.
+    real_import = module.importlib.import_module
+
+    def missing(name, package=None):
+        if name == ".store":
+            raise ModuleNotFoundError("No module named 'hermes_clm.store'", name="hermes_clm.store")
+        return real_import(name, package)
+
+    monkeypatch.setattr(module.importlib, "import_module", missing)
     with pytest.raises(ModuleNotFoundError):
         default_store_factory("/tmp/home", "sess")
 

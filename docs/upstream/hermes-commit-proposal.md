@@ -76,9 +76,9 @@ return can never be mistaken for a persisted edit:
 ```python
 @dataclass(frozen=True)
 class SelectedContext:
-    messages: list[dict]      # request-only replacement
-    persist: bool = False     # ask the host to commit these rows
-    expected_uids: tuple[str, ...] = ()   # alignment assertion, host-side check
+    messages: list[dict]  # request-only replacement
+    persist: bool = False  # ask the host to commit these rows
+    expected_uids: tuple[str, ...] = ()  # alignment assertion, host-side check
 ```
 
 Host handling: if `persist` is set, the host re-runs the persistence path with the

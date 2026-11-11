@@ -12,7 +12,6 @@ from _clm_fakes import (
     snapshot_for,
     tool_result,
 )
-
 from hermes_clm.budget import estimate_messages_tokens
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
 

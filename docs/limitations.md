@@ -3,6 +3,71 @@
 This project publishes its limits with the same prominence as its features. If a claim is
 not enforceable, it is listed here rather than implied by the architecture.
 
+## Integration status
+
+Measured on 2026-11-10 from branch `fix/delivery` on macOS with CPython 3.12.13. These are
+local results; no remote CI run exists yet. Owner names refer to the delegate that owns the
+file, not to a person.
+
+| Gate | Command | Result |
+|---|---|---|
+| Format | `ruff format --check .` | pass (117 files) |
+| Lint | `ruff check .` | 43 findings: 42 in `tests/security/**` (39 auto-fixable), 1 in `src/hermes_clm/archive.py` |
+| Types | `mypy src` | 18 errors in 7 files (package-name error fixed by `explicit_package_bases`/`mypy_path`) |
+| Build | `python -m build`, `twine check`, `verify_wheel.py` | pass; wheel 19 package files, sdist 154 entries |
+| Import isolation | wheel in a clean venv with `hermes*`/`agent*` imports blocked | pass |
+| Benchmarks | two runs, `cmp` against committed JSON | byte-identical; also identical on CPython 3.14 |
+| Tests | `pytest -m "not slow"` | 572 passed, 108 failed, 2 skipped, 1 xpassed (the CAS test in item 7 is `xfail`; stable across three runs) |
+| Coverage | `pytest --cov` | 86% branch, floor 85% |
+
+The failures are not distributed evenly. They collapse to a small number of contract
+mismatches, all of which are findings for the owning delegate rather than test bugs to
+paper over:
+
+1. **`commit()` without `stage()`.** The security and fuzz suites ingest a conversation and
+   then call `commit(txn_id=...)`; the store requires a staged transaction and raises
+   `NotFoundError: unknown_txn`. This accounts for most of the red in
+   `test_roles/test_paths/test_recovery/test_injection/test_redaction/test_revisions/
+   test_proposals/test_concurrency/test_projection_purity/test_permissions`,
+   `integration/test_engine_security.py` and all four fuzz modules. Either the suites need a
+   `stage()` call (they claim to follow `docs/integration-contract.md`, which lists both
+   entry points) or `ingest` is meant to create a committable transaction. Owner: store,
+   with the security suite as the counterparty. Decision needed.
+2. **`actor_origin` vocabulary.** The store accepts `agent|operator|aux|system`; the
+   security adapter's `MODEL_ORIGINS` includes `model` and passes `actor_origin="model"`,
+   which raises `ValueError`. Owner: `models.py` (vocabulary) plus the adapter.
+3. **Session IDs are sanitised, not refused.** `for_session` accepts `.`, `..`, `a/b` and
+   `../x` by hashing them into `session-<hash>` directories under `clm/sessions/`. Nothing
+   escapes the root, but invariant I1 and T1 require rejection, not silent rewriting
+   (an accepted ID must round-trip). Owner: store.
+4. **Plugin passes a `dict` where an `EngineConfig` is required.**
+   `plugin.build_engine` calls `CLMEngine(config=dict(config or {}))`; `CLMEngine.__init__`
+   annotates `config: EngineConfig | None` and reads attributes. `mypy` reports
+   `arg-type`; at runtime the engine would read attributes off a `dict` and fail. Owner:
+   plugin/engine interface.
+5. **Mutation harness cannot start.** `tests/conftest.py::pytest_configure` imports
+   `hermes_clm.identity` unconditionally. The mutation harness runs probes in a subprocess
+   whose `sys.path` points at the fixture package, which has no `identity` module, so every
+   probe dies with `INTERNALERROR` instead of a clean red/green. Owner: shared conftest.
+6. **Undefined name in the security suite.** `tests/security/test_media.py:136` calls
+   `expect_refusal(...)` without importing it (`F821`); the test would raise `NameError` if
+   reached. Owner: security suite.
+7. **CAS loser can report corruption.** In `tests/unit/test_store_locking.py::
+   test_concurrent_commits_lose_the_cas_race_cleanly`, one winner is always correct, but
+   the loser intermittently raises `CorruptStoreError("store has no revisions")` instead of
+   the contracted `stale_revision` refusal (about 1 run in 10-25). The test is marked
+   `xfail(strict=False)` with the strict contract intact, so an XPASS signals the fix; it
+   is not a relaxed assertion. Owner: store. The nondeterminism also moves the suite total
+   by one between runs.
+
+The 18 `mypy` errors are in `store.py` (11), `engine.py` (2), and one each in `budget.py`,
+`commands.py`, `identity.py`, `models.py`, `plugin.py`. They are real annotation mismatches
+(SQLite `Row` vs `Mapping`, enum coercion, a base-class alias), not config noise. Missing
+stubs for the optional host (`agent.*`, `hermes_cli.*`) are handled by a mypy override, so
+no error is an import-resolution artefact.
+
+Nothing in this section may be reported as green elsewhere.
+
 ## Host and platform
 
 1. **No supported mid-loop transcript commit.** Hermes' `select_context` is request-only;
@@ -118,9 +183,10 @@ not enforceable, it is listed here rather than implied by the architecture.
     artifacts do not depend on PyPI.
 34. **CI results are local until pushed.** The workflows are committed but no remote run has
     been observed from this branch. Do not report a green CI run that has not happened.
-35. **Python 3.14 is in the CI matrix, but only 3.11, 3.12 and 3.14 were exercised
-    locally** during the delivery branch; 3.13 is CI-only. The package uses no version-
-    specific syntax, but the matrix is the proof.
+35. **Only CPython 3.12 was exercised locally for the full delivery.** 3.11, 3.13 and 3.14
+    are CI-only for the suite; 3.14 was used locally only to confirm the benchmark JSON is
+    byte-identical. The package uses no version-specific syntax, but the matrix is the
+    proof.
 36. **Release Please owns version bumps.** Hand-editing `pyproject.toml` or `_version.py`
     without the release PR breaks the single-source contract; the packaging test fails if
     they disagree. The manifest is seeded at `0.0.0` with `initial-version: 0.1.0`, so the
@@ -130,3 +196,16 @@ not enforceable, it is listed here rather than implied by the architecture.
     `python -m benchmarks` require a source checkout (a git clone or an unpacked sdist);
     the wheel excludes `benchmarks/` and `tests/` on purpose. The installed CLI reports the
     missing harness and exits nonzero.
+38. **The coverage floor is 85%, not a target.** It reflects an 86% branch measurement over
+    a suite with 108 red tests, so it can only fall as the suite is repaired; raising it is
+    a follow-up, not a claim of completeness. Coverage is measured in the test job; the
+    build job does not re-measure it.
+39. **The mutation harness is a separate CI gate.** It re-runs probe tests in subprocesses
+    with a fixture implementation on `sys.path`; it has its own job so a broken harness
+    cannot be mistaken for a broken suite. It currently fails for the reason in
+    [Integration status](#integration-status) item 5.
+40. **Bandit gates at medium severity.** Three Low findings are accepted and recorded:
+    `engine.py:428` swallows a logger failure (`B110`), `store.py:107` names the estimator
+    constant `"chars/4"` (`B105`, a false positive), and `store.py:1721` asserts an
+    internal invariant (`B101`, which disappears under `python -O`). The `B101` one is a
+    real robustness question for the store owner, not a style nit.

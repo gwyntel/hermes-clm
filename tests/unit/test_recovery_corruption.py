@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import sqlite3
 import unittest
 from pathlib import Path
 
 import store_testkit as kit
 
-from hermes_clm import schema
 from hermes_clm.errors import CorruptStoreError
 from hermes_clm.recovery import (
     RecoveryReport,
+    rebuild_index,
     recover,
     recover_session,
-    rebuild_index,
     verify_session,
 )
 from hermes_clm.store import DB_FILENAME, INDEX_FILENAME, ContextStore, session_dir
@@ -164,7 +161,7 @@ class SchemaRepairTests(kit.StoreTestCase):
 
     def test_truncated_database_is_detected(self) -> None:
         store = self.open_store()
-        ids = self.ingest(store)
+        self.ingest(store)
         store.close()
         db = self.db_path()
         size = db.stat().st_size

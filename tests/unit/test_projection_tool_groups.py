@@ -11,7 +11,6 @@ from _clm_fakes import (
     snapshot_for,
     tool_result,
 )
-
 from hermes_clm.projection import project
 
 

@@ -9,8 +9,17 @@ Sources of truth, in order: `docs/integration-contract.md`, `docs/architecture.m
 
 ## 1. Honest status on this branch
 
-`src/hermes_clm` does not exist on `test/security` and had not landed on `feat/store`,
-`feat/engine`, `feat/tools` or `feat/delivery` when this suite was written. Every test that
+> **Post-integration update.** `src/hermes_clm` now exists on the delivery branch, so the
+> suite executes against the real store: 108 of the tests in this tree are red and 573
+> pass (2 skipped, CPython 3.12, 2026-11-10). That is the intended outcome of this
+> document's rule — a red is a finding for the owning delegate, not a test bug to be
+> papered over. The findings and their owners are enumerated in
+> [`limitations.md`](limitations.md#integration-status); the dominant one is that the
+> suite calls `commit()` without `stage()`, which the store rejects with `unknown_txn`.
+> The table below records the pre-integration state and is kept as history.
+
+`src/hermes_clm` did not exist when this suite was written and had not landed on
+`feat/store`, `feat/engine`, `feat/tools` or `feat/delivery`. Every test that
 needs the implementation is therefore **written against the contract and not executed
 against production code**. That is a skip, not a pass:
 

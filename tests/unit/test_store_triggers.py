@@ -123,7 +123,7 @@ class SchemaShapeTests(kit.StoreTestCase):
             )
 
     def test_unknown_revision_kind_rejected(self) -> None:
-        store = self.open_store()
+        _store = self.open_store()
         raw = self.raw_connect()
         with self.assertRaises(sqlite3.DatabaseError):
             raw.execute(
@@ -133,7 +133,7 @@ class SchemaShapeTests(kit.StoreTestCase):
             )
 
     def test_schema_version_recorded(self) -> None:
-        store = self.open_store()
+        _store = self.open_store()
         raw = self.raw_connect()
         row = raw.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         self.assertEqual(row[0], "1")

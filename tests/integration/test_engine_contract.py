@@ -20,7 +20,6 @@ from _clm_fakes import (
     snapshot_for,
     tool_result,
 )
-
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
 
 SYSTEM_PROMPT = "You are Hermes. Follow the operator's instructions."

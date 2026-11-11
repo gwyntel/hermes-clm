@@ -197,3 +197,52 @@ def test_python_dash_m_entry_point() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.startswith("hermes-clm ")
+
+
+def test_plugin_manifest_agrees_with_the_package() -> None:
+    """The plugin manifest is a release surface: it must not drift from pyproject."""
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]
+    fields: dict[str, str] = {}
+    for line in (REPO_ROOT / "plugin.yaml").read_text().splitlines():
+        key, sep, value = line.partition(":")
+        if sep and not line.startswith((" ", "\t")):
+            fields[key.strip()] = value.strip()
+    assert fields["name"] == project["name"]
+    assert fields["version"] == project["version"]
+    assert fields["license"] == project["license"]
+    assert fields["kind"] == "standalone"
+    # The engine name is the value operators put in `context.engine`.
+    from hermes_clm.plugin import ENGINE_NAME
+
+    assert ENGINE_NAME == "hermes-clm"
+
+
+def test_plugin_manifest_declares_the_shipped_tool_surface() -> None:
+    from hermes_clm.tools import ToolHandlers, build_tool_specs
+
+    specs = build_tool_specs(ToolHandlers(lambda session_id: None))
+    manifest = (REPO_ROOT / "plugin.yaml").read_text()
+    declared = {
+        line.strip().removeprefix("- ").strip()
+        for line in manifest.splitlines()
+        if line.strip().startswith("- clm_")
+    }
+    assert declared == {spec.name for spec in specs}, "plugin.yaml tool list drifted"
+
+
+def test_source_manifest_carries_the_plugin_scaffold() -> None:
+    manifest = (REPO_ROOT / "MANIFEST.in").read_text()
+    for entry in ("plugin.yaml", "__init__.py", "benchmarks", "docs", "tests"):
+        assert entry in manifest, f"MANIFEST.in lost {entry}"
+
+
+def test_every_source_module_is_a_plain_file() -> None:
+    """Wheel contents are derived from this tree, so nothing may hide in a subpackage."""
+
+    modules = sorted(
+        path.name for path in (SRC / "hermes_clm").iterdir() if path.name != "__pycache__"
+    )
+    assert "py.typed" in modules
+    assert all(name.endswith((".py", ".typed")) for name in modules), modules
+    assert (SRC / "hermes_clm" / "__init__.py").is_file()

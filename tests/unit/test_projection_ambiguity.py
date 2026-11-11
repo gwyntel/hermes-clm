@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from _clm_fakes import FakeOperation, assemble, message, snapshot_for
-
 from hermes_clm.projection import project
 
 

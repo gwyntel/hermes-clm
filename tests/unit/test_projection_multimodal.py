@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 
 from _clm_fakes import FakeOperation, assemble, coding_turns, message, snapshot_for
-
 from hermes_clm.projection import project
 
 IMAGE_PARTS = [
@@ -16,7 +15,10 @@ IMAGE_PARTS = [
 
 def _history_with_image_result(prefix: str = ""):
     """A turn whose tool result is an image, plus a later turn so it is not the newest."""
-    tag = lambda uid: f"{prefix}{uid}"
+
+    def tag(uid):
+        return f"{prefix}{uid}"
+
     return [
         message("user", "look at this", tag("u1")),
         message("assistant", "reading", tag("a1")),
