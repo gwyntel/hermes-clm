@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+
+  type:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: mypy src
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: pytest -m "not slow" --cov --cov-report=term-missing
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ".[dev]"
+      - name: Bandit
+        run: bandit -q -r src benchmarks -x tests
+      - name: Audit third-party dependencies
+        # Scope: every installed third-party package (runtime + dev). Interpreter-provided
+        # pip/setuptools and the local project are excluded so the gate reports project
+        # dependencies rather than the runner image.
+        run: |
+          python -m pip freeze --exclude-editable \
+            | grep -viE '^(pip|setuptools|hermes-clm)(==| @ )' > "$RUNNER_TEMP/audit-reqs.txt"
+          pip-audit --strict --progress-spinner off --no-deps --disable-pip \
+            -r "$RUNNER_TEMP/audit-reqs.txt"
+
+  build:
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - run: python tests/packaging/verify_wheel.py dist
+      - name: Install the wheel in a clean environment and run the CLI
+        run: |
+          python -m venv /tmp/hermes-clm-install
+          /tmp/hermes-clm-install/bin/python -m pip install --no-index --find-links dist hermes-clm
+          /tmp/hermes-clm-install/bin/hermes-clm version
+          /tmp/hermes-clm-install/bin/python -c "import hermes_clm, hermes_clm.cli; print(hermes_clm.__version__)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  gates:
+    name: Aggregate gate
+    # Run even when a dependency fails so the check reports failure instead of being skipped.
+    if: always()
+    needs: [lint, type, test, security, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate to succeed
+        env:
+          LINT: ${{ needs.lint.result }}
+          TYPE: ${{ needs.type.result }}
+          TEST: ${{ needs.test.result }}
+          SECURITY: ${{ needs.security.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          printf 'lint=%s type=%s test=%s security=%s build=%s\n' \
+            "$LINT" "$TYPE" "$TEST" "$SECURITY" "$BUILD"
+          for result in "$LINT" "$TYPE" "$TEST" "$SECURITY" "$BUILD"; do
+            if [ "$result" != "success" ]; then
+              echo "One or more required gates did not succeed."
+              exit 1
+            fi
+          done

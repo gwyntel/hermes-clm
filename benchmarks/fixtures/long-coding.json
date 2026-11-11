@@ -1,0 +1,173 @@
+{
+  "id": "long-coding",
+  "title": "Long coding session",
+  "description": "Twenty turns of reproduction, failed patch, decision update and green suite under budget pressure.",
+  "budget_tokens": 3328,
+  "reserve_tokens": 512,
+  "steps": [
+    {
+      "index": 0,
+      "kind": "system",
+      "text": "You are a coding agent working in a repository checkout. Preserve user constraints, pinned decisions and test evidence. Do not run destructive commands. FACT[task]: fix the retry loop in worker.py without changing the public API or the on-disk queue format.",
+      "facts": [
+        "task"
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "user",
+      "text": "Please fix the retry loop. FACT[policy]: production credentials and customer payloads must never be printed, even in debug output.",
+      "facts": [
+        "policy"
+      ]
+    },
+    {
+      "index": 2,
+      "kind": "assistant",
+      "text": "I will reproduce the failure first, then patch the smallest safe surface."
+    },
+    {
+      "index": 3,
+      "kind": "assistant",
+      "text": "Running the focused test group to capture the failure mode.",
+      "group": "g1",
+      "tool_name": "bash",
+      "tool_args": "pytest -q tests/test_worker.py -x"
+    },
+    {
+      "index": 4,
+      "kind": "tool",
+      "text": "001 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n002 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n003 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n004 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n005 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n006 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n007 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n008 pytest output: inspected the module, compared the failing path with the expected behavi\nFACT[bug]: the retry counter is reset by the exception handler at worker.py:88, so attempt three never runs.\nour, and recorded t\n009 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n010 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n011 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n012 pytest output: inspected the module, compared the failing path with the expected behaviour, and recorded t\n013 pytest output: inspected the module, compared the failing path w",
+      "group": "g1"
+    },
+    {
+      "index": 5,
+      "kind": "assistant",
+      "text": "The failure is in the handler path; checking the surrounding queue code."
+    },
+    {
+      "index": 6,
+      "kind": "assistant",
+      "text": "Reading the queue implementation and the retry policy.",
+      "group": "g2",
+      "tool_name": "bash",
+      "tool_args": "sed -n '60,140p' worker.py"
+    },
+    {
+      "index": 7,
+      "kind": "tool",
+      "text": "001 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n002 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n003 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n004 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n005 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n006 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n007 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n008 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n009 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n010 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n011 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n012 worker.py excerpt: inspected the module, compared the failing path with the expected behaviour, and record\n013 worker.py excerpt: inspected the module, compared the failing pa",
+      "group": "g2"
+    },
+    {
+      "index": 8,
+      "kind": "assistant",
+      "text": "Preparing a minimal patch that keeps the persisted schema unchanged."
+    },
+    {
+      "index": 9,
+      "kind": "assistant",
+      "text": "Applying the patch in a scratch branch.",
+      "group": "g3",
+      "tool_name": "bash",
+      "tool_args": "git switch -c fix/retry && apply_patch"
+    },
+    {
+      "index": 10,
+      "kind": "tool",
+      "text": "001 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n002 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n003 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n004 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n005 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n006 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n007 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n008 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n009 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n010 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n011 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n012 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n013 patch output: inspected the module, compared the failing path wi",
+      "group": "g3"
+    },
+    {
+      "index": 11,
+      "kind": "assistant",
+      "text": "The first patch attempt still fails the boundary test; inspecting the diff."
+    },
+    {
+      "index": 12,
+      "kind": "user",
+      "text": "Remember the decision from the design review. FACT[decision]: keep SQLite WAL and the existing queue table; do not introduce Postgres or a second database.",
+      "facts": [
+        "decision"
+      ]
+    },
+    {
+      "index": 13,
+      "kind": "assistant",
+      "text": "Adjusting the patch so the retry counter lives outside the exception scope.",
+      "group": "g4",
+      "tool_name": "bash",
+      "tool_args": "pytest -q tests/test_worker.py tests/test_queue.py -x"
+    },
+    {
+      "index": 14,
+      "kind": "tool",
+      "text": "001 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n002 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n003 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n004 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n005 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n006 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n007 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n008 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n009 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n010 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n011 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n012 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n013 test output: inspected the module, compared the failing path wit",
+      "group": "g4"
+    },
+    {
+      "index": 15,
+      "kind": "assistant",
+      "text": "The focused tests pass; running the wider suite before reporting."
+    },
+    {
+      "index": 16,
+      "kind": "assistant",
+      "text": "Running the full test suite and lint gate.",
+      "group": "g5",
+      "tool_name": "bash",
+      "tool_args": "pytest -q && ruff check"
+    },
+    {
+      "index": 17,
+      "kind": "tool",
+      "text": "001 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n002 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n003 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n004 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n005 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n006 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n007 full suite output: inspected t\nFACT[api]: the public function signature run_job(job_id, *, attempt=0) is unchanged by the patch.\nhe module, compared the failing path with the expected behaviour, and record\n008 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n009 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n010 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n011 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n012 full suite output: inspected the module, compared the failing path with the expected behaviour, and record\n013 full suite output: inspected the module, compared the failing pa",
+      "group": "g5"
+    },
+    {
+      "index": 18,
+      "kind": "assistant",
+      "text": "All gates pass. Summarising the change and the evidence."
+    },
+    {
+      "index": 19,
+      "kind": "user",
+      "text": "Thanks \u2014 leave the branch unpushed and report the exact test count."
+    },
+    {
+      "index": 20,
+      "kind": "assistant",
+      "text": "117 tests passed, 0 failed; the branch remains local and unpushed."
+    }
+  ],
+  "facts": [
+    {
+      "id": "task",
+      "mode": "pinned",
+      "source_step": 0
+    },
+    {
+      "id": "policy",
+      "mode": "pinned",
+      "source_step": 1
+    },
+    {
+      "id": "bug",
+      "mode": "extract",
+      "source_step": 4
+    },
+    {
+      "id": "decision",
+      "mode": "pinned",
+      "source_step": 12
+    },
+    {
+      "id": "api",
+      "mode": "extract",
+      "source_step": 17
+    }
+  ],
+  "notes": [
+    "Facts live in tool output as well as user turns so retention is not a property of protection alone."
+  ]
+}

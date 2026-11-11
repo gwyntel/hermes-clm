@@ -1,10 +1,12 @@
-"""Hermes CLM: durable, editable request projection for Hermes Agent context.
+"""hermes-clm — model-directed context management for Hermes Agent.
 
-The package is stdlib-only at import time. Host-coupled modules (``engine``,
-``plugin``, ``auxiliary.default_aux_call``) import Hermes lazily so the core can
-be imported, tested and benchmarked without a Hermes install.
+The public package is intentionally importable without Hermes installed. Hermes is an
+optional host, never a runtime dependency: host adapters on the integration branches live
+behind guarded imports.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from ._version import __version__
+
+__all__ = ["__version__"]
