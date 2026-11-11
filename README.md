@@ -76,6 +76,9 @@ hermes-clm doctor           # JSON capability report; never imports Hermes
 hermes-clm bench            # deterministic offline A/B/C/D benchmark
 ```
 
+`hermes-clm bench` requires a source checkout: the fixtures and harness are deliberately not
+shipped in the wheel. From a wheel-only install it exits nonzero with a clear message.
+
 Hermes integration is configured through the host's context-engine slot, not by replacing
 Hermes:
 
