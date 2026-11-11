@@ -50,16 +50,14 @@ class FakeEngine:
 
 
 class FakeCtx:
+    """Context-engine lane: Hermes' ``_EngineCollector`` has no ``register_tool``."""
+
     def __init__(self) -> None:
         self.engines: list = []
-        self.tools: list[dict] = []
         self.commands: list[dict] = []
 
     def register_context_engine(self, engine) -> None:
         self.engines.append(engine)
-
-    def register_tool(self, **kwargs) -> None:
-        self.tools.append(kwargs)
 
     def register_command(self, name, handler, description="", args_hint="", **kwargs) -> None:
         self.commands.append(
@@ -67,8 +65,29 @@ class FakeCtx:
         )
 
 
+class FallbackCtx(FakeCtx):
+    """General-plugin lane: tools exist, no context-engine registration."""
+
+    #: Hermes' general plugin context has no engine registration; mirror that.
+    register_context_engine = None  # type: ignore[assignment]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tools: list[dict] = []
+
+    def register_tool(self, **kwargs) -> None:
+        self.tools.append(kwargs)
+
+
 def registered_ctx(**kwargs):
     ctx = FakeCtx()
+    engine = kwargs.pop("engine", None) or FakeEngine()
+    runtime = register(ctx, engine=engine, config=kwargs.pop("config", {}), **kwargs)
+    return ctx, runtime, engine
+
+
+def fallback_ctx(**kwargs):
+    ctx = FallbackCtx()
     engine = kwargs.pop("engine", None) or FakeEngine()
     runtime = register(ctx, engine=engine, config=kwargs.pop("config", {}), **kwargs)
     return ctx, runtime, engine
@@ -94,9 +113,17 @@ def test_plugin_identity_matches_manifest():
     assert "manifest_version: 2" in text
 
 
-def test_register_adds_engine_tools_and_command():
+def test_engine_lane_registers_engine_and_command_only():
     ctx, runtime, engine = registered_ctx()
     assert ctx.engines == [engine]
+    assert not hasattr(ctx, "tools"), "engine tools come from get_tool_schemas(), not register_tool"
+    assert [command["name"] for command in ctx.commands] == ["clm"]
+    assert runtime.engine is engine
+
+
+def test_fallback_lane_registers_the_same_tools_without_an_engine():
+    ctx, runtime, engine = fallback_ctx()
+    assert ctx.engines == []
     assert len(ctx.tools) == 12
     assert all(tool["toolset"] == TOOLSET for tool in ctx.tools)
     assert {tool["name"] for tool in ctx.tools} == set(_manifest_tools())
@@ -125,7 +152,7 @@ def _manifest_tools() -> list[str]:
 
 
 def test_every_registered_tool_has_a_closed_strict_schema():
-    ctx, _, _ = registered_ctx()
+    ctx, _, _ = fallback_ctx()
     for tool in ctx.tools:
         schema = tool["schema"]
         assert schema["name"] == tool["name"]
@@ -136,20 +163,62 @@ def test_every_registered_tool_has_a_closed_strict_schema():
 
 
 def test_no_provider_configuration_is_ever_registered():
-    ctx, _, _ = registered_ctx(config={"clm.aux_enabled": True})
+    ctx, _, _ = fallback_ctx(config={"clm.aux_enabled": True})
     blob = json.dumps([tool["schema"] for tool in ctx.tools])
     for forbidden in ("openrouter", "anthropic", "openai", "plexus", "gpt-", "claude-"):
         assert forbidden not in blob.lower()
 
 
-def test_register_requires_a_context_that_accepts_tools():
-    class Bare:
-        def register_context_engine(self, engine):
-            pass
+def test_engine_collector_without_register_tool_is_supported():
+    """Hermes' ``_EngineCollector`` has no ``register_tool``; registration must not raise."""
 
-    with pytest.raises(TypeError) as excinfo:
-        register(Bare(), engine=FakeEngine(), config={})
-    assert "register_tool" in str(excinfo.value)
+    class Collector:
+        def __init__(self):
+            self.engine = None
+            self.commands = []
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_command(self, name, handler, description="", args_hint=""):
+            self.commands.append(name)
+
+    engine = FakeEngine()
+    ctx = Collector()
+    runtime = register(ctx, engine=engine, config={})
+    assert ctx.engine is engine and ctx.commands == ["clm"]
+    assert runtime.handlers is not None
+
+
+def test_engine_lane_never_calls_register_tool_so_names_cannot_duplicate():
+    class StrictCtx(FakeCtx):
+        def register_tool(self, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError(f"duplicate tool registration attempted: {kwargs.get('name')}")
+
+    ctx = StrictCtx()
+    register(ctx, engine=FakeEngine(), config={})
+    register(ctx, engine=FakeEngine(), config={})  # a second load must stay harmless
+    assert ctx.engines and len(ctx.commands) == 2
+
+
+def test_engine_lane_tools_come_from_the_engine_tool_schemas():
+    from hermes_clm import tools as tools_module
+
+    class EngineWithService(FakeEngine):
+        def tool_service(self):
+            return self.sessions.get(self._session)
+
+        _session = "sess-a"
+
+    engine = EngineWithService()
+    engine.sessions["sess-a"] = FakeService(revision=3)
+    schemas = tools_module.get_tool_schemas(engine)
+    assert {schema["name"] for schema in schemas} == set(_manifest_tools())
+
+    payload = load(tools_module.handle_tool_call(engine, "clm_status", {}, messages=[]))
+    assert payload["ok"] is True
+    unknown = load(tools_module.handle_tool_call(engine, "clm_nope", {}))
+    assert unknown["ok"] is False and unknown["errors"][0]["code"] == "unknown_tool"
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +227,7 @@ def test_register_requires_a_context_that_accepts_tools():
 
 
 def test_tools_resolve_the_calling_session_service():
-    ctx, _, engine = registered_ctx()
+    ctx, _, engine = fallback_ctx()
     engine.sessions["sess-a"] = FakeService(revision=1)
     engine.sessions["sess-b"] = FakeService(revision=2)
     inspect_tool = next(tool for tool in ctx.tools if tool["name"] == "clm_inspect")
@@ -170,7 +239,7 @@ def test_tools_resolve_the_calling_session_service():
 
 
 def test_missing_session_yields_no_session_error_not_another_store():
-    ctx, _, engine = registered_ctx()
+    ctx, _, engine = fallback_ctx()
     engine.sessions["sess-a"] = FakeService()
     status_tool = next(tool for tool in ctx.tools if tool["name"] == "clm_status")
     payload = load(status_tool["handler"]({}, session_id="sess-unknown"))
@@ -184,6 +253,21 @@ def test_engine_without_service_seam_refuses_instead_of_guessing():
 
     runtime = PluginRuntime(Seamless(), config={})
     assert runtime.service("sess-a") is None
+
+
+def test_runtime_accepts_a_per_engine_tool_service():
+    class BoundEngine:
+        name = ENGINE_NAME
+
+        def __init__(self):
+            self.service = FakeService()
+
+        def tool_service(self):
+            return self.service
+
+    engine = BoundEngine()
+    runtime = PluginRuntime(engine, config={})
+    assert runtime.service("anything") is engine.service
 
 
 # --------------------------------------------------------------------------- #
@@ -240,7 +324,7 @@ def test_aux_config_is_read_from_clm_keys_only():
 
 def test_plugin_register_passes_an_injected_aux_compressor():
     aux = AuxCompressor(lambda **_: None, enabled=False)
-    ctx, runtime, _ = registered_ctx(aux=aux)
+    ctx, runtime, _ = fallback_ctx(aux=aux)
     status_tool = next(tool for tool in ctx.tools if tool["name"] == "clm_status")
     runtime.engine.sessions[None] = FakeService()
     payload = load(status_tool["handler"]({}, session_id=None))
@@ -258,6 +342,39 @@ def test_register_uses_engine_factory_when_no_engine_is_given():
     register(ctx, config={"clm.aux_enabled": True}, engine_factory=factory)
     assert seen == [{"clm.aux_enabled": True}]
     assert isinstance(ctx.engines[0], FakeEngine)
+
+
+def test_build_engine_applies_clm_config_through_the_engine(tmp_path):
+    """A non-empty clm.* mapping must yield a usable engine, not a raw-dict config."""
+
+    engine = plugin_module.build_engine(
+        {"clm.aux_enabled": False, "clm.reserve_tokens": 4096, "clm.hermes_home": str(tmp_path)}
+    )
+    assert engine.config.aux_enabled is False
+    assert engine.config.reserve_tokens == 4096
+    assert engine.config.hermes_home == str(tmp_path)
+    assert engine.get_status()["engine"] == ENGINE_NAME
+
+
+def test_build_engine_rejects_provider_configuration():
+    with pytest.raises(ValueError):
+        plugin_module.build_engine({"clm.model": "gpt-4o"})
+
+
+def test_build_engine_passes_the_flat_clm_mapping(monkeypatch):
+    """The engine seam is ``CLMEngine(config=<flat clm.* mapping>)``, no translation."""
+
+    import hermes_clm.engine as engine_module
+
+    seen: list[dict] = []
+
+    class RecordingEngine:
+        def __init__(self, *, config=None):
+            seen.append(dict(config or {}))
+
+    monkeypatch.setattr(engine_module, "CLMEngine", RecordingEngine)
+    plugin_module.build_engine({"clm.reserve_tokens": 4096, "clm.aux_enabled": False})
+    assert seen == [{"clm.reserve_tokens": 4096, "clm.aux_enabled": False}]
 
 
 # --------------------------------------------------------------------------- #
@@ -279,7 +396,7 @@ def test_plugin_module_does_not_import_hermes():
 def test_manifest_tool_list_matches_registration():
     yaml = pytest.importorskip("yaml")
     data = yaml.safe_load(PLUGIN_YAML.read_text(encoding="utf-8"))
-    ctx, _, _ = registered_ctx()
+    ctx, _, _ = fallback_ctx()
     assert set(data["provides_tools"]) == {tool["name"] for tool in ctx.tools}
     assert all(key.startswith("clm.") for key in data["config_keys"])
     assert data["kind"] == "standalone"
@@ -321,6 +438,13 @@ def test_repo_entrypoint_delegates_to_the_plugin_module():
     spec.loader.exec_module(module)
     assert callable(module.register)
     assert module._import_register() is plugin_module.register
+
+
+def test_repo_entrypoint_matches_the_context_engine_discovery_heuristic():
+    """Hermes only imports a user engine directory when this marker is present."""
+
+    source = (REPO_ROOT / "__init__.py").read_text(encoding="utf-8")[:8192]
+    assert "register_context_engine" in source or "ContextEngine" in source
 
 
 def test_read_clm_config_tolerates_missing_hermes(monkeypatch):

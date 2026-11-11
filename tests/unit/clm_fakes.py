@@ -7,8 +7,26 @@ nothing was written when it should not have been.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
+
+
+def store_proposal_digest(operations: Any, *, base_revision: int) -> str:
+    """Store-side proposal digest, modelled on ``ContextStore.create_proposal``.
+
+    Deliberately *not* the auxiliary module's business: the store owns proposal
+    identity, and this fake mirrors that so tests prove the aux path echoes the
+    store's hash instead of recomputing one it cannot know.
+    """
+
+    body = {
+        "base": int(base_revision),
+        "origin": "aux",
+        "operations": [dict(operation) for operation in operations],
+    }
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class FakeService:
@@ -163,11 +181,9 @@ class FakeService:
         self._record("create_proposal", (operations,), {"base_revision": base_revision})
         if self.proposal_result is not None:
             return dict(self.proposal_result)
-        from hermes_clm.auxiliary import canonical_proposal_sha256
-
         proposal = {
             "proposal_id": f"prop-{len(self.proposals) + 1}",
-            "proposal_sha256": canonical_proposal_sha256(operations, base_revision=base_revision),
+            "proposal_sha256": store_proposal_digest(operations, base_revision=base_revision),
             "base_revision": base_revision,
             "origin": "aux",
             "operations": [dict(operation) for operation in operations],

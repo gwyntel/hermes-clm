@@ -7,14 +7,20 @@ import sys
 import types
 
 import pytest
-from clm_fakes import FakeAuxResponse, FakeService, RecordingAuxClient, aux_json
+from clm_fakes import (
+    FakeAuxResponse,
+    FakeService,
+    RecordingAuxClient,
+    aux_json,
+    store_proposal_digest,
+)
 
+from hermes_clm import auxiliary as auxiliary_module
 from hermes_clm.auxiliary import (
     AUX_TASK,
     AuxCompressor,
     AuxLimits,
     bound_timeout,
-    canonical_proposal_sha256,
     default_aux_call,
     extract_response_text,
 )
@@ -124,7 +130,7 @@ def test_successful_proposal_is_immutable_and_not_applied(service):
     assert proposal["operations"] == [
         {"kind": "rewrite", "span_ids": ["m-0001"], "replacement": "short output"}
     ]
-    assert proposal["proposal_sha256"] == canonical_proposal_sha256(
+    assert proposal["proposal_sha256"] == store_proposal_digest(
         proposal["operations"], base_revision=3
     )
     assert "NOT applied" in payload["review"]
@@ -141,7 +147,7 @@ def test_returned_proposal_snapshot_cannot_mutate_the_stored_proposal(service):
     payload["proposal"]["operations"][0]["replacement"] = "tampered"
     payload["proposal"]["base_revision"] = 99
     assert json.dumps(stored, sort_keys=True) == before
-    assert payload["proposal"]["proposal_sha256"] == canonical_proposal_sha256(
+    assert payload["proposal"]["proposal_sha256"] == store_proposal_digest(
         stored["operations"], base_revision=3
     )
 
@@ -243,7 +249,9 @@ def test_no_reduction_is_reported(service):
     assert payload["errors"][0]["code"] == "no_reduction"
 
 
-def test_hash_mismatch_fails_closed(service):
+def test_store_hash_is_returned_verbatim(service):
+    """The store owns proposal identity; aux must not substitute its own digest."""
+
     service.proposal_result = {
         "proposal_id": "prop-x",
         "proposal_sha256": "f" * 64,
@@ -251,19 +259,22 @@ def test_hash_mismatch_fails_closed(service):
     }
     compressor = AuxCompressor(RecordingAuxClient(aux_json(REWRITE_REPLY)))
     payload = compressor.propose(service, span_ids=["m-0001"])
-    assert payload["ok"] is False
-    assert payload["errors"][0]["code"] == "proposal_hash_mismatch"
-    assert "stage" not in service.names()
+    assert payload["ok"] is True
+    assert payload["proposal"]["proposal_sha256"] == "f" * 64
+    assert "stage" not in service.names() and "commit" not in service.names()
 
 
-def test_store_proposal_without_hash_is_hashed_locally(service):
+def test_store_proposal_without_hash_fails_closed(service):
     service.proposal_result = {"proposal_id": "prop-y", "base_revision": 3}
     compressor = AuxCompressor(RecordingAuxClient(aux_json(REWRITE_REPLY)))
     payload = compressor.propose(service, span_ids=["m-0001"])
-    assert payload["ok"] is True
-    assert payload["proposal"]["proposal_sha256"] == canonical_proposal_sha256(
-        payload["proposal"]["operations"], base_revision=3
-    )
+    assert payload["ok"] is False
+    assert payload["errors"][0]["code"] == "proposal_hash_missing"
+    assert "stage" not in service.names() and "commit" not in service.names()
+
+
+def test_aux_module_keeps_no_local_proposal_digest():
+    assert not hasattr(auxiliary_module, "canonical_proposal_sha256")
 
 
 # --------------------------------------------------------------------------- #

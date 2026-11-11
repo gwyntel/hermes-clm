@@ -1,11 +1,14 @@
 """Hermes plugin wiring for CLM.
 
-``register(ctx)`` does four things and nothing else:
+``register(ctx)`` does exactly what the *lane* it is loaded through supports:
 
 1. reads the ``clm.*`` profile config section (no production config edits),
-2. builds the context engine and registers it with the host,
-3. registers the ``clm_*`` tools bound to a per-session service resolver,
-4. registers the operator-only ``/clm`` slash command.
+2. builds the context engine and — when the context supports it — registers it,
+3. registers the ``clm_*`` tools **only** in the general-plugin fallback lane
+   (a ctx with ``register_tool`` but without ``register_context_engine``); a
+   context engine advertises the same tools through ``get_tool_schemas()``, and
+   registering them twice is how duplicate tool names happen,
+4. registers the operator-only ``/clm`` slash command when the context can.
 
 Hermes is imported lazily and only inside the functions that need it, so this
 module imports cleanly in a bare environment (tests use fakes for ``ctx``).
@@ -14,10 +17,11 @@ The engine owns session lifecycle and exposes the scoped service used by tools:
 
     engine.service_for_session(session_id: str | None) -> service | None
 
-That is the only coupling between this layer and the engine: no store handle, no
-paths, no provider or model configuration crosses it. ``service_for_session``
-must resolve the *calling* session's store, including for subagents, whose stores
-are separate.
+``engine.tool_service()`` is accepted as a fallback for host engines that bind
+one service per engine instance. That is the only coupling between this layer
+and the engine: no store handle, no paths, no provider or model configuration
+crosses it. A session resolver must resolve the *calling* session's store,
+including for subagents, whose stores are separate.
 """
 
 from __future__ import annotations
@@ -62,7 +66,7 @@ def read_clm_config() -> dict[str, Any]:
         from hermes_cli.config import load_config_readonly
 
         config = load_config_readonly() or {}
-    except Exception:  # noqa: BLE001 - config is optional at import/registration time
+    except Exception:
         return {}
     if not isinstance(config, Mapping):
         return {}
@@ -114,11 +118,40 @@ def build_aux(
 
 
 def build_engine(config: Mapping[str, Any] | None = None) -> Any:
-    """Instantiate the CLM context engine (imported lazily)."""
+    """Instantiate the CLM context engine from the flat ``clm.*`` mapping.
 
-    from .engine import CLMEngine
+    ``CLMEngine`` accepts a mapping (``EngineConfig.from_mapping``); the plugin
+    therefore never translates keys. Engines built before that coercion existed
+    read ``config.hermes_home`` off the raw mapping and raise inside ``__init__``,
+    so for those — and only those — rebuild through the engine's own
+    ``EngineConfig.from_mapping``. Transitional shim: delete it once every
+    supported engine coerces mappings itself.
+    """
 
-    return CLMEngine(config=dict(config or {}))
+    from . import engine as engine_module
+
+    cfg = dict(config or {})
+    constructor = engine_module.CLMEngine
+
+    def engine_config(mapping: Mapping[str, Any]) -> Any:
+        from_mapping = getattr(getattr(engine_module, "EngineConfig", None), "from_mapping", None)
+        return from_mapping(mapping) if callable(from_mapping) else None
+
+    try:
+        # The engine accepts a mapping by contract (`EngineConfig.from_mapping`);
+        # its constructor annotation still says EngineConfig until the engine fix.
+        engine = constructor(config=cfg)  # type: ignore[arg-type]
+    except AttributeError as exc:
+        adapter = engine_config(cfg) if cfg and "hermes_home" in str(exc) else None
+        if adapter is None:
+            raise
+        return constructor(config=adapter)
+
+    if cfg and isinstance(getattr(engine, "config", None), Mapping):
+        adapter = engine_config(cfg)
+        if adapter is not None:
+            return constructor(config=adapter)
+    return engine
 
 
 def build_tool_handlers(
@@ -162,7 +195,14 @@ class PluginRuntime:
         if callable(resolver):
             try:
                 return resolver(session_id)
-            except Exception:  # noqa: BLE001 - a missing store is a normal error path
+            except Exception:
+                return None
+        # Host engines that own exactly one session expose tool_service() instead.
+        factory = getattr(engine, "tool_service", None)
+        if callable(factory):
+            try:
+                return factory()
+            except Exception:
                 return None
         return None
 
@@ -184,7 +224,21 @@ def register(
     aux: AuxCompressor | None = None,
     aux_call: Callable[..., Any] | None = None,
 ) -> PluginRuntime:
-    """Register the engine, tools and operator command with ``ctx``.
+    """Register the engine and/or tools and the operator command with ``ctx``.
+
+    Two host lanes exist and they must not both advertise the same tools:
+
+    * **context-engine lane** — ``ctx`` has ``register_context_engine`` (Hermes'
+      ``_EngineCollector``). We hand over the engine and the ``/clm`` command.
+      Tools come from ``engine.get_tool_schemas()``, which Hermes injects into
+      ``agent.tools``; calling ``register_tool`` here would either raise (the
+      collector is not a general plugin context) or duplicate every name.
+    * **general-plugin fallback** — no engine registration exists, so the same
+      schemas are registered through ``ctx.register_tool``.
+
+    In the engine lane the tools exist only while the engine is selected
+    (``context.engine: hermes-clm``); enabling the plugin without selecting the
+    engine intentionally exposes nothing.
 
     Injection points exist for tests and for integration: ``engine`` (a ready
     engine), ``engine_factory``, ``aux`` (a compressor) and ``aux_call`` (the
@@ -198,20 +252,20 @@ def register(
     runtime = PluginRuntime(clm_engine, config=cfg, aux=compressor)
 
     register_engine = getattr(ctx, "register_context_engine", None)
-    if callable(register_engine):
+    engine_lane = callable(register_engine)
+    if engine_lane and register_engine is not None:
         register_engine(clm_engine)
 
     register_tool = getattr(ctx, "register_tool", None)
-    if not callable(register_tool):
-        raise TypeError("plugin context does not support register_tool()")
-    for spec in build_tool_specs(runtime.handlers):
-        register_tool(
-            name=spec.name,
-            toolset=TOOLSET,
-            schema=spec.schema,
-            handler=spec.handler,
-            description=spec.description,
-        )
+    if not engine_lane and callable(register_tool):
+        for spec in build_tool_specs(runtime.handlers):
+            register_tool(
+                name=spec.name,
+                toolset=TOOLSET,
+                schema=spec.schema,
+                handler=spec.handler,
+                description=spec.description,
+            )
 
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):

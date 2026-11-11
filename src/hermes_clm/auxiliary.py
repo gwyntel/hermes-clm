@@ -20,9 +20,9 @@ is copied or mechanically transformed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -35,7 +35,6 @@ __all__ = [
     "AuxCompressor",
     "AuxLimits",
     "bound_timeout",
-    "canonical_proposal_sha256",
     "default_aux_call",
     "extract_response_text",
 ]
@@ -51,6 +50,9 @@ MAX_TIMEOUT_SECONDS = 120.0
 
 DEFAULT_MAX_OUTPUT_TOKENS = 900
 MAX_OUTPUT_TOKENS = 4000
+
+#: Store proposal hashes are lowercase hex sha256 digests.
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: Per-span and total prompt budgets, so one huge tool result cannot make the
 #: auxiliary request unbounded.
@@ -111,29 +113,6 @@ def default_aux_call(
         max_tokens=max_tokens,
         timeout=timeout,
     )
-
-
-def canonical_proposal_sha256(
-    operations: Sequence[Mapping[str, Any]],
-    *,
-    base_revision: int,
-    origin: str = "aux",
-) -> str:
-    """Digest the proposal identity the store must reproduce.
-
-    Canonical form: sorted-key compact JSON of
-    ``{"base_revision", "operations", "origin"}`` encoded as UTF-8. The store's
-    ``Proposal.proposal_sha256`` must equal this value; a mismatch is treated as
-    corruption rather than silently accepted.
-    """
-
-    body = {
-        "base_revision": int(base_revision),
-        "operations": [dict(operation) for operation in operations],
-        "origin": origin,
-    }
-    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def extract_response_text(response: Any) -> str | None:
@@ -334,7 +313,7 @@ class AuxCompressor:
                 timeout=timeout,
                 max_tokens=self.limits.max_output_tokens,
             )
-        except Exception as exc:  # noqa: BLE001 - never propagate aux failures
+        except Exception as exc:
             self._latency_ms += _elapsed_ms(started)
             self._failures += 1
             # Deliberately excludes the exception text: provider errors can name
@@ -364,28 +343,32 @@ class AuxCompressor:
             {"kind": "rewrite", "span_ids": [item["span_id"]], "replacement": item["text"]}
             for item in rewrites
         ]
-        expected_hash = canonical_proposal_sha256(operations, base_revision=base)
         try:
             proposal = _as_mapping(service.create_proposal(operations, base_revision=base))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._failures += 1
             return self._fail("service_error", f"create_proposal failed ({type(exc).__name__})")
         if proposal is None:
             self._failures += 1
             return self._fail("service_error", "create_proposal returned an unsupported result")
 
+        # The store owns proposal identity: ``proposal_sha256`` covers its own
+        # canonical operation payload (actor origin, provenance, expected
+        # revision and txn id included), which this module cannot and must not
+        # recompute.  ``clm_accept_proposal`` demands that exact hash later, so
+        # echoing anything else would make every proposal unacceptance-proof.
         store_hash = proposal.get("proposal_sha256")
-        if store_hash is not None and str(store_hash) != expected_hash:
+        if not isinstance(store_hash, str) or not _SHA256_RE.match(store_hash):
             self._failures += 1
             return self._fail(
-                "proposal_hash_mismatch",
-                "stored proposal hash does not match the proposed operations",
-                hint="store and auxiliary view diverged; discard this proposal and propose again",
+                "proposal_hash_missing",
+                "store did not return the proposal's sha256",
+                hint="the store's proposal hash is required to accept a proposal",
             )
 
         snapshot = {
             "proposal_id": str(proposal.get("proposal_id") or ""),
-            "proposal_sha256": expected_hash if store_hash is None else str(store_hash),
+            "proposal_sha256": store_hash,
             "base_revision": int(proposal.get("base_revision", base)),
             "origin": "aux",
             "operations": json.loads(json.dumps(operations)),
@@ -522,7 +505,7 @@ class AuxCompressor:
     def _current_revision(self, service: Any) -> int | None:
         try:
             status = _as_mapping(service.status())
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         if status is None:
             return None
