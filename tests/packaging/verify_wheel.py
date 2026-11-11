@@ -61,11 +61,18 @@ def check_sdist(path: Path) -> None:
     with tarfile.open(path) as sdist:
         names = set(sdist.getnames())
     suffixes = {name.rsplit("/", 1)[-1] for name in names}
-    for required in {"LICENSE", "README.md", "pyproject.toml"}:
+    for required in {"LICENSE", "README.md", "pyproject.toml", "MANIFEST.in"}:
         if required not in suffixes:
             fail(f"sdist missing {required}")
     if not any(name.endswith("src/hermes_clm/py.typed") for name in names):
         fail("sdist missing py.typed")
+    for required in ("benchmarks/runner.py", "docs/benchmarking.md", "docs/limitations.md"):
+        if not any(name.endswith(required) for name in names):
+            fail(f"sdist missing {required}")
+    if not any("/tests/packaging/test_packaging.py" in name for name in names):
+        fail("sdist missing packaging tests")
+    if any("__pycache__" in name or "/.venv/" in name or "/dist/" in name for name in names):
+        fail("sdist contains local build or cache artifacts")
     print(f"sdist ok: {path.name}")
 
 

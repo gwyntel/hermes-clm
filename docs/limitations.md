@@ -127,5 +127,6 @@ not enforceable, it is listed here rather than implied by the architecture.
     first release PR should produce `v0.1.0`; later releases follow Conventional Commits.
     No tag or release exists yet.
 37. **The benchmark harness is not in the wheel.** `hermes-clm bench` and
-    `python -m benchmarks` require a source checkout; the wheel excludes `benchmarks/` and
-    `tests/` on purpose. The installed CLI reports the missing harness and exits nonzero.
+    `python -m benchmarks` require a source checkout (a git clone or an unpacked sdist);
+    the wheel excludes `benchmarks/` and `tests/` on purpose. The installed CLI reports the
+    missing harness and exits nonzero.

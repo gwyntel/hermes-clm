@@ -71,7 +71,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     benchmarks = _find_benchmarks_dir(args.benchmarks_dir)
     if benchmarks is None:
         print(
-            "error: offline benchmarks are not installed with the wheel; run "
+            "error: offline benchmarks are not installed with the package; run "
             "`hermes-clm bench` from a source checkout or pass --benchmarks-dir",
             file=sys.stderr,
         )

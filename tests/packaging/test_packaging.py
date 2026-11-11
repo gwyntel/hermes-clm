@@ -127,7 +127,7 @@ def test_cli_bench_fails_clearly_outside_checkout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert cli.main(["bench", "--benchmarks-dir", str(tmp_path)]) == 2
-    assert "not installed with the wheel" in capsys.readouterr().err
+    assert "not installed with the package" in capsys.readouterr().err
 
 
 def test_benchmark_discovery_walks_up_from_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
