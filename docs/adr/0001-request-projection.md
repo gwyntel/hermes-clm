@@ -25,6 +25,16 @@ Implement CLM as a **durable, UID-addressed projection over raw Hermes history**
 11. Auxiliary compression calls `agent.auxiliary_client.call_llm(task="compression", ..., timeout=<bounded>)`. It creates an immutable proposal keyed by proposal hash + base revision. Main agent must explicitly accept and commit. No model IDs, provider settings or fallback chains are implemented here. No aux call occurs in `select_context()`.
 12. Only `plugins.isolation: in_process` is supported initially. Each agent/subagent gets an independent store; cross-session and child→parent reads are absent. Hermes core and production config are not modified.
 
+## Rewrite lifetime and restore (added after review)
+
+A `rewrite` sets the span's `rewrite_text`; it is the projector's content for an active span. `drop` and `offload` **clear** it — the row leaves the projection, so the rewrite has no reader, and the checkpoint, the replay (`_replay_states`), `revert` and `project()` all record `(state, None)`. `keep`/`restore` **carry it through**: a `restore` applied to an active, rewritten span keeps the rewrite, and the projector emits `span.rewrite_text` for a `restore` whenever the span still carries one, falling back to the archived content only when it does not. Consequences:
+
+- `rewrite → drop` is not a `verify()` divergence, and `recover()`/`rebuild_state()` cannot write a stale rewrite onto a dropped span.
+- Operations that committed `inert` are replayed inert: `_replay_states` runs every recorded operation through `_replay_transition`, the mirror of the planner's `_transition`. `operations` records the *planned* operations of a revision, so replaying them unconditionally would resurrect a dropped span on a later `rewrite`, flip a dropped span to `offloaded`, and make `verify()`/`recover()` disagree with a correct checkpoint. `restore` of a UID the host no longer sends stays inert too (presence is a current flag, so replay uses the current one).
+- `rewrite → drop → restore` reinstates the **archived original**; the rewrite is not resurrected. Re-`rewrite` if the shorter text is still wanted.
+- `keep` is `restore` for a `dropped`/`offloaded` span: the same content rule (rewrite first, archived original second, `max_rewrite_bytes` ceiling), the same protected-row refusal, and the same reactivation recorded by `_transition`/`_replay_transition`. It is only a no-op on an `active` span, where the store commits `already_active` and the projector emits nothing for it — treating `keep` as a receipt-only kind (as `pin`/`boundary` are) silently dropped a documented reactivation path while `verify()` and the checkpoint disagreed with projection.
+- A store that caps its replayed operation log (`operations_truncated`) is refused by projection (`operations_truncated`) rather than projected from a partial log, because a missing drop would put a row back on the wire.
+
 ## Why not native transcript commits
 
 A native commit closure would require re-anchoring, sidecar restamping, persistence-marker rewrites, usage-anchor reset and retry reset. That remains a useful optional upstream extension, but is unnecessary for request-level CLM semantics and increases blast radius. See `upstream/hermes-commit-proposal.md` (implementation delegate).

@@ -1,0 +1,117 @@
+{
+  "id": "conflicting-updates",
+  "title": "Conflicting updates",
+  "description": "A later operator correction supersedes an earlier config value; stale text must not survive as current.",
+  "budget_tokens": 3072,
+  "reserve_tokens": 384,
+  "steps": [
+    {
+      "index": 0,
+      "kind": "system",
+      "text": "You are a release engineer. The newest verified fact wins; stale values must be marked superseded, not silently kept. FACT[task]: cut release 2.4.0.",
+      "facts": [
+        "task"
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "user",
+      "text": "Collect the current configuration before tagging."
+    },
+    {
+      "index": 2,
+      "kind": "assistant",
+      "text": "Reading the deployment configuration and the previous release notes."
+    },
+    {
+      "index": 3,
+      "kind": "assistant",
+      "text": "Reading config.",
+      "group": "g1",
+      "tool_name": "bash",
+      "tool_args": "cat deploy/config.yaml"
+    },
+    {
+      "index": 4,
+      "kind": "tool",
+      "text": "001 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n002 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n003 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n004 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n005 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n006 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n007 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n008 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n009 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n010 config read: inspected the module, compared the\nFACT[config]: the deploy target is alpha-17 and the batch size is 64.\n failing path with the expected behaviour, and recorded the\n011 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n012 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n013 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n014 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n015 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n016 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n017 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n018 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n019 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n020 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n021 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n022 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n023 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n024 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n025 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n026 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n027 config read: inspected the module, compared the failing path with the expected behaviour, and recorded the\n028",
+      "group": "g1"
+    },
+    {
+      "index": 5,
+      "kind": "assistant",
+      "text": "The config says alpha-17; checking the change log for later overrides."
+    },
+    {
+      "index": 6,
+      "kind": "assistant",
+      "text": "Reading the change log.",
+      "group": "g2",
+      "tool_name": "bash",
+      "tool_args": "git log --oneline -20"
+    },
+    {
+      "index": 7,
+      "kind": "tool",
+      "text": "001 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n002 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n003 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n004 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n005 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n006 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n007 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n008 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n009 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n010 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n011 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n012 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n013 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n014 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n015 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n016 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n017 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n018 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n019 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n020 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n021 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n022 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n023 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n024 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n025 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n026 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n027 git log: inspected the module, compared the failing path with the expected behaviour, and recorded the res\n028",
+      "group": "g2"
+    },
+    {
+      "index": 8,
+      "kind": "user",
+      "text": "Correction from the release meeting. FACT[config]: the deploy target is beta-42 and the batch size is 32; the earlier value is superseded.",
+      "facts": [
+        "config"
+      ]
+    },
+    {
+      "index": 9,
+      "kind": "assistant",
+      "text": "Updating the release notes to use beta-42 and batch size 32."
+    },
+    {
+      "index": 10,
+      "kind": "assistant",
+      "text": "Checking the rendered release notes.",
+      "group": "g3",
+      "tool_name": "bash",
+      "tool_args": "grep -n 'deploy target' RELEASE.md"
+    },
+    {
+      "index": 11,
+      "kind": "tool",
+      "text": "001 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n002 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n003 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n004 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n005 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n006 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n007 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n008 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n009 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n010 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n011 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n012 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n013 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n014 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n015 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n016 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n017 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n018 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n019 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n020 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n021 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n022 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n023 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n024 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n025 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n026 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n027 release notes: inspected the module, compared the failing path with the expected behaviour, and recorded t\n028",
+      "group": "g3"
+    },
+    {
+      "index": 12,
+      "kind": "assistant",
+      "text": "Release notes now reference beta-42 only."
+    }
+  ],
+  "facts": [
+    {
+      "id": "task",
+      "mode": "pinned",
+      "source_step": 0
+    },
+    {
+      "id": "config",
+      "mode": "latest",
+      "source_step": 8,
+      "stale_marker": "alpha-17",
+      "current_marker": "beta-42"
+    }
+  ],
+  "conflicts": [
+    {
+      "fact": "config",
+      "stale_marker": "alpha-17",
+      "current_marker": "beta-42",
+      "superseded_at_step": 8
+    }
+  ],
+  "notes": [
+    "Resolution means the stale marker is absent and the current marker is present in the projected context."
+  ]
+}

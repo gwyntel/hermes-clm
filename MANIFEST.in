@@ -1,0 +1,19 @@
+# Source distribution contents. The wheel ships only the `hermes_clm` package (see
+# pyproject.toml); the plugin scaffold, harness, docs and tests travel in the sdist so a
+# clone or an unpacked sdist can be registered with Hermes and benchmarked offline.
+include LICENSE
+include README.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include SECURITY.md
+# Hermes plugin entry point and manifest: loaded by directory, so they only make sense in
+# a source tree, but they must be present for a plugin install from the sdist.
+include plugin.yaml
+include __init__.py
+recursive-include benchmarks *.py *.json *.md
+recursive-include docs *.md
+recursive-include tests *.py
+global-exclude __pycache__/* *.py[cod]
+prune src/hermes_clm.egg-info
+prune build
+prune dist

@@ -1,0 +1,113 @@
+{
+  "id": "handoff",
+  "title": "Session handoff",
+  "description": "A boundary snapshot must carry operator constraints and verified facts without dragging raw tool output forward.",
+  "budget_tokens": 4096,
+  "reserve_tokens": 512,
+  "steps": [
+    {
+      "index": 0,
+      "kind": "system",
+      "text": "You are the parent agent. At a task boundary, transfer verified facts and operator constraints to the next session, never raw tool noise. FACT[task]: ship the parser fix.",
+      "facts": [
+        "task"
+      ]
+    },
+    {
+      "index": 1,
+      "kind": "user",
+      "text": "FACT[decision]: keep the public parser signature and ship behind a feature flag.",
+      "facts": [
+        "decision"
+      ]
+    },
+    {
+      "index": 2,
+      "kind": "assistant",
+      "text": "Reproducing the parser failure and checking the feature-flag default."
+    },
+    {
+      "index": 3,
+      "kind": "assistant",
+      "text": "Reading the parser and flag defaults.",
+      "group": "g1",
+      "tool_name": "bash",
+      "tool_args": "pytest -q tests/test_parser.py -x"
+    },
+    {
+      "index": 4,
+      "kind": "tool",
+      "text": "001 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n002 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n003 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n004 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n005 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n006 t\nFACT[parser]: the failure is in parse_header when the input ends with a CRLF.\nest output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n007 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n008 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n009 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n010 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n011 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n012 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n013 test output: inspected the module, compared the failing path wit",
+      "group": "g1"
+    },
+    {
+      "index": 5,
+      "kind": "assistant",
+      "text": "Patching the CRLF path behind the flag."
+    },
+    {
+      "index": 6,
+      "kind": "assistant",
+      "text": "Applying the patch.",
+      "group": "g2",
+      "tool_name": "bash",
+      "tool_args": "apply_patch parser.py"
+    },
+    {
+      "index": 7,
+      "kind": "tool",
+      "text": "001 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n002 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n003 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n004 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n005 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n006 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n007 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n008 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n009 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n010 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n011 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n012 patch output: inspected the module, compared the failing path with the expected behaviour, and recorded th\n013 patch output: inspected the module, compared the failing path wi",
+      "group": "g2"
+    },
+    {
+      "index": 8,
+      "kind": "user",
+      "text": "That is enough for this session; hand off to the next one."
+    },
+    {
+      "index": 9,
+      "kind": "assistant",
+      "text": "Writing the handoff snapshot with verified facts and constraints."
+    },
+    {
+      "index": 10,
+      "kind": "assistant",
+      "text": "Re-running the focused tests before handoff.",
+      "group": "g3",
+      "tool_name": "bash",
+      "tool_args": "pytest -q tests/test_parser.py"
+    },
+    {
+      "index": 11,
+      "kind": "tool",
+      "text": "001 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n002 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n003 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n004 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n005 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n006 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n007 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n008 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n009 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n010 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n011 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n012 test output: inspected the module, compared the failing path with the expected behaviour, and recorded the\n013 test output: inspected the module, compared the failing path wit",
+      "group": "g3"
+    },
+    {
+      "index": 12,
+      "kind": "assistant",
+      "text": "Handoff snapshot written; parser tests pass with the flag enabled."
+    }
+  ],
+  "facts": [
+    {
+      "id": "task",
+      "mode": "pinned",
+      "source_step": 0
+    },
+    {
+      "id": "decision",
+      "mode": "pinned",
+      "source_step": 1
+    },
+    {
+      "id": "parser",
+      "mode": "extract",
+      "source_step": 4
+    }
+  ],
+  "handoff_step": 8,
+  "notes": [
+    "Fidelity is the fraction of non-archived facts present in the handoff snapshot."
+  ]
+}

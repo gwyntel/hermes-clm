@@ -52,6 +52,7 @@ One SQLite transaction covers operation append, archive additions, revision bump
 8. Structural store corruption ⇒ return `None`. Derived-index corruption ⇒ rebuild index. Never return a guessed subset.
 9. Origin survives rewrite: model and aux summaries remain untrusted, schema-like labels; never operator authority.
 10. Offload stubs are non-imperative and contain only span ID/hash metadata.
+11. `restore` emits the span's current `rewrite_text` when it still carries one and the archived original otherwise; `drop`/`offload` clear the rewrite, and a truncated snapshot (`operations_truncated`) is refused instead of projected from a partial log. `keep` mirrors `restore` for a `dropped`/`offloaded` span (rewrite first, archived original second, `max_rewrite_bytes` ceiling, protected rows refused) and is inert on an `active` one, matching the store's `already_active` receipt; it is never a receipt-only no-op.
 
 ## Token pressure and cache
 
@@ -69,6 +70,40 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - Lazy initialization from host `session_id`; no reliance on `bind_session_state` or `on_session_end`.
 - `clone_for_agent()` returns a fresh engine with reopened store, never deep-copies SQLite/locks.
 - Compression boundaries carry state only through explicit `old_session_id` lifecycle; new session gets isolated copy. No lineage guessing from `conversation_id`.
+
+## Model guidance (system-prompt section)
+
+The tool surface is useless if the model does not know the operating rules, so the plugin
+registers one static text block through the host's section API
+(`ctx.register_system_prompt_section`): id `hermes-clm.usage`, position `after_memory`,
+`max_chars` 4000 (the host ceiling; the text is ~3.0 KB with headroom because an
+oversized section is skipped, not truncated).
+
+- **Static by construction.** The section is registered as a string, never a callable.
+  Archive bytes, tool results and user text are never interpolated: the block is
+  high-trust prompt bytes, and a callable would turn session data into instructions.
+- **Frozen per session.** The host renders sections once at session start and persists
+  the rendered prompt; a resumed session restores those exact bytes rather than re-running
+  plugin code. Editing the text therefore changes new sessions only.
+- **Gated on the live tool surface.** The section is registered only when the host offers
+  the API *and* the `clm_*` tools are callable: the general-plugin lane registers it when it
+  registered the tools itself (no engine selected), and also when this engine *is* selected,
+  because the engine's own registration supplies the tools. A profile that installs the
+  plugin but selects another engine gets the engine registration and no instructions.
+- **Dual enablement is asymmetric on purpose.** The canonical profile enables the plugin
+  *and* selects this engine. Exactly one lane owns the tools and the store: the selected
+  engine injects the `clm_*` schemas, registers `/clm` and opens the session store; the
+  general-plugin lane sees the selection (injected `engine_selected`, else the profile's
+  `context.engine`) and registers only the section, with no engine object, no tools and no
+  command. The alternative — a plugin-lane engine — would answer `no_session` on every call:
+  the store's sibling `flock` admits one writer, and the second engine swallows
+  `StoreBusyError` on lazy attach. See [limitations](limitations.md#plugin-enabled-and-engine-selected).
+- **Capability-missing hosts still load.** Hermes' directory-loaded engine path
+  (`_EngineCollector`) has no section API; registration is `getattr`-guarded, so the
+  engine still loads and simply carries no guidance. A rejected registration is recorded
+  on the runtime (`prompt_section_error`) and logged as a warning carrying only the
+  section id and exception type (the entry-point shim discards the runtime, and host
+  exception text is untrusted) instead of breaking the plugin.
 
 ## Security limits
 
