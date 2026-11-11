@@ -11,26 +11,30 @@ deployment has occurred.
 
 | Gate | Command | Result |
 |---|---|---|
-| Format | `ruff format --check .` | pass (127 files) |
+| Format | `ruff format --check .` | pass (129 files) |
 | Lint | `ruff check .` | pass |
-| Types | `mypy src/hermes_clm` | pass (19 modules) |
-| Build | `python -m build`, `twine check dist/*` | pass |
-| Tests | `pytest -o addopts='-ra --import-mode=importlib'` | 811 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; 782/32 without it |
+| Types | `mypy` | pass (19 modules) |
+| Build | `python -m build`, `twine check dist/*` | pass (sdist + wheel) |
+| Bandit | `bandit -q -r src -ll` | pass; 0 medium/high, 3 accepted Low (item 40) |
+| Tests | `pytest -o addopts='-ra --import-mode=importlib'` | 867 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; 836 passed, 34 skipped without it |
+| Coverage | `pytest --cov=hermes_clm` | 87.07% branches, floor 85% |
 | Security + fuzz | its own suite | all pass; mutation baseline green, 16/16 injected defects red |
 | Benchmarks | offline simulator, two runs and CPython 3.11/3.12/3.14 | byte-identical JSON; simulator only, no model calls |
 
 The three skips are expected and explicit: two media-blob probes do not apply to inline
 archives, and one tool-schema probe has no module-level JSON schema object. Without a Hermes
-checkout, the 29 real-discovery, prompt-section and lifecycle tests also skip.
+checkout, 31 further real-discovery, prompt-section, dual-lane and lifecycle tests skip.
 
-The format/type/test rows were re-measured locally for the system-prompt-section work
-(adding `src/hermes_clm/guidance.py` and the section tests); no remote CI run covers those
-changes yet, so treat the row values as local until one does.
+The format/type/test rows were re-measured locally after the dual-enablement and `keep`
+work; no remote CI run covers those changes yet, so treat the row values as local until one
+does.
 
 Resolved during integration: the `commit()`-without-`stage()` test adaptation, the
 `model`→`agent` actor vocabulary, hashed-but-stable session IDs, `EngineConfig` mapping
-construction, mutation-fixture isolation, the missing `expect_refusal` import, and the
-intermittent CAS-loser corruption error. The last is now covered by a non-`xfail` test.
+construction, mutation-fixture isolation, the missing `expect_refusal` import, the
+intermittent CAS-loser corruption error, the duplicate `clm_*` tool surface under dual
+enablement, and `keep` as a documented-but-unprojected reactivation. The CAS one is now
+covered by a non-`xfail` test.
 
 ## Host and platform
 
@@ -88,9 +92,11 @@ intermittent CAS-loser corruption error. The last is now covered by a non-`xfail
     operator or system authority, never changes pins and never authorises a side-effecting
     tool. Whether a model is persuaded by its own history or by tool output is not
     solvable at this layer.
-16. **Pins and commits are operator-authority operations.** Agent tools are read-only for
-    pins. If a future tool exposes a mutating pin or commit verb to the model, the
-    persistence guarantee collapses.
+16. **Only *unpin* is operator-authority.** Agent tools can pin (`clm_pin`) and can stage
+    and commit edits (`clm_stage`/`clm_commit`); the operator-only verb is `unpin`
+    (`/clm unpin`, `store.unpin` with `actor_origin="operator"`), which refuses an agent
+    caller with `pin_authority`. A pin is therefore agent-supplied but operator-released:
+    treat "pinned" as "the agent asked to keep this", not as an operator endorsement.
 17. **Path validation cannot stop an attacker with filesystem access.** Component-wise
     `lstat`, realpath containment, owner checks, `nlink == 1` and hash verification stop
     traversal and symlink swaps; they do not stop a process that can `sqlite3` the file.
@@ -160,17 +166,20 @@ intermittent CAS-loser corruption error. The last is now covered by a non-`xfail
     `python -m benchmarks` require a source checkout (a git clone or an unpacked sdist);
     the wheel excludes `benchmarks/` and `tests/` on purpose. The installed CLI reports the
     missing harness and exits nonzero.
-38. **The coverage floor is 85%, not a target.** It reflects an 86% branch measurement over
-    a suite with 108 red tests, so it can only fall as the suite is repaired; raising it is
-    a follow-up, not a claim of completeness. Coverage is measured in the test job; the
-    build job does not re-measure it.
+38. **The coverage floor is 85%, not a target.** The current full-suite measurement under a
+    Hermes checkout is 87% branches over a green suite (867 passed, 3 skipped); the floor
+    stays where it is so an unrelated refactor cannot quietly delete coverage, and raising
+    it is a follow-up, not a claim of completeness. Coverage is measured in the test job;
+    the build job does not re-measure it.
 39. **The mutation harness is a separate CI gate.** It re-runs probe tests in subprocesses
     with a fixture implementation on `sys.path`; it has its own job so a broken harness
-    cannot be mistaken for a broken suite. It currently fails for the reason in
-    [Integration status](#integration-status) item 5.
+    cannot be mistaken for a broken suite. It passes locally (16/16 injected defects go
+    red); the harness only sees `src/` through that fixture, so a mutation in a module the
+    fixture does not import survives — coverage of the harness is not coverage of the
+    package.
 40. **Bandit gates at medium severity.** Three Low findings are accepted and recorded:
-    `engine.py:428` swallows a logger failure (`B110`), `store.py:107` names the estimator
-    constant `"chars/4"` (`B105`, a false positive), and `store.py:1721` asserts an
+    `engine.py:827` swallows a logger failure (`B110`), `store.py:108` names the estimator
+    constant `"chars/4"` (`B105`, a false positive), and `store.py:1894` asserts an
     internal invariant (`B101`, which disappears under `python -O`). The `B101` one is a
     real robustness question for the store owner, not a style nit.
 
@@ -194,3 +203,44 @@ intermittent CAS-loser corruption error. The last is now covered by a non-`xfail
     prompt side). A `context.engine` change needs a restart **and** a new session: the
     host selects the engine at agent initialisation, and the prompt bytes are already
     frozen.
+
+## Plugin enabled and engine selected
+
+44. **Dual enablement requires the selected engine to own the tools.** The canonical
+    profile sets both `plugins.enabled: [hermes-clm]` and `context.engine: hermes-clm`.
+    They are not interchangeable: the plugin entry is the only lane with a system-prompt
+    section API, and the selected engine is the only lane that can bind the session store.
+    When both are present the general-plugin lane detects the selection (from its injected
+    `engine_selected` fact, else the profile's `context.engine`) and registers the section
+    only — no tools, no `/clm`, no engine object. Registering the tools there would win the
+    host lookup over the engine's own copy while handing every call to a second engine; the
+    store's exclusive `flock` admits one writer, the second engine swallows `StoreBusyError`
+    on lazy attach, and all twelve calls answer `no_session` while the prompt advertises
+    them as callable. One lane owns each concern, and the lane that owns the tools owns the
+    writer.
+45. **A failed engine load leaves the section without tools.** The deferral decides at
+    plugin-load time; if the selected engine then fails to initialise (host-side error, a
+    missing dependency, a corrupt store it refuses to open), the profile has instructions
+    for tools that are not registered. There is no supported host hook to observe a later
+    engine load from the plugin lane, so the plugin cannot fall back after the fact. This
+    is the intended trade: instructions without tools are inert noise, whereas tools bound
+    to a store-less engine report failures on every call. Check `hermes-clm status` (or the
+    host's engine list) after changing provider or engine configuration. The gate reads the
+    same profile file the host reads (`context.engine`, resolved through `HERMES_HOME`); a
+    deployment that points plugin loading at a different home than the agent would gate on
+    the wrong profile, which is why `register()` also accepts an injected
+    `engine_selected` for embedding hosts and tests.
+46. **`/clm` has one owner.** In a dual-enabled profile the selected engine registers the
+    command; the plugin lane skips it. On hosts whose general plugin context also accepts
+    `register_context_engine`, the plugin lane registers the engine and the command itself
+    and registers no tools — the engine injects them. Whichever lane handed the engine over
+    also owns `/clm`; there is never a second command registration to shadow it.
+47. **Two engine objects can exist in one process.** On a host that both directory-loads
+    this engine and accepts the plugin's `register_context_engine`, the process holds two
+    `CLMEngine` instances. The host resolves `context.engine` by name, so only the selected
+    instance receives session hooks and only it opens the store; the other stays `detached`
+    and its schemas are never injected (verified by the real-host probe: 12 unique names, one
+    `attached` store). Nothing is shared between them — there is no second writer and no
+    cross-instance state — but they are two objects, and a future host change that attaches
+    stores eagerly rather than on the selected instance's first hook would break that
+    guarantee.

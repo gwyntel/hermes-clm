@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .models import MAX_REWRITE_BYTES
 from .tools import error_payload
 
 try:  # pragma: no cover - package import guard is exercised by the CLI
@@ -92,7 +93,7 @@ class AuxLimits:
     """Bounds for a single proposal request."""
 
     max_spans: int = 12
-    max_rewrite_bytes: int = 8000
+    max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_instruction_bytes: int = 600
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     prompt_span_chars: int = MAX_PROMPT_SPAN_CHARS
@@ -321,6 +322,19 @@ class AuxCompressor:
                 )
             if not text.strip():
                 return self._fail("empty_span", f"span {span_id} has no text to rewrite")
+            # A rewrite covers the whole span, so the request must carry the
+            # whole span. A truncated prompt would let the model rewrite text it
+            # never saw and silently drop the tail; refuse before spending a call.
+            if len(text) > self.limits.prompt_span_chars:
+                return self._fail(
+                    "span_too_large",
+                    f"span {span_id} is {len(text)} chars, over the "
+                    f"{self.limits.prompt_span_chars}-char aux prompt cap",
+                    hint=(
+                        "aux rewrites the whole span and never a prefix: drop it, split it into "
+                        "smaller spans, or rewrite it with clm_stage"
+                    ),
+                )
             spans.append(
                 {
                     "span_id": span_id,
@@ -456,11 +470,10 @@ class AuxCompressor:
         blocks: list[str] = []
         used = sum(len(part) for part in header)
         for span in spans:
+            # ``propose`` refuses spans over ``prompt_span_chars`` before this
+            # runs, so span text is never truncated here: a rewrite must cover
+            # exactly the bytes the model was shown.
             text = str(span["text"])
-            if len(text) > self.limits.prompt_span_chars:
-                text = (
-                    text[: self.limits.prompt_span_chars] + "\n…[span truncated for this request]"
-                )
             block = (
                 f"\nSPAN {span['span_id']} role={span['role']} origin={span['origin']} "
                 f"chars={len(str(span['text']))}\n{text}\nEND SPAN {span['span_id']}"

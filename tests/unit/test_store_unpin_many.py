@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import unittest
 
 import store_testkit as kit
@@ -128,6 +129,39 @@ class UnpinManyTests(kit.StoreTestCase):
                 [self.a], expected_revision=first.revision, txn_id="txn-replay"
             )
         self.assertEqual(ctx.exception.code, "txn_payload_mismatch")
+
+    def test_unpin_snapshot_records_the_real_active_set_and_tokens(self) -> None:
+        """The snapshots row is the documented per-revision projection summary."""
+
+        self._pin([self.a, self.b])
+        before = self.store.snapshot()
+        tokens = sum(
+            span.est_tokens for span in before.spans.values() if span.state is kit.SpanState.ACTIVE
+        )
+        active_ids = [
+            span.span_id
+            for span in sorted(before.spans.values(), key=lambda span: span.seq)
+            if span.state is kit.SpanState.ACTIVE
+        ]
+        expected_hash = hashlib.sha256(kit.canonical_json(active_ids).encode("utf-8")).hexdigest()
+        result = self.store.operator_unpin_many(
+            [self.a, self.b], expected_revision=before.revision, txn_id="txn-snap"
+        )
+
+        raw = self.raw_connect()
+        snapshot_row = raw.execute(
+            "SELECT est_tokens, active_set_sha256, active_span_count FROM snapshots "
+            "WHERE revision = ?",
+            (result.revision,),
+        ).fetchone()
+        self.assertEqual(snapshot_row["est_tokens"], tokens)
+        self.assertEqual(snapshot_row["active_set_sha256"], expected_hash)
+        self.assertEqual(snapshot_row["active_span_count"], len(active_ids))
+        revision_row = raw.execute(
+            "SELECT est_tokens_before, est_tokens_after FROM revisions WHERE revision = ?",
+            (result.revision,),
+        ).fetchone()
+        self.assertEqual((revision_row[0], revision_row[1]), (tokens, tokens))
 
     def test_span_id_and_span_ids_together_are_rejected(self) -> None:
         with self.assertRaises(ValidationError) as ctx:

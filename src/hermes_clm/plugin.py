@@ -259,6 +259,11 @@ class PluginRuntime:
         self.config = dict(config or {})
         self.aux = aux
         self.handlers = build_tool_handlers(self.service, config=self.config, aux=aux)
+        #: True when this lane deliberately registered nothing but the usage
+        #: section: the profile selects this engine, and the *selected* engine
+        #: instance owns the tools, ``/clm`` and the single store writer. The
+        #: engine here is ``None`` and no second instance was built.
+        self.deferred_to_engine = False
         #: Registration handle for the frozen system-prompt section, when the
         #: host accepted one. ``None`` means either the host has no section API
         #: (engine-only load path) or guidance was correctly withheld because
@@ -313,19 +318,36 @@ def register(
     Two host lanes exist and they must not both advertise the same tools:
 
     * **context-engine lane** — ``ctx`` has ``register_context_engine`` (Hermes'
-      ``_EngineCollector``). We hand over the engine and the ``/clm`` command.
-      Tools come from ``engine.get_tool_schemas()``, which Hermes injects into
-      ``agent.tools``; calling ``register_tool`` here would either raise (the
-      collector is not a general plugin context) or duplicate every name.
+      ``_EngineCollector``, or the plugin manager's engine slot). We hand over
+      the engine and the ``/clm`` command. Tools come from
+      ``engine.get_tool_schemas()``, which Hermes injects into ``agent.tools``;
+      calling ``register_tool`` here would either raise (the collector is not a
+      general plugin context) or duplicate every name.
     * **general-plugin fallback** — no engine registration exists, so the same
       schemas are registered through ``ctx.register_tool``.
 
     In the engine lane the tools exist only while the engine is selected
     (``context.engine: hermes-clm``); enabling the plugin without selecting the
-    engine intentionally exposes nothing. The system-prompt section follows the
-    same rule (see :func:`prompt_section_enabled`): it is registered only when
-    ``ctx.register_system_prompt_section`` exists *and* guidance would be true.
-    A ctx without that API (the directory-loaded engine path) still loads.
+    engine intentionally exposes nothing.
+
+    **Dual enablement.** A profile can enable the plugin *and* select this
+    engine. Then the selected engine owns the tool surface and the single
+    store writer: its ``get_tool_schemas()`` are injected by the host, and a
+    general-plugin lane that registered the same twelve names would win the
+    name lookup while its handlers bound a *second* engine instance. That
+    instance cannot open the store (``StoreBusyError`` is swallowed on the
+    lazy-attach path), so every one of the twelve tools would answer
+    ``no_session`` while the guidance promised a working surface. Such a lane
+    therefore registers the guidance section only — no engine, no tools, no
+    command, no service runtime — and says so in the log
+    (:attr:`PluginRuntime.deferred_to_engine`). The tools are still callable:
+    they arrive from the selected engine.
+
+    The system-prompt section follows selection (see
+    :func:`prompt_section_enabled`): it is registered when the host offers
+    ``register_system_prompt_section`` *and* guidance would be true, including
+    in the deferred lane, because the engine lane's tools will exist. A ctx
+    without that API (the directory-loaded engine path) still loads.
 
     Injection points exist for tests and for integration: ``engine`` (a ready
     engine), ``engine_factory``, ``aux`` (a compressor), ``aux_call`` (the
@@ -334,18 +356,37 @@ def register(
     """
 
     cfg = dict(config) if config is not None else read_clm_config()
+    register_engine = getattr(ctx, "register_context_engine", None)
+    engine_lane = callable(register_engine)
+    register_tool = getattr(ctx, "register_tool", None)
+    tools_lane = callable(register_tool)
+    selected = clm_engine_selected() if engine_selected is None else bool(engine_selected)
+
+    # A lane that cannot hand the host an engine must not advertise tools for
+    # one: the selected engine already owns those names and the writer.
+    deferred = tools_lane and not engine_lane and selected
+    if deferred:
+        runtime = PluginRuntime(None, config=cfg, aux=None)
+        runtime.deferred_to_engine = True
+        logger.info(
+            "hermes-clm: context.engine selects %s, so this plugin lane skipped the "
+            "engine, the clm_* tools and /clm; the selected engine provides them and "
+            "owns the store writer. Registering only the usage section.",
+            ENGINE_NAME,
+        )
+        # The tools are callable (from the selected engine), so guidance holds.
+        _register_prompt_section(ctx, runtime, engine_lane=True, selected=True)
+        return runtime
+
     compressor = aux if aux is not None else build_aux(cfg, call=aux_call)
     clm_engine = engine if engine is not None else (engine_factory or build_engine)(cfg)
 
     runtime = PluginRuntime(clm_engine, config=cfg, aux=compressor)
 
-    register_engine = getattr(ctx, "register_context_engine", None)
-    engine_lane = callable(register_engine)
     if engine_lane and register_engine is not None:
         register_engine(clm_engine)
 
-    register_tool = getattr(ctx, "register_tool", None)
-    if not engine_lane and callable(register_tool):
+    if not engine_lane and register_tool is not None:
         for spec in build_tool_specs(runtime.handlers):
             register_tool(
                 name=spec.name,
@@ -355,32 +396,7 @@ def register(
                 description=spec.description,
             )
 
-    # Guide the model only where the tools are callable. The host renders this
-    # section once per new session and freezes the bytes, so it must stay
-    # static: nothing here interpolates archive, tool or user data.
-    register_section = getattr(ctx, "register_system_prompt_section", None)
-    if callable(register_section) and prompt_section_enabled(
-        engine_lane=engine_lane, selected=engine_selected
-    ):
-        try:
-            runtime.prompt_section = register_section(
-                SYSTEM_PROMPT_SECTION_ID,
-                SYSTEM_PROMPT_SECTION_TEXT,
-                position=SYSTEM_PROMPT_SECTION_POSITION,
-                max_chars=SYSTEM_PROMPT_SECTION_MAX_CHARS,
-            )
-        except Exception as exc:  # fail open: the engine and tools still work
-            runtime.prompt_section_error = f"{type(exc).__name__}: {exc}"
-            # The entry-point shim discards ``PluginRuntime``, so the runtime
-            # attribute alone would hide a rejection in production. Log the
-            # type only: host error text is untrusted input and may embed
-            # plugin names or paths we must not amplify into logs.
-            logger.warning(
-                "hermes-clm: system prompt section %s was rejected by the host (%s); "
-                "the engine and tools still load, but the model gets no CLM guidance",
-                SYSTEM_PROMPT_SECTION_ID,
-                type(exc).__name__,
-            )
+    _register_prompt_section(ctx, runtime, engine_lane=engine_lane, selected=selected)
 
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
@@ -391,3 +407,40 @@ def register(
             args_hint="status|edit|unpin",
         )
     return runtime
+
+
+def _register_prompt_section(
+    ctx: Any, runtime: PluginRuntime, *, engine_lane: bool, selected: bool | None
+) -> None:
+    """Register the frozen usage section when the host and the tools allow it.
+
+    The host renders this section once per new session and freezes the bytes, so
+    it must stay static: nothing here interpolates archive, tool or user data.
+    Guidance follows the tool surface (:func:`prompt_section_enabled`), and a
+    missing host API is a limitation rather than an error.
+    """
+
+    register_section = getattr(ctx, "register_system_prompt_section", None)
+    if not callable(register_section):
+        return
+    if not prompt_section_enabled(engine_lane=engine_lane, selected=selected):
+        return
+    try:
+        runtime.prompt_section = register_section(
+            SYSTEM_PROMPT_SECTION_ID,
+            SYSTEM_PROMPT_SECTION_TEXT,
+            position=SYSTEM_PROMPT_SECTION_POSITION,
+            max_chars=SYSTEM_PROMPT_SECTION_MAX_CHARS,
+        )
+    except Exception as exc:  # fail open: the engine and tools still work
+        runtime.prompt_section_error = f"{type(exc).__name__}: {exc}"
+        # The entry-point shim discards ``PluginRuntime``, so the runtime
+        # attribute alone would hide a rejection in production. Log the
+        # type only: host error text is untrusted input and may embed
+        # plugin names or paths we must not amplify into logs.
+        logger.warning(
+            "hermes-clm: system prompt section %s was rejected by the host (%s); "
+            "the engine and tools still load, but the model gets no CLM guidance",
+            SYSTEM_PROMPT_SECTION_ID,
+            type(exc).__name__,
+        )

@@ -23,7 +23,17 @@ from typing import Any, Iterable, Mapping
 
 from .errors import ValidationError
 
+#: The one rewrite-size ceiling, in UTF-8 bytes of replacement text.
+#:
+#: Every layer derives from this value: the store's ``StoreConfig``, the
+#: engine/projection defaults, the tool and slash-command validators, and the
+#: auxiliary compressor's own limit.  Separate literals used to disagree (8000
+#: in the tool layer, 16384 in the store), so the tool layer refused rewrites the
+#: store would have accepted.
+MAX_REWRITE_BYTES = 16_384
+
 __all__ = [
+    "MAX_REWRITE_BYTES",
     "canonical_json",
     "sha256_hex",
     "canonical_sha256",

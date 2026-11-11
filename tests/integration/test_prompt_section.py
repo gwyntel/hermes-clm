@@ -164,6 +164,30 @@ result["selected_engine_tool_count"] = (
     len(chosen.get_tool_schemas()) if chosen is not None else 0
 )
 
+# Dual enablement: the plugin lane must not advertise a second copy of the
+# twelve names, and it must not hold the store writer. The selected engine
+# opens the session store (exclusive flock) and serves a tool call.
+result["plugin_lane_tool_names"] = sorted(
+    name for name in manager._plugin_tool_names if name.startswith("clm_")
+)
+result["manager_engine_store"] = (
+    manager._context_engine.get_status().get("store")
+    if manager._context_engine is not None
+    else None
+)
+result["selected_tool_status_ok"] = None
+result["selected_tool_status_error"] = None
+if chosen is not None:
+    chosen.service_for_session("clm-dual-lane-probe")
+    payload = json.loads(
+        chosen.handle_tool_call("clm_status", {}, session_id="clm-dual-lane-probe")
+    )
+    result["selected_tool_status_ok"] = payload.get("ok")
+    result["selected_tool_status_error"] = payload.get("errors")
+    result["selected_engine_store_after"] = chosen.get_status().get("store")
+else:
+    result["selected_engine_store_after"] = None
+
 # Resumed session: the host must recover the frozen bytes from the persisted
 # prompt and must not re-run plugin code to do it.
 from agent import system_prompt
@@ -345,6 +369,23 @@ def test_selected_profile_also_loads_the_directory_engine_in_process(selected):
         "context.engine must resolve through the directory loader, not the plugin-manager fallback"
     )
     assert selected["selected_engine_tool_count"] == 12
+
+
+def test_selected_profile_registers_no_duplicate_clm_tool_names(selected):
+    """One tool surface: the selected engine's. The plugin lane adds none."""
+
+    assert selected["plugin_lane_tool_names"] == [], (
+        "the general plugin lane registered clm_* names the engine already injects"
+    )
+    # The plugin-manager engine instance is a fallback provider only; it must
+    # not open a store for the selected engine's session (that would be a second
+    # writer, and StoreBusyError would surface as no_session in the tools).
+    assert selected["manager_engine_store"] == "detached"
+
+
+def test_selected_engine_serves_tool_calls_without_a_store_conflict(selected):
+    assert selected["selected_engine_store_after"] == "attached"
+    assert selected["selected_tool_status_ok"] is True, selected["selected_tool_status_error"]
 
 
 def test_selected_profile_renders_the_section_exactly_once(selected):

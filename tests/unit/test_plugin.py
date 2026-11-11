@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -12,6 +13,12 @@ from clm_fakes import FakeService
 
 from hermes_clm import plugin as plugin_module
 from hermes_clm.auxiliary import AuxCompressor
+from hermes_clm.guidance import (
+    SYSTEM_PROMPT_SECTION_ID,
+    SYSTEM_PROMPT_SECTION_MAX_CHARS,
+    SYSTEM_PROMPT_SECTION_POSITION,
+    SYSTEM_PROMPT_SECTION_TEXT,
+)
 from hermes_clm.plugin import (
     ENGINE_NAME,
     PLUGIN_NAME,
@@ -79,9 +86,33 @@ class FallbackCtx(FakeCtx):
         self.tools.append(kwargs)
 
 
+class GeneralLaneCtx(FallbackCtx):
+    """The full general-plugin surface: tools, commands and prompt sections.
+
+    This is the lane a ``plugins.enabled`` entry gets on a host build that also
+    has the system-prompt-section API (no engine registration here, which is
+    what makes the fallback lane own the tools).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sections: list[dict] = []
+
+    def register_system_prompt_section(
+        self, id, content, *, position="after_memory", max_chars=4000
+    ):
+        self.sections.append(
+            {"id": id, "content": content, "position": position, "max_chars": max_chars}
+        )
+        return f"handle:{id}"
+
+
 def registered_ctx(**kwargs):
     ctx = FakeCtx()
     engine = kwargs.pop("engine", None) or FakeEngine()
+    # Engine-lane tests pin the section gate explicitly so they never read the
+    # operator's live profile config.
+    kwargs.setdefault("engine_selected", False)
     runtime = register(ctx, engine=engine, config=kwargs.pop("config", {}), **kwargs)
     return ctx, runtime, engine
 
@@ -89,6 +120,9 @@ def registered_ctx(**kwargs):
 def fallback_ctx(**kwargs):
     ctx = FallbackCtx()
     engine = kwargs.pop("engine", None) or FakeEngine()
+    # ``False`` is the plugins-only fallback: no engine is selected, so this
+    # lane owns the tools. Deferral under selection is tested explicitly.
+    kwargs.setdefault("engine_selected", False)
     runtime = register(ctx, engine=engine, config=kwargs.pop("config", {}), **kwargs)
     return ctx, runtime, engine
 
@@ -129,6 +163,122 @@ def test_fallback_lane_registers_the_same_tools_without_an_engine():
     assert {tool["name"] for tool in ctx.tools} == set(_manifest_tools())
     assert [command["name"] for command in ctx.commands] == ["clm"]
     assert runtime.engine is engine
+
+
+# --------------------------------------------------------------------------- #
+# Dual enablement: plugin enabled *and* this engine selected
+# --------------------------------------------------------------------------- #
+
+
+def test_dual_enablement_defers_tools_command_and_engine_construction():
+    """The selected engine owns the names and the writer; this lane defers.
+
+    A general-plugin lane that registered the twelve tools would win the tool
+    lookup while its handlers bound a second ``CLMEngine`` whose store cannot
+    open (the selected engine holds the exclusive writer), so every call would
+    answer ``no_session``. It registers the usage section and nothing else.
+    """
+
+    ctx = GeneralLaneCtx()
+    built: list[dict] = []
+
+    def factory(config):
+        built.append(dict(config))
+        return FakeEngine()
+
+    runtime = register(ctx, config={}, engine_factory=factory, engine_selected=True)
+
+    assert built == [], "a second engine instance must not be constructed"
+    assert ctx.tools == [], "the selected engine injects these names itself"
+    assert ctx.commands == [], "/clm belongs to the selected engine's registration"
+    assert runtime.engine is None
+    assert runtime.deferred_to_engine is True
+    assert runtime.handlers is not None, "the runtime object stays inert, not absent"
+
+
+def test_dual_enablement_still_registers_the_static_usage_section():
+    """Tools remain callable (from the engine), so guidance must still ship."""
+
+    ctx = GeneralLaneCtx()
+    runtime = register(ctx, config={}, engine_selected=True)
+
+    assert [section["id"] for section in ctx.sections] == [SYSTEM_PROMPT_SECTION_ID]
+    section = ctx.sections[0]
+    assert section["content"] == SYSTEM_PROMPT_SECTION_TEXT
+    assert section["position"] == SYSTEM_PROMPT_SECTION_POSITION
+    assert section["max_chars"] == SYSTEM_PROMPT_SECTION_MAX_CHARS
+    assert runtime.prompt_section == f"handle:{SYSTEM_PROMPT_SECTION_ID}"
+
+
+def test_no_tool_name_the_engine_owns_is_registered_in_the_dual_lane():
+    ctx = GeneralLaneCtx()
+    register(ctx, config={}, engine_selected=True)
+    registered = {tool["name"] for tool in ctx.tools}
+    assert registered == set(), registered & set(_manifest_tools())
+
+
+def test_dual_enablement_reads_the_selection_from_the_profile(monkeypatch):
+    """Production passes only ``ctx``; the gate must read ``context.engine``."""
+
+    monkeypatch.setattr(
+        plugin_module, "_read_profile_config", lambda: {"context": {"engine": ENGINE_NAME}}
+    )
+    ctx = GeneralLaneCtx()
+    runtime = register(ctx, config={})
+    assert runtime.deferred_to_engine is True
+    assert ctx.tools == [] and ctx.commands == []
+    assert len(ctx.sections) == 1
+
+
+def test_dual_enablement_logs_why_the_tools_are_absent(caplog):
+    """Silence would look like a broken install; the deferral is an INFO fact."""
+
+    caplog.set_level(logging.INFO, logger="hermes_clm.plugin")
+    register(GeneralLaneCtx(), config={}, engine_selected=True)
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "hermes_clm.plugin" and record.levelno == logging.INFO
+    ]
+    assert len(messages) == 1, messages
+    assert ENGINE_NAME in messages[0]
+    assert "skipped" in messages[0]
+    assert "section" in messages[0]
+
+
+def test_plugins_only_fallback_keeps_its_tools_and_command_when_not_selected():
+    """The compatibility lane: no engine selection, so this plugin owns it all."""
+
+    ctx = GeneralLaneCtx()
+    runtime = register(ctx, config={}, engine_selected=False)
+
+    assert len(ctx.tools) == 12
+    assert {tool["name"] for tool in ctx.tools} == set(_manifest_tools())
+    assert [command["name"] for command in ctx.commands] == ["clm"]
+    assert len(ctx.sections) == 1
+    assert runtime.deferred_to_engine is False
+    assert runtime.engine is not None
+
+
+def test_selecting_another_engine_leaves_the_fallback_lane_intact():
+    ctx = GeneralLaneCtx()
+    runtime = register(ctx, config={}, engine_selected=False)
+    assert len(ctx.tools) == 12 and runtime.deferred_to_engine is False
+
+
+def test_engine_lane_is_unaffected_by_the_deferral():
+    """The lane that hands over the engine still registers it and ``/clm``."""
+
+    class StrictEngineCtx(FakeCtx):
+        def register_tool(self, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("engine lane must not register a tool")
+
+    ctx = StrictEngineCtx()
+    engine = FakeEngine()
+    runtime = register(ctx, engine=engine, config={}, engine_selected=True)
+    assert ctx.engines == [engine]
+    assert [command["name"] for command in ctx.commands] == ["clm"]
+    assert runtime.deferred_to_engine is False and runtime.engine is engine
 
 
 def _manifest_tools() -> list[str]:

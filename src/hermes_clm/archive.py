@@ -137,12 +137,60 @@ def _scrub_value(value: Any, rules: tuple[RedactionRule, ...], hits: list[str]) 
         hits.extend(found)
         return new_text
     if isinstance(value, Mapping):
-        return {key: _scrub_value(item, rules, hits) for key, item in value.items()}
+        return _scrub_mapping(value, rules, hits)
     if isinstance(value, list):
         return [_scrub_value(item, rules, hits) for item in value]
     if isinstance(value, tuple):
         return [_scrub_value(item, rules, hits) for item in value]
     return value
+
+
+def _scrub_mapping(
+    value: Mapping[Any, Any], rules: tuple[RedactionRule, ...], hits: list[str]
+) -> dict[Any, Any]:
+    """Scrub mapping *keys* as well as values, preserving structure and types.
+
+    A secret used as a dict key (``{"sk-...": "label"}``) is just as exposed as
+    one in a value. Keys are scrubbed in two passes so no entry is ever lost or
+    silently renamed:
+
+    * every original string key is scrubbed first, which gives the set of keys
+      that stay *verbatim* (a literal ``"[REDACTED:openai_key]"`` already in the
+      payload is one of them);
+    * a key whose text actually changed is then claimed against both the keys
+      emitted so far **and** those verbatim originals, so a scrubbed key can
+      never displace a literal key that appears later in insertion order. The
+      first free ``#2``, ``#3``, … is taken instead.
+
+    Two secret keys that collapse to one label are therefore numbered in
+    insertion order (``"#2"``, ``"#3"``, …), a literal key keeps its exact
+    spelling regardless of position, and the result is deterministic and
+    idempotent: re-scrubbing the output changes nothing.
+    """
+
+    resolved: list[tuple[Any, str, list[str]]] = []
+    for key in value:
+        if isinstance(key, str):
+            scrubbed, found = _scrub_text(key, rules)
+            resolved.append((key, scrubbed, found))
+        else:
+            resolved.append((key, key, []))
+    # Literal keys are authoritative: they are unique within one mapping (dict
+    # keys) and are never renamed because some other key scrubbed onto them.
+    verbatim = {original for original, scrubbed, _ in resolved if original == scrubbed}
+
+    out: dict[Any, Any] = {}
+    for original, scrubbed, found in resolved:
+        hits.extend(found)
+        new_key: Any = original
+        if isinstance(original, str) and scrubbed != original:
+            new_key = scrubbed
+            index = 2
+            while new_key in out or new_key in verbatim:
+                new_key = f"{scrubbed}#{index}"
+                index += 1
+        out[new_key] = _scrub_value(value[original], rules, hits)
+    return out
 
 
 def redact_message(

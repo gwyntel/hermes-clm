@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import store_testkit as kit
 
-from hermes_clm.errors import CorruptStoreError
+from hermes_clm.errors import CorruptStoreError, PathSafetyError
 from hermes_clm.recovery import (
     RecoveryReport,
     rebuild_index,
@@ -210,6 +212,52 @@ class RecoveryReportTests(kit.StoreTestCase):
         result = rebuild_index(self.home, self.session_id)
         self.assertTrue(result["ok"])
         self.assertEqual(json.loads(index.read_text())["session_id"], self.session_id)
+
+
+class RepairPathSafetyTests(kit.StoreTestCase):
+    """The schema-repair path must re-run the checks ``for_session`` enforces."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        store = self.open_store()
+        self.ingest(store)
+        store.close()
+
+    def test_repair_refuses_a_database_replaced_by_a_symlink(self) -> None:
+        db_path = self.db_path()
+        elsewhere = Path(self.tmp) / "elsewhere.db"
+        db_path.rename(elsewhere)
+        db_path.symlink_to(elsewhere)
+
+        class _InterruptedSchema:
+            @staticmethod
+            def for_session(*args, **kwargs):
+                raise CorruptStoreError("interrupted schema", code="schema_missing")
+
+        import hermes_clm.recovery as recovery_module
+
+        with mock.patch.object(recovery_module, "ContextStore", _InterruptedSchema):
+            with self.assertRaises(PathSafetyError) as ctx:
+                recover_session(self.home, self.session_id)
+        self.assertIn(ctx.exception.code, {"path_escape", "symlink_refused"})
+        # The pointed-at database must not have been repaired through the link.
+        self.assertTrue(elsewhere.exists())
+
+    def test_repair_refuses_a_hardlinked_database(self) -> None:
+        db_path = self.db_path()
+        os.link(db_path, Path(self.tmp) / "hardlink.db")
+
+        class _InterruptedSchema:
+            @staticmethod
+            def for_session(*args, **kwargs):
+                raise CorruptStoreError("interrupted schema", code="schema_missing")
+
+        import hermes_clm.recovery as recovery_module
+
+        with mock.patch.object(recovery_module, "ContextStore", _InterruptedSchema):
+            with self.assertRaises(PathSafetyError) as ctx:
+                recover_session(self.home, self.session_id)
+        self.assertEqual(ctx.exception.code, "hardlink_refused")
 
 
 class RetentionHelpersTests(kit.StoreTestCase):

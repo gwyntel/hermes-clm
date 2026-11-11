@@ -6,6 +6,7 @@ import unittest
 
 import store_testkit as kit
 
+from hermes_clm import projection
 from hermes_clm.errors import ConflictError, ValidationError
 
 
@@ -148,6 +149,291 @@ class RevisionTests(kit.StoreTestCase):
         self.assertIs(snapshot.span(self.ids["u-a2"]).state, kit.SpanState.ACTIVE)
         self.assertIs(snapshot.span(self.ids["u-a1"]).state, kit.SpanState.DROPPED)
         self.assertIs(snapshot.span(self.ids["u-t1"]).state, kit.SpanState.DROPPED)
+
+    def test_verify_accepts_rewrite_then_drop(self) -> None:
+        """A drop clears the rewrite in the checkpoint; replay must agree."""
+
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE,
+                    span_ids=(span,),
+                    replacement="rewritten answer",
+                )
+            ],
+            "txn-rewrite",
+        )
+        self.commit(self.store, [self.drop([span])], "txn-drop")
+        report = self.store.verify()
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(
+            [p for p in report["problems"] if p["code"] == "span_state_divergence"], []
+        )
+        self.assertIsNone(self.store.snapshot().span(span).rewrite_text)
+        # recover() must not "repair" the correct checkpoint into the replay's
+        # stale answer: nothing to rebuild on a consistent store.
+        self.assertEqual(self.store.rebuild_state()["changed"], 0)
+
+    def test_verify_accepts_rewrite_then_offload(self) -> None:
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE,
+                    span_ids=(span,),
+                    replacement="rewritten answer",
+                )
+            ],
+            "txn-rewrite",
+        )
+        self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.OFFLOAD, span_ids=(span,))],
+            "txn-offload",
+        )
+        report = self.store.verify()
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertIsNone(self.store.snapshot().span(span).rewrite_text)
+
+    def test_rebuild_state_does_not_resurrect_a_dropped_rewrite(self) -> None:
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE,
+                    span_ids=(span,),
+                    replacement="rewritten answer",
+                )
+            ],
+            "txn-rewrite",
+        )
+        self.commit(self.store, [self.drop([span])], "txn-drop")
+        rebuilt = self.store.rebuild_state()
+        self.assertEqual(rebuilt["changed"], 0, "replay rewrote state the checkpoint had cleared")
+        self.assertIsNone(self.store.snapshot().span(span).rewrite_text)
+
+    def test_restore_after_drop_projects_the_archived_original(self) -> None:
+        """Documented semantics: drop discards the rewrite, restore brings back the archive."""
+
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE,
+                    span_ids=(span,),
+                    replacement="rewritten answer",
+                )
+            ],
+            "txn-rewrite",
+        )
+        self.commit(self.store, [self.drop([span])], "txn-drop")
+        self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.RESTORE, span_ids=(span,))],
+            "txn-restore",
+        )
+        snapshot = self.store.snapshot()
+        self.assertIs(snapshot.span(span).state, kit.SpanState.ACTIVE)
+        self.assertIsNone(snapshot.span(span).rewrite_text)
+        projected = projection.project(
+            [dict(message) for message in kit.sample_messages()],
+            conversation_messages=kit.sample_messages(),
+            snapshot=snapshot,
+        )
+        self.assertTrue(projected.ok, projected.conflicts)
+        contents = [row.get("content") for row in projected.messages]
+        self.assertIn("The file looks fine.", contents)
+        self.assertNotIn("rewritten answer", contents)
+
+    def test_rewrite_then_restore_keeps_the_rewrite_in_store_and_projection(self) -> None:
+        """The store applies a restore to an active span; projection must agree."""
+
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE,
+                    span_ids=(span,),
+                    replacement="rewritten answer",
+                )
+            ],
+            "txn-rewrite",
+        )
+        self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.RESTORE, span_ids=(span,))],
+            "txn-restore",
+        )
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot.span(span).rewrite_text, "rewritten answer")
+        projected = projection.project(
+            [dict(message) for message in kit.sample_messages()],
+            conversation_messages=kit.sample_messages(),
+            snapshot=snapshot,
+        )
+        self.assertTrue(projected.ok, projected.conflicts)
+        self.assertIn("rewritten answer", [row.get("content") for row in projected.messages])
+
+    def test_keep_after_drop_projects_the_archived_original(self) -> None:
+        """``keep`` is the documented reactivation for a dropped/offloaded span.
+
+        The store applies it, replay/verify agree, and the projector emits the
+        row again — with the archived bytes, because the drop cleared the rewrite.
+        """
+
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE,
+                    span_ids=(span,),
+                    replacement="rewritten answer",
+                )
+            ],
+            "txn-rewrite",
+        )
+        self.commit(self.store, [self.drop([span])], "txn-drop")
+        kept = self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.KEEP, span_ids=(span,))],
+            "txn-keep",
+        )
+        self.assertEqual([receipt.effect for receipt in kept.applied], ["applied"])
+        snapshot = self.store.snapshot()
+        self.assertIs(snapshot.span(span).state, kit.SpanState.ACTIVE)
+        self.assertIsNone(snapshot.span(span).rewrite_text)
+        report = self.store.verify()
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(self.store.rebuild_state()["changed"], 0)
+
+        projected = projection.project(
+            [dict(message) for message in kit.sample_messages()],
+            conversation_messages=kit.sample_messages(),
+            snapshot=snapshot,
+        )
+        self.assertTrue(projected.ok, projected.conflicts)
+        contents = [row.get("content") for row in projected.messages]
+        self.assertIn("The file looks fine.", contents)
+        self.assertNotIn("rewritten answer", contents)
+        self.assertIn("keep", [receipt["kind"] for receipt in projected.applied])
+
+    def test_keep_after_offload_projects_the_archived_original(self) -> None:
+        span = self.ids["u-a2"]
+        self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.OFFLOAD, span_ids=(span,))],
+            "txn-offload",
+        )
+        self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.KEEP, span_ids=(span,))],
+            "txn-keep",
+        )
+        snapshot = self.store.snapshot()
+        self.assertIs(snapshot.span(span).state, kit.SpanState.ACTIVE)
+        self.assertTrue(self.store.verify()["ok"], self.store.verify()["problems"])
+        self.assertEqual(self.store.rebuild_state()["changed"], 0)
+
+        projected = projection.project(
+            [dict(message) for message in kit.sample_messages()],
+            conversation_messages=kit.sample_messages(),
+            snapshot=snapshot,
+        )
+        self.assertTrue(projected.ok, projected.conflicts)
+        self.assertIn("The file looks fine.", [row.get("content") for row in projected.messages])
+
+    def test_keep_on_an_active_span_is_recorded_inert_and_replays_inert(self) -> None:
+        span = self.ids["u-a2"]
+        kept = self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.KEEP, span_ids=(span,))],
+            "txn-keep-active",
+        )
+        self.assertEqual([receipt.reason for receipt in kept.inert], ["already_active"])
+        report = self.store.verify()
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(self.store.rebuild_state()["changed"], 0)
+        snapshot = self.store.snapshot()
+        projected = projection.project(
+            [dict(message) for message in kit.sample_messages()],
+            conversation_messages=kit.sample_messages(),
+            snapshot=snapshot,
+        )
+        self.assertTrue(projected.ok, projected.conflicts)
+        self.assertFalse(projected.changed)
+        self.assertEqual(
+            [(item["kind"], item["reason"]) for item in projected.inert],
+            [("keep", "already_active")],
+        )
+
+    def test_inert_operations_do_not_diverge_from_replay(self) -> None:
+        """Ops committed inert are still recorded; replay must not apply them."""
+
+        span = self.ids["u-a2"]
+        self.commit(self.store, [self.drop([span])], "txn-drop")
+        inert = self.commit(
+            self.store,
+            [
+                kit.EditOperation(
+                    kind=kit.EditKind.REWRITE, span_ids=(span,), replacement="resurrect"
+                )
+            ],
+            "txn-rewrite-inert",
+        )
+        self.assertEqual([r.effect for r in inert.inert], ["inert"])
+        self.assertEqual([r.reason for r in inert.inert], ["not_active"])
+        problems = self.store.verify()["problems"]
+        self.assertEqual([p for p in problems if p["code"] == "span_state_divergence"], [])
+        replayed = self.store.snapshot().span(span)
+        self.assertIsNotNone(replayed)
+        assert replayed is not None
+        self.assertIs(replayed.state, kit.SpanState.DROPPED)
+        self.assertIsNone(replayed.rewrite_text)
+
+    def test_offload_after_drop_is_inert_in_replay(self) -> None:
+        span = self.ids["u-a2"]
+        self.commit(self.store, [self.drop([span])], "txn-drop")
+        self.commit(
+            self.store,
+            [kit.EditOperation(kind=kit.EditKind.OFFLOAD, span_ids=(span,))],
+            "txn-offload-inert",
+        )
+        problems = self.store.verify()["problems"]
+        self.assertEqual([p for p in problems if p["code"] == "span_state_divergence"], [])
+        replayed = self.store.snapshot().span(span)
+        self.assertIsNotNone(replayed)
+        assert replayed is not None
+        self.assertIs(replayed.state, kit.SpanState.DROPPED)
+
+    def test_truncated_snapshot_refuses_projection(self) -> None:
+        """A capped operation log must fail closed, not project a partial edit."""
+
+        capped = self.open_store("sess-capped", config={"max_operations_in_snapshot": 2})
+        ids = self.ingest(capped)
+        self.commit(capped, [self.drop([ids["u-a2"]])], "txn-cap-0")
+        self.commit(capped, [self.drop([ids["u-a1"], ids["u-t1"]])], "txn-cap-1")
+        self.commit(
+            capped,
+            [kit.EditOperation(kind=kit.EditKind.KEEP, span_ids=(ids["u-a2"],))],
+            "txn-cap-2",
+        )
+        snapshot = capped.snapshot()
+        self.assertTrue(snapshot.operations_truncated)
+        projected = projection.project(
+            [dict(message) for message in kit.sample_messages()],
+            conversation_messages=kit.sample_messages(),
+            snapshot=snapshot,
+        )
+        self.assertFalse(projected.ok)
+        self.assertEqual(projected.messages, ())
+        self.assertEqual(projected.conflicts[0]["code"], "operations_truncated")
 
     def test_revert_restores_rewrite_text(self) -> None:
         self.commit(

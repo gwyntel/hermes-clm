@@ -22,7 +22,9 @@ The directory name is exactly `<slug>-<digest>` as defined in *Session key deriv
 below, under `<hermes_home>/clm/sessions/` (never a bare session id). Operator tooling may
 enumerate these directories with `ContextStore.list_sessions(hermes_home)`.
 
-* Directories `0700`, every file `0600` (re-applied on open, so a loose umask or a
+* Directories `0700`, every file `0600` (created with explicit modes — the database file is
+  created `0600` before SQLite opens it and the `-wal`/`-shm` sidecars are tightened once WAL
+  is enabled; the process-wide umask is never changed — and re-applied on open, so a loose umask or a
   pre-existing directory cannot widen access).
 * `session.db` is the only source of truth. Deleting `active.json` loses nothing.
 * Nothing is written outside the session directory; there is no cross-session file.
@@ -217,8 +219,14 @@ Rules (ordered, deterministic, labelled `[REDACTED:<rule>]`): private-key blocks
 `AIza…`, JWTs, `Bearer <token>`, credentials inside connection URLs, and `api_key/secret/password/
 token = value` assignments. Extra rules can be injected via `StoreConfig.extra_redactions`.
 
-Redaction preserves structure (dicts/lists/keys untouched, only string values scrubbed) and is
-idempotent: scrubbed text contains no match for the same rules twice. Raw in this project means
+Redaction preserves structure and types: string **values and string mapping keys** are scrubbed,
+lists/tuples/dicts and non-string scalars are copied untouched. A secret used as a dict key is
+therefore removed too; if two keys collapse to the same scrubbed label, the later ones are
+suffixed `#2`, `#3`, … in insertion order (deterministic, and never a dropped row). A **literal**
+key that already spells a label (a message that genuinely contains `[REDACTED:openai_key]`) keeps
+its spelling and wins the group: it is never suffixed, and a key scrubbed into that same label
+moves to the next free suffix instead, whichever one appears first. Redaction is idempotent:
+scrubbed text contains no match for the same rules twice. Raw in this project means
 *unsummarized*, never *secret preserving*. Anything not matched is archived as-is; the opt-out
 (`archive_redact=False`) is documented as sensitive.
 
@@ -228,7 +236,7 @@ idempotent: scrubbed text contains no match for the same rules twice. Raw in thi
 
 | Kind | Effect | Notes |
 | --- | --- | --- |
-| `keep` | `dropped`/`offloaded` → `active` | inert `already_active`; keeps existing rewrite |
+| `keep` | `dropped`/`offloaded` → `active` | same content rule as `restore`; inert `already_active`; keeps a rewrite the span still carries |
 | `drop` | `active` → `dropped` | refuses protected/pinned |
 | `offload` | `active` → `offloaded` | archived payload kept; projection shows a non-imperative stub with span id + hash only |
 | `rewrite` | replaces `content` text | role/tool structure preserved; refused for protected/pinned/multimodal; bounded by `max_rewrite_bytes` |
@@ -238,6 +246,41 @@ idempotent: scrubbed text contains no match for the same rules twice. Raw in thi
 
 Inert reasons are explicit in receipts: `already_active`, `not_active`, `already_pinned`,
 `uid_absent`, `pinned`, `not_pinned`.
+
+#### Rewrite lifetime (`rewrite` → `keep`/`drop`/`offload`/`restore`)
+
+One rule, applied by the checkpoint (`_apply`), the replay (`_replay_states`), `revert` and
+the projector alike:
+
+* `rewrite` sets `span_state.rewrite_text` and makes the span `active`.
+* `keep`/`restore` **carry `rewrite_text` through**: a restore applied to an active,
+  rewritten span keeps the rewrite, and the projector emits `span.rewrite_text` for a
+  `restore` whenever the span carries one.
+* `keep` reactivates exactly like `restore`: on a `dropped`/`offloaded` span it returns the
+  row to the projection, emitting `rewrite_text` when the span still carries one and the
+  archived original otherwise, bounded by `max_rewrite_bytes` (an oversized payload is
+  refused as `keep_too_large` rather than truncated). On an `active` span it is inert
+  (`already_active`) and projects nothing — the store recorded no state change, so the
+  projector must not invent bytes. A reactivating `keep` obeys the same refusal rules as
+  `restore`: a host-protected row is refused (`protected_row`/`protected_span`), and a
+  payload over `max_rewrite_bytes` is refused rather than truncated.
+* `drop`/`offload` **clear `rewrite_text`**: the row leaves the projection, so its rewrite
+  has no reader. Both the checkpoint and the replay write `(state, None)`, so `verify()`
+  agrees and `recover()`/`rebuild_state()` never write a stale rewrite back onto a
+  dropped/offloaded span.
+* A `restore` (or `keep`) of a span whose rewrite was cleared therefore reinstates the
+  **archived original**; the projector's fallback is exactly that. Neither resurrects a
+  rewrite that a `drop`/`offload` discarded — use `rewrite` again if the shorter text is
+  still wanted.
+* **Inert operations are recorded, but never replayed as if they applied.** `operations`
+  holds the *planned* operations of a revision, including the ones that committed `inert`
+  (`rewrite`/`offload` on a dropped span, `keep` on an active one, …). Replay therefore
+  runs every row through the same transition rule as the planner
+  (`store._replay_transition`, mirroring `_transition`): operations on a non-active span
+  are inert (`keep`/`restore` excepted), `pin` never moves state, and `restore` of a UID
+  the host no longer sends is inert. Without that mirroring, `verify()` would report
+  `span_state_divergence` after any inert operation and `recover()`/`rebuild_state()`
+  would write the replay's wrong state into the checkpoint.
 
 A boundary marker never targets spans and never becomes active content. Its optional
 `label`/`replacement` must be a string (non-strings raise `ValidationError(invalid_replacement)`);
@@ -290,8 +333,14 @@ rows and the audit event. A crash at any point leaves either all of it or none o
 
 `span_state` is recomputed by replaying the operation chain (`rebuild_state()`, and automatically by
 recovery). Replay starts from "all spans active, no rewrite", applies each committed revision's
-operations in ascending order, and skips revert revisions. Divergence between checkpoint and replay
-is reported by `verify()` and repaired by `recover()`.
+operations in ascending order, and skips revert revisions. Each operation is replayed through
+`_replay_transition`, the mirror of the planner's `_transition`, so operations that committed
+`inert` do not move state on replay either (§7.1). Divergence between checkpoint and replay is
+reported by `verify()` and repaired by `recover()`.
+
+Replay follows the rewrite-lifetime rule in §7.1 exactly: `drop`/`offload` write
+`(state, None)`, so `rewrite` → `drop` is *not* a divergence and `recover()` never restores a
+rewrite onto a dropped span. `rebuild_state()` on a consistent store reports `changed: 0`.
 
 ## 8. Pins and authority
 
@@ -306,13 +355,33 @@ is reported by `verify()` and repaired by `recover()`.
   Each removed pin writes a `pin_events` row; non-pinned targets are inert (`not_pinned`).
   The revision kind is `operator` and the head/audit/idempotency ordering is identical to
   a normal commit; `txn_id` replay is signature-checked (single-target signatures keep the
-  legacy `{op:"unpin",span_id}` shape).
+  legacy `{op:"unpin",span_id}` shape). The `revisions` row records the real
+  `est_tokens_before`/`est_tokens_after` of the active set, and the `snapshots` row records
+  that same `est_tokens` plus `active_set_sha256 = sha256(canonical_json(active_ids))` —
+  the identical computation `commit` uses (both snapshot writers call the shared
+  `_active_span_ids` query, ordered by ingestion sequence), never a placeholder hash of `[]`.
 * Pinning never changes a span's `origin` or authority: a pinned aux summary is still an untrusted
   aux summary. Unpinning of a non-pinned span is inert (`not_pinned`).
 * Pins are current state, not revision state: they survive `revert`.
 * Pin/unpin history lives in `pin_events` (append-only).
 
 ## 9. Proposals
+
+### 9.1 What the auxiliary compressor will and will not send
+
+`AuxCompressor.propose` rewrites **whole spans**, so it refuses anything it cannot show the
+model whole:
+
+* a span longer than `prompt_span_chars` (4000) is refused *before* the aux call with
+  `span_too_large` (message names the span and both sizes; hint: drop it, split it into
+  smaller spans, or `clm_stage` a rewrite). The batch is refused as a unit — no partial
+  proposal, no second call, no spent budget. Span text is never truncated, so a returned
+  rewrite always covers exactly the bytes the model saw.
+* the total prompt is bounded by `prompt_total_chars` (24000): spans that no longer fit are
+  left out of the request entirely rather than clipped.
+* a returned rewrite larger than `max_rewrite_bytes` is refused (`aux_invalid_output`).
+
+### 9.2 Proposal identity
 
 `create_proposal(operations, base_revision)` accepts aux-authored operations only
 (`actor_origin="aux"`; anything else is `actor_mismatch`). A raw mapping without
@@ -333,8 +402,9 @@ proposal_id = "prop_" + proposal_sha256[:24]
 
 Raw payload means the caller's operation mappings are hashed without store-added
 `actor_origin`/`provenance` fields, so `hermes_clm.auxiliary.canonical_proposal_sha256`
-and the store agree byte-for-byte. Creating a proposal never changes the head and never
-applies anything.
+and the store agree byte-for-byte; the aux helper is a *compatibility* digest, not a second
+accepted identity — the store owns proposal identity and `accept_proposal` compares only the
+store's value. Creating a proposal never changes the head and never applies anything.
 
 `accept_proposal(proposal_id, proposal_sha256, base_revision, txn_id)` requires the exact hash and
 base revision (`proposal_hash_mismatch`, `proposal_base_mismatch`), and refuses a proposal whose
@@ -404,10 +474,10 @@ from SQLite. `index_status()` reports `ok`/`stale`/`rebuilt`/`missing_or_corrupt
 | Config (default) | Bound |
 | --- | --- |
 | `max_retrieve_bytes` (65536) | `retrieve` payload size; over limit returns `ok=False` with `retrieve_too_large` instead of silently truncating |
-| `max_rewrite_bytes` (16384) | rewrite replacement size |
+| `max_rewrite_bytes` (16384) | rewrite replacement size — one constant, `models.MAX_REWRITE_BYTES`, used by the store, engine, projection, tool layer, `/clm edit rewrite` and the auxiliary limits, so no layer refuses a rewrite another accepts |
 | `max_aux_spans` (32) | spans touched by one aux proposal |
 | `max_operations_per_txn` (128) | operations per stage/commit |
-| `max_operations_in_snapshot` (500) | operations carried in a snapshot (most recent, `operations_truncated=True`) |
+| `max_operations_in_snapshot` (500) | operations carried in a snapshot (most recent, `operations_truncated=True`); a truncated snapshot is **refused** by `project()`/`select_context()` (`operations_truncated`), never projected as if the missing operations had not happened |
 | `max_query_chars` (512) | `search` query length |
 | `inspect_limit_max` (200) / `search_limit_max` (100) | page size ceilings; larger requests are clamped |
 | `stale_txn_ttl_seconds` (3600) | staged-transaction age before recovery expires it |
@@ -574,7 +644,7 @@ cd tests/unit && python3 -m unittest discover -s . -p 'test_*.py'
 | `test_store_paths.py` | session-key derivation/safety, symlink refusal, `0700`/`0600`, isolation |
 | `test_store_ingest.py` | redaction at rest, uid/content dedupe, alias chains, no caller mutation/aliasing, protections |
 | `test_store_ops.py` | stage/commit/discard, CAS (`stale_revision`/`stale_stage`), replay, group atomicity, authority |
-| `test_store_revisions.py` | monotonic revisions, revert-as-new-head with no truncation, pins surviving revert |
+| `test_store_revisions.py` | monotonic revisions, revert-as-new-head with no truncation, pins surviving revert, rewrite lifetime (`rewrite`→`drop`/`offload` verify-clean, restore/rewrite agreement with projection), `keep` reactivating a dropped/offloaded span with checkpoint/replay/projection agreement and a recorded `already_active` inert on an active one, truncated-snapshot refusal |
 | `test_store_triggers.py` | append-only and protected-row triggers abort at SQL level, STRICT typing |
 | `test_store_proposals.py` | immutable proposals, hash/base pinning, never auto-committed |
 | `test_store_index.py` | `active.json` shape, tracking, self-healing, never authoritative |
@@ -582,13 +652,13 @@ cd tests/unit && python3 -m unittest discover -s . -p 'test_*.py'
 | `test_store_retrieval.py` | bounded inspect/search/retrieve, cursor tamper rejection |
 | `test_store_health_layout.py` | `<home>/clm/sessions/<slug>-<digest>` layout, `status().health.hash_chain`, `verify_chain()` tamper detection |
 | `test_store_boundary.py` | boundary label accepted as string/provenance, non-string refused, never active content |
-| `test_store_unpin_many.py` | single/batch operator unpin, one-revision atomicity, authority, idempotent replay |
+| `test_store_unpin_many.py` | single/batch operator unpin, one-revision atomicity, authority, idempotent replay, snapshot row carries the real `est_tokens`/`active_set_sha256` |
 | `test_store_retention.py` | `list_sessions` metadata, bounded `purge_expired_sessions`, pinned/current exemptions, dry run |
 | `test_store_proposal_hash_compat.py` | store hash byte-equals `auxiliary.canonical_proposal_sha256` (raw payload, `base_revision` key, golden digest) |
 | `test_store_api_contract.py` | exact documented signatures/result fields; closed-handle refusals |
-| `test_archive_redaction.py` | every redaction rule, idempotence, archive hash chain verification |
+| `test_archive_redaction.py` | every redaction rule, string keys as well as values, deterministic key-collision suffixes, idempotence, archive hash chain verification |
 | `test_recovery_crash.py` | `os._exit` crash mid-stage/commit/ingest: WAL rollback, no partial rows, stale-txn expiry |
-| `test_recovery_corruption.py` | tamper detection, corrupt-open errors, derived-state rebuild, temp cleanup, head repair |
+| `test_recovery_corruption.py` | tamper detection, corrupt-open errors, derived-state rebuild, temp cleanup, head repair, schema-repair path re-checks symlink/hardlink |
 
 Crash tests use a child process (`store_crash_child.py`) that dies with `os._exit()` inside the
 library call, so the assertions are about real SQLite recovery, not simulated exceptions.

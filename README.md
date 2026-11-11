@@ -79,11 +79,20 @@ Also add the plugin to `plugins.enabled` (see [Configure](#configure)). Selectin
 `context.engine` alone loads the engine through Hermes' engine collector, which exposes
 the tools but has no system-prompt-section API, so the model receives no usage guidance.
 With the plugin enabled in that profile, it registers one static `hermes-clm.usage` section
-(about 2.9 KB) after the memory block. The host renders sections once per new session and
+(about 3.0 KB) after the memory block. The host renders sections once per new session and
 persists the rendered prompt, so a resumed session keeps the exact bytes it started with:
 editing this package's guidance affects new sessions only. If the host rejects the
 registration (for example, another plugin claimed the id), the engine and tools still load
 and a warning naming the section id and exception type is logged.
+
+Enabling **both** is the supported configuration, and the two lanes are deliberately not
+symmetric. One engine owns the tools: the selected engine injects the `clm_*` schemas,
+owns `/clm`, and opens the session store. The general-plugin lane notices the selection
+and registers only the section — it does not construct a second engine, because that
+engine's handlers would lose the store's exclusive writer and answer `no_session` on
+every call while the prompt advertised the tools as callable. So a dual-enabled profile has
+one tool surface, one `/clm`, and one writer. See
+[limitations](docs/limitations.md#plugin-enabled-and-engine-selected).
 
 **As a library or CLI only (no Hermes).** This is what the wheel is for:
 
@@ -115,9 +124,11 @@ provider credentials.
 
 The usage section is registered when the plugin is enabled **and** `context.engine`
 selects `hermes-clm`; with another engine selected the plugin loads but injects nothing,
-because the `clm_*` tools are not callable. It is a static string — no archive, tool
-result or session text is ever interpolated into it — and it is frozen at session start,
-so changing it needs a new session, not a restart alone.
+because the `clm_*` tools are not callable. In a host whose plugin context can itself
+register a context engine, the plugin lane hands the engine over and registers no tools at
+all; the selected engine supplies them. It is a static string — no archive, tool result or
+session text is ever interpolated into it — and it is frozen at session start, so changing
+it needs a new session, not a restart alone.
 
 ### Roll back
 

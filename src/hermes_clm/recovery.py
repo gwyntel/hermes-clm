@@ -32,7 +32,9 @@ from .store import (
     INDEX_FILENAME,
     ContextStore,
     StoreConfig,
+    _assert_contained,
     _assert_plain,
+    _assert_single_link,
     _coerce_config,
     _harden_file,
     _validate_session_id,
@@ -175,6 +177,20 @@ def _schema_is_incomplete(db_path: Path) -> bool:
         conn.close()
 
 
+def _assert_repairable(directory: Path, db_path: Path) -> None:
+    """Re-run the path checks ``for_session`` enforces before repairing.
+
+    ``recover_session`` reaches the repair path *after* ``for_session`` raised, so
+    the database file has to be re-validated here: containment, no symlink, and a
+    single hard link.  Same-UID link attacks are the only exposure (limitations
+    §17), but repair must never write through a planted link.
+    """
+
+    _assert_contained(directory, db_path)
+    _assert_plain(db_path, kind="file")
+    _assert_single_link(db_path)
+
+
 def _repair_schema(db_path: Path) -> bool:
     """Create missing tables/indexes/triggers without touching existing rows."""
 
@@ -219,6 +235,7 @@ def recover_session(
     except CorruptStoreError as exc:
         if exc.code not in {"schema_missing", "schema_incomplete"}:
             raise
+        _assert_repairable(directory, db_path)
         _repair_schema(db_path)
         schema_repaired = True
         store = ContextStore.for_session(hermes_home, sid, config=cfg)

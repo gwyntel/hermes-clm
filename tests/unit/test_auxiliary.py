@@ -344,14 +344,47 @@ def test_prompt_is_original_wording_and_carries_no_upstream_markers(service):
     assert "SPAN m-0001" in messages[1]["content"]
 
 
-def test_prompt_truncates_oversized_spans(service):
+def test_propose_refuses_a_span_over_the_prompt_cap_before_calling_aux(service):
+    """A span the prompt cannot carry whole must never be rewritten from a prefix."""
+
     service.add_span("m-0004", "y" * 20_000)
     client = RecordingAuxClient(aux_json({"rewrites": [{"span_id": "m-0004", "text": "short"}]}))
     compressor = AuxCompressor(client, limits=AuxLimits(prompt_span_chars=100))
-    compressor.propose(service, span_ids=["m-0004"])
+
+    result = compressor.propose(service, span_ids=["m-0004"])
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "span_too_large"
+    assert "m-0004" in result["errors"][0]["message"]
+    assert client.calls == [], "an over-cap span must be refused before any aux call"
+    assert compressor.metrics()["calls"] == 0
+    assert compressor.metrics()["last_error_code"] == "span_too_large"
+
+
+def test_propose_refuses_the_batch_when_one_span_is_over_the_cap(service):
+    service.add_span("m-0004", "y" * 20_000)
+    client = RecordingAuxClient(aux_json(REWRITE_REPLY))
+    compressor = AuxCompressor(client, limits=AuxLimits(prompt_span_chars=100))
+
+    result = compressor.propose(service, span_ids=["m-0001", "m-0004"])
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "span_too_large"
+    assert client.calls == []
+
+
+def test_prompt_carries_a_span_at_the_cap_without_truncating_it(service):
+    text = "z" * 100
+    service.add_span("m-0005", text)
+    client = RecordingAuxClient(aux_json({"rewrites": [{"span_id": "m-0005", "text": "short"}]}))
+    compressor = AuxCompressor(client, limits=AuxLimits(prompt_span_chars=100))
+
+    result = compressor.propose(service, span_ids=["m-0005"])
+
+    assert result["ok"] is True
     content = client.calls[0]["messages"][1]["content"]
-    assert "truncated for this request" in content
-    assert len(content) < 1000
+    assert text in content
+    assert "truncated" not in content
 
 
 def test_metrics_count_calls_and_failures(service):

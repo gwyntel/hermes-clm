@@ -62,6 +62,7 @@ from .errors import (
     ValidationError,
 )
 from .models import (
+    MAX_REWRITE_BYTES,
     PROTECTED_ROLES,
     ActorOrigin,
     ArchivedSpan,
@@ -123,7 +124,7 @@ class StoreConfig:
     """
 
     max_retrieve_bytes: int = 65_536
-    max_rewrite_bytes: int = 16_384
+    max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_aux_spans: int = 32
     max_operations_per_txn: int = 128
     max_operations_in_snapshot: int = 500
@@ -303,18 +304,39 @@ def _acquire_writer_lock(lock_path: Path) -> int:
     return fd
 
 
+def _secure_create(path: Path) -> None:
+    """Create ``path`` empty with mode ``0600`` if it does not exist yet.
+
+    SQLite creates its database and ``-wal``/``-shm`` sidecars with the process
+    umask, which may be permissive.  Instead of mutating the process-wide umask
+    around ``sqlite3.connect`` (not thread-safe in a multi-threaded host), the
+    files this module can name ahead of time are created privately here and
+    re-verified after the connection opens.
+    """
+
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        # Existing material is tightened (and symlink/hardlink-refused) before
+        # SQLite ever opens it, so a planted link cannot redirect the store.
+        _harden_file(path)
+        return
+    os.close(fd)
+    _harden_file(path)
+
+
 def _connect(db_path: Path, *, read_only: bool, config: StoreConfig) -> sqlite3.Connection:
     timeout = max(0.0, config.busy_timeout_ms / 1000.0)
-    old_umask = os.umask(0o077)
-    try:
-        conn = sqlite3.connect(
-            str(db_path),
-            timeout=timeout,
-            isolation_level=None,
-            check_same_thread=False,
-        )
-    finally:
-        os.umask(old_umask)
+    if not read_only:
+        # The database file is ours to create: make it private before SQLite
+        # opens it so no permissive-umask window exists for its bytes.
+        _secure_create(db_path)
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=timeout,
+        isolation_level=None,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {int(config.busy_timeout_ms)}")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -325,6 +347,10 @@ def _connect(db_path: Path, *, read_only: bool, config: StoreConfig) -> sqlite3.
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = FULL")
         conn.execute("PRAGMA wal_autocheckpoint = 256")
+        # WAL mode creates ``-wal``/``-shm`` eagerly; tighten them now that they
+        # exist rather than trusting the umask that produced them.
+        for suffix in ("-wal", "-shm"):
+            _harden_file(Path(f"{db_path}{suffix}"))
     return conn
 
 
@@ -1933,13 +1959,7 @@ class ContextStore:
                     txn_id,
                 ),
             )
-        active_ids = [
-            str(r[0])
-            for r in cur.execute(
-                "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
-                "WHERE st.state = 'active' ORDER BY s.seq"
-            )
-        ]
+        active_ids = self._active_span_ids(cur)
         cur.execute(
             "INSERT INTO snapshots (revision, head_hash, active_span_count, dropped_span_count, "
             "offloaded_span_count, pinned_span_count, est_tokens, active_set_sha256, created_at) "
@@ -2023,6 +2043,22 @@ class ContextStore:
                 span_id,
             ),
         )
+
+    def _active_span_ids(self, cur: sqlite3.Cursor) -> list[str]:
+        """The documented active set: active span ids in ingestion order.
+
+        ``snapshots.active_set_sha256`` hashes exactly this list, so every path
+        that writes a snapshot row (``_apply`` and ``unpin``) must derive it the
+        same way.
+        """
+
+        return [
+            str(row[0])
+            for row in cur.execute(
+                "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
+                "WHERE st.state = 'active' ORDER BY s.seq"
+            )
+        ]
 
     def _est_active_tokens(self, cur: sqlite3.Cursor) -> int:
         total = 0
@@ -2258,13 +2294,7 @@ class ContextStore:
                         txn_id,
                     ),
                 )
-            active_ids = [
-                str(r[0])
-                for r in cur.execute(
-                    "SELECT s.span_id FROM spans s JOIN span_state st ON st.span_id = s.span_id "
-                    "WHERE st.state = 'active' ORDER BY s.seq"
-                )
-            ]
+            active_ids = self._active_span_ids(cur)
             cur.execute(
                 "INSERT INTO snapshots (revision, head_hash, active_span_count, dropped_span_count, "
                 "offloaded_span_count, pinned_span_count, est_tokens, active_set_sha256, created_at) "
@@ -2351,6 +2381,17 @@ class ContextStore:
         Revert revisions themselves are skipped: their recorded operations are
         audit-only (the revision's ``base_revision`` already selects a state
         root), so replay is deterministic and idempotent.
+
+        Every operation is replayed through :meth:`_replay_transition`, which
+        mirrors :meth:`_transition` — the planner's rule for whether an
+        operation applies or is inert.  The operations table records *planned*
+        operations, including the ones that committed inert, so a replay that
+        applied every row would disagree with the checkpoint (``verify()``) and
+        let ``rebuild_state()``/``recover()`` write the wrong state: a
+        ``rewrite`` on a dropped span would resurrect it, an ``offload`` on a
+        dropped span would flip it, and a ``rewrite`` cleared by ``drop`` would
+        come back.  ``drop``/``offload`` therefore clear the rewrite exactly as
+        :meth:`_apply` does, and operations on a non-active span are inert.
         """
 
         # Only current span versions participate: historical (absorbed) versions
@@ -2358,6 +2399,13 @@ class ContextStore:
         desired: dict[str, tuple[SpanState, str | None]] = {
             str(row[0]): (SpanState.ACTIVE, None)
             for row in cur.execute("SELECT span_id FROM current_spans")
+        }
+        # `restore` is inert for a uid the host no longer sends (``uid_absent``).
+        # Presence is a current flag, not a per-revision fact, so this is the
+        # best available proxy and keeps head-revision verification exact.
+        present = {
+            str(row[0]): bool(row[1])
+            for row in cur.execute("SELECT span_id, present FROM current_spans")
         }
         chain = sorted(self._chain(cur, target_revision))
         for revision in chain:
@@ -2371,18 +2419,48 @@ class ContextStore:
                     continue
                 for sid in op.span_ids:
                     resolved = self._resolve_span_id(cur, sid) or sid
-                    current_state, rewrite = desired.get(resolved, (SpanState.ACTIVE, None))
-                    if op.kind is EditKind.DROP:
-                        desired[resolved] = (SpanState.DROPPED, rewrite)
-                    elif op.kind is EditKind.OFFLOAD:
-                        desired[resolved] = (SpanState.OFFLOADED, rewrite)
-                    elif op.kind is EditKind.REWRITE:
-                        desired[resolved] = (SpanState.ACTIVE, op.replacement)
-                    elif op.kind in (EditKind.KEEP, EditKind.RESTORE):
-                        desired[resolved] = (SpanState.ACTIVE, rewrite)
-                    elif op.kind is EditKind.PIN:
-                        desired.setdefault(resolved, (SpanState.ACTIVE, rewrite))
+                    state, rewrite = desired.get(resolved, (SpanState.ACTIVE, None))
+                    desired[resolved] = self._replay_transition(
+                        state,
+                        rewrite,
+                        op,
+                        present=present.get(resolved, False),
+                    )
         return desired
+
+    def _replay_transition(
+        self,
+        state: SpanState,
+        rewrite: str | None,
+        op: EditOperation,
+        *,
+        present: bool,
+    ) -> tuple[SpanState, str | None]:
+        """Apply one operation during replay, mirroring :meth:`_transition`.
+
+        The checkpoint is authoritative for what *happened*; this mirrors the
+        planner so replay derives the same thing.  ``present`` only affects
+        ``restore`` of a span the host no longer sends.
+        """
+
+        kind = op.kind
+        if kind is EditKind.PIN:
+            # A pin only inserts rows; it never moves span state.
+            return state, rewrite
+        if state is SpanState.ACTIVE:
+            if kind is EditKind.REWRITE:
+                return SpanState.ACTIVE, op.replacement
+            if kind is EditKind.DROP:
+                return SpanState.DROPPED, None
+            if kind is EditKind.OFFLOAD:
+                return SpanState.OFFLOADED, None
+            # keep/restore on an active span are inert (`already_active`).
+            return state, rewrite
+        # dropped/offloaded: only keep/restore bring the span back, and they
+        # carry the rewrite the span still holds.
+        if kind is EditKind.KEEP or (kind is EditKind.RESTORE and present):
+            return SpanState.ACTIVE, rewrite
+        return state, rewrite
 
     # -- operator pin transition -----------------------------------------
     def unpin(
@@ -2457,6 +2535,9 @@ class ContextStore:
                     resolved.append(resolved_id)
             all_pins = {str(row[0]) for row in cur.execute("SELECT span_id FROM pins").fetchall()}
             pinned_rows = {span_id for span_id in resolved if span_id in all_pins}
+            # Pins never change projected bytes, so before == after; both are
+            # recorded from the real active set, exactly as ``_apply`` does.
+            before_tokens = self._est_active_tokens(cur)
             now = self._now()
             revision = head + 1
             head_row = self._head_row(cur)
@@ -2491,10 +2572,11 @@ class ContextStore:
                     Receipt(span_id=resolved_id, kind="unpin", effect="applied")
                 )
                 removed.append(resolved_id)
+            after_tokens = self._est_active_tokens(cur)
             cur.execute(
                 "INSERT INTO revisions (revision, parent_revision, base_revision, kind, head_hash, txn_id, "
                 "actor_origin, op_count, applied, inert, est_tokens_before, est_tokens_after, created_at) "
-                "VALUES (?, ?, ?, 'operator', ?, ?, ?, 0, ?, ?, 0, 0, ?)",
+                "VALUES (?, ?, ?, 'operator', ?, ?, ?, 0, ?, ?, ?, ?, ?)",
                 (
                     revision,
                     head,
@@ -2504,10 +2586,13 @@ class ContextStore:
                     actor.value,
                     len(applied_receipts),
                     len(inert_receipts),
+                    before_tokens,
+                    after_tokens,
                     now,
                 ),
             )
             counts = self._state_counts(cur)
+            active_ids = self._active_span_ids(cur)
             cur.execute(
                 "INSERT INTO snapshots (revision, head_hash, active_span_count, dropped_span_count, "
                 "offloaded_span_count, pinned_span_count, est_tokens, active_set_sha256, created_at) "
@@ -2519,8 +2604,8 @@ class ContextStore:
                     counts["dropped"],
                     counts["offloaded"],
                     counts["pinned"],
-                    self._est_active_tokens(cur),
-                    sha256_hex(canonical_json([])),
+                    after_tokens,
+                    sha256_hex(canonical_json(active_ids)),
                     now,
                 ),
             )

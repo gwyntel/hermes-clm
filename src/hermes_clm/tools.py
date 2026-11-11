@@ -41,6 +41,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .models import MAX_REWRITE_BYTES
+
 __all__ = [
     "AGENT_ORIGIN",
     "DEDICATED_KINDS",
@@ -90,7 +92,7 @@ class ToolLimits:
     search_limit_max: int = 50
     max_operations: int = 64
     max_span_ids_per_operation: int = 32
-    max_rewrite_bytes: int = 8000
+    max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_aux_spans: int = 12
     max_instruction_bytes: int = 600
 

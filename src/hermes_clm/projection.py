@@ -13,6 +13,8 @@ Invariants enforced here (see ``docs/adr/0001-request-projection.md``):
 * an op that targets a protected, ambiguous, multimodal or invalid row aborts
   the whole projection instead of yielding a guessed subset;
 * tool groups are atomic: a drop either covers a whole group or is refused;
+* a snapshot whose operation log was truncated is refused outright, never
+  projected as if the missing operations had not happened;
 * every returned message is a deep copy, so caller mutation cannot reach store
   or later projections.
 """
@@ -34,15 +36,18 @@ from .identity import (
     row_signature,
     tool_groups,
 )
+from .models import MAX_REWRITE_BYTES
 
 #: Closed set of operation kinds. Anything else is structural corruption.
 CLOSED_KINDS = frozenset({"keep", "drop", "rewrite", "pin", "offload", "restore", "boundary"})
-#: Kinds that change provider-visible bytes.
-CONTENT_KINDS = frozenset({"drop", "rewrite", "offload", "restore"})
+#: Kinds that can change provider-visible bytes (``keep`` only when it
+#: reactivates a dropped/offloaded span; on an active span it is inert).
+CONTENT_KINDS = frozenset({"keep", "drop", "rewrite", "offload", "restore"})
 #: Kinds that are bookkeeping only and never touch a request row.
-NOOP_KINDS = frozenset({"keep", "pin", "boundary"})
+NOOP_KINDS = frozenset({"pin", "boundary"})
 #: Default ceiling for a rewrite/restore payload, in bytes of UTF-8 text.
-DEFAULT_MAX_REWRITE_BYTES = 16_384
+#: Public alias of :data:`hermes_clm.models.MAX_REWRITE_BYTES`, the one authority.
+DEFAULT_MAX_REWRITE_BYTES = MAX_REWRITE_BYTES
 
 #: Offload stub: non-imperative, no instructions, span identity and hash only.
 OFFLOAD_STUB_TEMPLATE = "[clm.offloaded span={span_id} sha256={content_sha256}]"
@@ -217,6 +222,29 @@ def _byte_length(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
+def _keep_reactivates(state: Optional[_SpanState], span: Any) -> bool:
+    """Whether a ``keep`` can bring this span back into the projection.
+
+    Mirrors the store's planner (``store._transition``): ``keep`` reactivates a
+    dropped/offloaded span and is inert (``already_active``) on an active one.
+    The folded operation log is authoritative when it already moved the span
+    (last write wins per span); a span dropped by an earlier revision carries
+    that in its snapshot ``state``. A snapshot with no state (the structural
+    fakes, older hosts) is treated as active, which keeps ``keep`` inert there
+    instead of projecting bytes the store never recorded.
+    """
+
+    if state is not None:
+        return state.kind in ("drop", "offload")
+    current = _field(span, "state", None)
+    # The store's snapshot carries a ``SpanState`` enum; structural fakes carry
+    # a plain string. Either spelling means the same thing.
+    value = getattr(current, "value", current)
+    if isinstance(value, str) and value:
+        return value.strip().lower() in ("dropped", "offloaded")
+    return False
+
+
 def project(
     request_messages: Sequence[Mapping[str, Any]],
     *,
@@ -268,6 +296,21 @@ def project(
         before_tokens=before_tokens,
         alignment=alignment.summary(),
     )
+
+    # A store that capped its replayed operation log cannot describe the current
+    # context: older drops/rewrites are missing, so projecting would send rows
+    # the committed state says are gone. Refuse rather than degrade silently.
+    if bool(_field(snapshot, "operations_truncated", False)):
+        return ProjectionResult(
+            ok=False,
+            revision=revision,
+            conflicts=(
+                _conflict(
+                    "operations_truncated",
+                    detail="store capped the replayed operation log; refusing a partial projection",
+                ),
+            ),
+        )
 
     operations = tuple(_field(snapshot, "operations", ()) or ())
     index = _span_index(snapshot)
@@ -346,6 +389,11 @@ def project(
                 result.inert += (_inert(kind, span_id=span_id, uid=uid, reason="not_in_request"),)
                 continue
             request_index = alignment.uid_to_request[uid]
+            if kind == "keep" and not _keep_reactivates(states.get(uid), span):
+                # ``keep`` on an active span is the store's ``already_active``
+                # inert case; only a dropped/offloaded span comes back.
+                result.inert += (_inert(kind, span_id=span_id, uid=uid, reason="already_active"),)
+                continue
             if request_index in protected_indices:
                 conflicts.append(
                     _conflict(
@@ -415,14 +463,27 @@ def project(
                     )
                     continue
                 states[uid] = _SpanState(kind=kind, span_id=span_id, uid=uid, content=replacement)
-            elif kind == "restore":
-                restored = archived_content if isinstance(archived_content, str) else ""
+            elif kind in ("restore", "keep"):
+                # ``keep`` and ``restore`` are the same reactivation in the
+                # store's transition table: both bring a dropped/offloaded span
+                # back and both carry ``span.rewrite_text`` through. The
+                # projector must read that same authority instead of
+                # unilaterally discarding the rewrite; the archived original is
+                # the fallback when the span carries none (a rewrite cleared by
+                # a drop/offload).
+                current_rewrite = _field(span, "rewrite_text")
+                if isinstance(current_rewrite, str) and current_rewrite:
+                    restored = current_rewrite
+                elif isinstance(archived_content, str):
+                    restored = archived_content
+                else:
+                    restored = ""
                 if max_rewrite_bytes is not None and _byte_length(restored) > int(
                     max_rewrite_bytes
                 ):
                     conflicts.append(
                         _conflict(
-                            "restore_too_large",
+                            f"{kind}_too_large",
                             kind=kind,
                             span_id=span_id,
                             uid=uid,

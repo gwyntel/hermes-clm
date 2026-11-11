@@ -7,6 +7,7 @@ import json
 import pytest
 from clm_fakes import FakeService
 
+from hermes_clm.models import MAX_REWRITE_BYTES
 from hermes_clm.tools import (
     AGENT_ORIGIN,
     STAGE_KINDS,
@@ -274,7 +275,11 @@ def test_oversized_replacement_is_rejected(handlers: ToolHandlers):
         handlers.stage(
             {
                 "operations": [
-                    {"kind": "rewrite", "span_ids": ["m-0001"], "replacement": "x" * 9000}
+                    {
+                        "kind": "rewrite",
+                        "span_ids": ["m-0001"],
+                        "replacement": "x" * (MAX_REWRITE_BYTES + 1),
+                    }
                 ],
                 "expected_revision": 1,
             }

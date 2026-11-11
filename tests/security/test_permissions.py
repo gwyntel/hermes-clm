@@ -48,6 +48,28 @@ def test_fresh_store_ignores_a_permissive_umask(home, sid, umask_0022):
             assert mode == 0o600, f"file {path} has mode {oct(mode)} under umask 0022 (I43)"
 
 
+@pytest.mark.t("T41")
+def test_store_open_never_mutates_the_process_umask(home, sid, monkeypatch):
+    """No process-wide umask dance: modes come from per-file creation, not a global."""
+
+    calls = []
+    real_umask = os.umask
+
+    def spy(mask):
+        calls.append(mask)
+        return real_umask(mask)
+
+    monkeypatch.setattr(os, "umask", spy)
+    _populated(home, sid)
+
+    assert calls == [], f"store creation changed the process-wide umask: {calls}"
+    root = home / "clm"
+    for path in [root, *[p for p in root.rglob("*")]]:
+        st = os.stat(path)
+        expected = 0o700 if stat.S_ISDIR(st.st_mode) else 0o600
+        assert stat.S_IMODE(st.st_mode) == expected, f"{path} is {oct(stat.S_IMODE(st.st_mode))}"
+
+
 @pytest.mark.t("T42")
 def test_loose_existing_modes_are_tightened_or_refused(home, sid):
     _populated(home, sid)

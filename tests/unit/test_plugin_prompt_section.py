@@ -45,8 +45,19 @@ class FakeEngine:
         return None
 
 
-class EngineLaneCtx:
-    """A host context with engine registration *and* the section API."""
+class HypotheticalEngineAndSectionCtx:
+    """*Hypothetical* host: engine registration *and* the section API.
+
+    Hermes' engine lane is ``plugins/context_engine._EngineCollector``, a
+    ``NoopPluginContext`` subclass that exposes ``register_context_engine`` and
+    ``register_command`` only — no ``register_system_prompt_section``, no
+    ``register_tool``. This shape is therefore **unreachable in production**;
+    it exists only to pin ``register()``'s gate (an engine-lane ctx that *did*
+    have the API would get guidance only when it is the selected engine). The
+    real engine-only path is covered by ``EngineOnlyCtx`` below, and the real
+    dual-enablement path by the host probe in
+    ``tests/integration/test_prompt_section.py``.
+    """
 
     def __init__(self) -> None:
         self.engines: list = []
@@ -107,7 +118,7 @@ class FallbackCtx:
         return f"handle:{id}"
 
 
-class RejectingSectionCtx(EngineLaneCtx):
+class RejectingSectionCtx(HypotheticalEngineAndSectionCtx):
     def __init__(self, message: str = "section id already registered by plugin 'other'") -> None:
         super().__init__()
         self._message = message
@@ -240,7 +251,7 @@ def test_prompt_section_enabled_follows_the_tool_surface():
 
 def test_unreadable_config_withholds_guidance(monkeypatch):
     monkeypatch.setattr(plugin_module, "_read_profile_config", lambda: {})
-    ctx = EngineLaneCtx()
+    ctx = HypotheticalEngineAndSectionCtx()
     register(ctx, engine=FakeEngine(), config={})
     assert ctx.engines, "the engine must still register"
     assert ctx.sections == [], "no guidance without a positive context.engine selection"
@@ -252,7 +263,7 @@ def test_unreadable_config_withholds_guidance(monkeypatch):
 
 
 def test_selected_engine_lane_registers_the_section_once():
-    ctx = EngineLaneCtx()
+    ctx = HypotheticalEngineAndSectionCtx()
     runtime = register(ctx, engine=FakeEngine(), config={}, engine_selected=True)
     assert len(ctx.sections) == 1
     section = ctx.sections[0]
@@ -266,7 +277,7 @@ def test_selected_engine_lane_registers_the_section_once():
 
 
 def test_unselected_engine_lane_registers_nothing_for_the_model():
-    ctx = EngineLaneCtx()
+    ctx = HypotheticalEngineAndSectionCtx()
     runtime = register(ctx, engine=FakeEngine(), config={}, engine_selected=False)
     assert ctx.engines, "the engine registration is unchanged"
     assert ctx.sections == [], "an unselected engine must not inject instructions"
@@ -274,7 +285,12 @@ def test_unselected_engine_lane_registers_nothing_for_the_model():
 
 
 def test_engine_only_host_without_the_section_api_still_loads():
+    """The real engine lane: ``_EngineCollector`` has no section API at all."""
+
     ctx = EngineOnlyCtx()
+    assert not hasattr(ctx, "register_system_prompt_section"), (
+        "this fake must mirror the real collector: else the gate is untested"
+    )
     runtime = register(ctx, engine=FakeEngine(), config={}, engine_selected=True)
     assert ctx.engine is not None and ctx.commands == ["clm"]
     assert runtime.prompt_section is None, "no API, no fake claim of a registered section"
@@ -283,7 +299,7 @@ def test_engine_only_host_without_the_section_api_still_loads():
 
 def test_fallback_lane_registers_tools_and_guidance():
     ctx = FallbackCtx()
-    runtime = register(ctx, engine=FakeEngine(), config={})
+    runtime = register(ctx, engine=FakeEngine(), config={}, engine_selected=False)
     assert len(ctx.tools) == 12 and all(tool["toolset"] == TOOLSET for tool in ctx.tools)
     assert len(ctx.sections) == 1, "the fallback lane registered the tools, so guidance travels"
     assert runtime.prompt_section == "handle:hermes-clm.usage"
@@ -328,7 +344,9 @@ def test_host_rejection_is_logged_without_echoing_host_text(caplog):
 
 def test_successful_registration_logs_no_warning(caplog):
     caplog.set_level(logging.WARNING, logger="hermes_clm.plugin")
-    register(EngineLaneCtx(), engine=FakeEngine(), config={}, engine_selected=True)
+    register(
+        HypotheticalEngineAndSectionCtx(), engine=FakeEngine(), config={}, engine_selected=True
+    )
     assert [record for record in caplog.records if record.name == "hermes_clm.plugin"] == []
 
 
@@ -350,6 +368,16 @@ def test_guidance_only_names_advertised_tools_and_real_parameters():
     assert not invented, f"guidance names parameters no schema has: {sorted(invented)}"
 
 
+def test_guidance_states_the_auxiliary_span_size_limit():
+    """Aux refuses spans over 4000 chars: the model must be told, not surprised."""
+
+    text = guidance.SYSTEM_PROMPT_SECTION_TEXT
+    assert "4000" in text
+    assert "refused" in text
+    assert "clm_stage" in text, "the guidance must name the tool that can do it instead"
+    assert len(text) <= guidance.SYSTEM_PROMPT_SECTION_MAX_CHARS - 500
+
+
 def test_guidance_does_not_overclaim_boundary_or_auxiliary_scope():
     """Regression guards for two claims the handlers do not support."""
 
@@ -365,7 +393,7 @@ def test_guidance_does_not_overclaim_boundary_or_auxiliary_scope():
 def test_section_text_is_never_rebuilt_from_session_data():
     """The host freezes rendered bytes; a callable would re-run plugin code."""
 
-    ctx = EngineLaneCtx()
+    ctx = HypotheticalEngineAndSectionCtx()
     register(ctx, engine=FakeEngine(), config={}, engine_selected=True)
     content = ctx.sections[0]["content"]
     assert not callable(content)

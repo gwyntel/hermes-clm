@@ -169,14 +169,14 @@ execute: `store` = `feat/store`, `engine` = `feat/engine`, `tools` = `feat/tools
 | T38 | I23 | `test_concurrency.py::test_pin_created_between_stage_and_commit_blocks_the_commit` | store |
 | T39 | I42 | `test_projection_purity.py::test_projection_does_not_touch_the_store`, `::test_projection_returns_a_deep_copy_not_internal_state` | store |
 | T40 | I42 | `test_projection_purity.py::test_host_mutation_of_projection_cannot_reach_the_store` | store |
-| T41 | I43 | `test_permissions.py::test_fresh_store_ignores_a_permissive_umask` | store |
+| T41 | I43 | `test_permissions.py::test_fresh_store_ignores_a_permissive_umask`, `::test_store_open_never_mutates_the_process_umask` | store |
 | T42 | I43 | `test_permissions.py::test_loose_existing_modes_are_tightened_or_refused` | store |
 | T43 | I43 | `test_permissions.py::test_hardlinked_database_is_refused` | store |
 | T44 | I26 | `test_proposals.py::test_proposal_byte_change_after_display_is_rejected` | store |
 | T45 | I26, I27 | `test_proposals.py::test_proposal_with_stale_base_revision_is_rejected` | store |
 | T46 | I27 | `test_proposals.py::test_proposal_cannot_reference_foreign_or_pinned_spans` | store |
 | T47 | I28 | `test_proposals.py::test_unknown_proposal_fields_and_op_kinds_are_rejected`, `fuzz/test_fuzz_ops.py` | store |
-| T48 | I46 | `test_redaction.py::test_secret_in_tool_output_is_redacted_at_write`, `::test_redaction_is_origin_independent` | store |
+| T48 | I46 | `test_redaction.py::test_secret_in_tool_output_is_redacted_at_write`, `::test_redaction_is_origin_independent`, `unit/test_archive_redaction.py::test_secret_in_a_mapping_key_is_scrubbed`, `::test_colliding_scrubbed_keys_are_disambiguated_deterministically`, `::test_scrubbed_key_does_not_displace_a_literal_key`, `::test_literal_key_first_still_keeps_its_name`, `::test_literal_key_collision_preserves_structured_values` | store |
 | T49 | I46 | `test_redaction.py::test_retention_expires_unpinned_sessions_and_keeps_pinned` | store |
 
 ## 5. Known-bad mutation harness (`tests/security/mutation`)

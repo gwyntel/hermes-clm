@@ -10,6 +10,7 @@ import textwrap
 import pytest
 
 from _clm_fakes import (
+    FakeOperation,
     StoreFactory,
     assemble,
     coding_turns,
@@ -653,15 +654,14 @@ class _RecordingStore:
         self.calls.append(("accept_proposal", dict(kwargs)))
         return dict(self.stage_result)
 
-    def unpin(self, span_id, *, expected_revision, txn_id, actor_origin):
+    def operator_unpin_many(self, span_ids, *, expected_revision, txn_id):
         self.calls.append(
             (
-                "unpin",
+                "operator_unpin_many",
                 {
-                    "span_id": span_id,
+                    "span_ids": list(span_ids),
                     "expected_revision": expected_revision,
                     "txn_id": txn_id,
-                    "actor_origin": actor_origin,
                 },
             )
         )
@@ -669,7 +669,9 @@ class _RecordingStore:
         return {
             "ok": True,
             "revision": self.revision,
-            "applied": [{"span_id": span_id, "kind": "unpin", "effect": "applied"}],
+            "applied": [
+                {"span_id": span_id, "kind": "unpin", "effect": "applied"} for span_id in span_ids
+            ],
             "errors": [],
         }
 
@@ -728,7 +730,7 @@ def test_service_create_proposal_defaults_to_the_live_revision():
     assert store.calls[0][1]["base"] == 5
 
 
-def test_service_unpin_is_operator_only_and_batches_spans():
+def test_service_unpin_is_operator_only_and_one_atomic_revision():
     service, store = _service_with(_RecordingStore(revision=2))
 
     refused = service.unpin(["t1"], expected_revision=2, txn_id="txn-a", actor_origin="agent")
@@ -740,11 +742,34 @@ def test_service_unpin_is_operator_only_and_batches_spans():
         ["t1", "t2"], expected_revision=2, txn_id="txn-op", actor_origin="operator"
     )
     assert applied["ok"] is True
-    assert applied["revision"] == 4
-    assert [call[1]["span_id"] for call in store.calls] == ["t1", "t2"]
-    assert [call[1]["txn_id"] for call in store.calls] == ["txn-op.0", "txn-op.1"]
-    assert [call[1]["expected_revision"] for call in store.calls] == [2, 3]
-    assert {call[1]["actor_origin"] for call in store.calls} == {"operator"}
+    assert applied["revision"] == 3, "a batch unpin is exactly one revision"
+    # One store call, one txn id: a mid-batch refusal cannot leave a partial unpin.
+    assert store.calls == [
+        (
+            "operator_unpin_many",
+            {"span_ids": ["t1", "t2"], "expected_revision": 2, "txn_id": "txn-op"},
+        )
+    ]
+    assert [receipt["span_id"] for receipt in applied["applied"]] == ["t1", "t2"]
+
+
+def test_select_context_refuses_a_truncated_operation_log():
+    history = coding_turns()
+    snapshot = snapshot_for(history, [FakeOperation(kind="drop", span_ids=("t1",))])
+    snapshot.operations_truncated = True
+    engine, _factory = started_engine(snapshot)
+
+    assert engine.select_context(assemble(history), conversation_messages=history) is None
+    assert engine._last_error == "operations_truncated"
+
+
+def test_handle_tool_call_rejects_non_mapping_arguments():
+    engine, _factory = started_engine()
+
+    for args in (["not", "a", "mapping"], 7, '"status"', "{bad json"):
+        payload = json.loads(engine.handle_tool_call("clm_status", args))
+        assert payload["ok"] is False
+        assert payload["errors"][0]["code"] == "invalid_arguments"
 
 
 # ---------------------------------------------------------------- tool dispatch

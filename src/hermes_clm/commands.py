@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from .models import MAX_REWRITE_BYTES
 from .tools import SPAN_ID_PATTERN
 
 __all__ = ["COMMAND_NAME", "USAGE", "handle", "parse"]
@@ -50,7 +51,7 @@ Edits apply immediately as a new revision with actor_origin=operator."""
 
 _ALLOWED_EDIT_KINDS = frozenset({"drop", "keep", "rewrite"})
 _MAX_SPAN_IDS = 32
-_MAX_REWRITE_BYTES = 8000
+_MAX_REWRITE_BYTES = MAX_REWRITE_BYTES
 _SPAN_ID_RE = re.compile(SPAN_ID_PATTERN)
 
 

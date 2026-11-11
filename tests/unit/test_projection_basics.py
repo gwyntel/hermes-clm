@@ -109,7 +109,7 @@ def test_offload_stub_names_only_span_and_hash():
         assert imperative not in lowered
 
 
-def test_restore_reinstates_the_archived_content():
+def test_restore_falls_back_to_the_archived_content_without_a_rewrite():
     history = [message("user", "go", "u1"), message("assistant", "original text", "a1")]
     request = assemble(history)
     snapshot = snapshot_for(
@@ -123,9 +123,159 @@ def test_restore_reinstates_the_archived_content():
     result = project(request, conversation_messages=history, snapshot=snapshot)
 
     assert result.ok
+    # The span carries no current rewrite, so restore reinstates the archive bytes.
     assert result.messages[2]["content"] == "original text"
     # Receipts describe the row's final effect: a superseded rewrite is not reported.
     assert [item["kind"] for item in result.applied] == ["restore"]
+
+
+def test_restore_projects_the_spans_current_rewrite():
+    """Restore must read the same authority as the store: ``span.rewrite_text``."""
+
+    history = [message("user", "go", "u1"), message("assistant", "original text", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(history, [FakeOperation(kind="restore", span_ids=("a1",))])
+    snapshot.spans["a1"].rewrite_text = "REWRITTEN TEXT"
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert result.ok
+    assert result.messages[2]["content"] == "REWRITTEN TEXT"
+    assert [item["kind"] for item in result.applied] == ["restore"]
+
+
+# --------------------------------------------------------------------------- #
+# keep: the store's other reactivation, not a no-op
+# --------------------------------------------------------------------------- #
+
+
+def test_keep_restores_a_row_a_rewrite_then_drop_removed():
+    """``rewrite`` → ``drop`` → ``keep`` reinstate the archived original.
+
+    The store clears ``rewrite_text`` on a drop, so ``keep`` brings the span back
+    with its archived bytes. The projector must agree: the receipt is an applied
+    ``keep``, never the old ``noop_operation``.
+    """
+
+    history = [message("user", "go", "u1"), message("assistant", "original text", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(
+        history,
+        [
+            FakeOperation(kind="rewrite", span_ids=("a1",), replacement="short summary"),
+            FakeOperation(kind="drop", span_ids=("a1",)),
+            FakeOperation(kind="keep", span_ids=("a1",)),
+        ],
+    )
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert result.ok
+    assert result.messages[2]["content"] == "original text"
+    assert [item["kind"] for item in result.applied] == ["keep"]
+    assert result.inert == ()
+
+
+def test_keep_restores_an_offloaded_row_from_the_archive():
+    history = [message("user", "go", "u1"), message("assistant", "long answer", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(
+        history,
+        [
+            FakeOperation(kind="offload", span_ids=("a1",)),
+            FakeOperation(kind="keep", span_ids=("a1",)),
+        ],
+    )
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert result.ok
+    assert result.messages[2]["content"] == "long answer"
+    assert [item["kind"] for item in result.applied] == ["keep"]
+
+
+def test_keep_projects_the_spans_current_rewrite():
+    """Same authority as ``restore``: ``span.rewrite_text`` wins over the archive."""
+
+    history = [message("user", "go", "u1"), message("assistant", "original text", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(history, [FakeOperation(kind="keep", span_ids=("a1",))])
+    snapshot.spans["a1"].rewrite_text = "REWRITTEN TEXT"
+    snapshot.spans["a1"].state = "dropped"
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert result.ok
+    assert result.messages[2]["content"] == "REWRITTEN TEXT"
+    assert [item["kind"] for item in result.applied] == ["keep"]
+
+
+def test_keep_covers_a_span_dropped_by_an_earlier_revision():
+    """A keep whose span is already dropped in the snapshot reactivates it."""
+
+    history = [message("user", "go", "u1"), message("assistant", "archived text", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(history, [FakeOperation(kind="keep", span_ids=("a1",))])
+    snapshot.spans["a1"].state = "dropped"
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert result.ok
+    assert result.messages[2]["content"] == "archived text"
+    assert [item["kind"] for item in result.applied] == ["keep"]
+
+
+def test_keep_on_an_active_row_is_inert_not_a_change():
+    history = [message("user", "go", "u1"), message("assistant", "still here", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(history, [FakeOperation(kind="keep", span_ids=("a1",))])
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert result.ok
+    assert not result.changed
+    assert [(item["kind"], item["reason"]) for item in result.inert] == [("keep", "already_active")]
+    assert list(result.messages) == request
+
+
+def test_keep_refuses_a_protected_span():
+    """A reactivation may not bring protected content back through the projector."""
+
+    history = [message("user", "operator constraint", "u1"), message("assistant", "ok", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(
+        history, [FakeOperation(kind="keep", span_ids=("u1",))], protected=("u1",)
+    )
+    # A protected span can never leave `active` in the store (trigger-enforced);
+    # the projector still refuses instead of trusting a forged snapshot.
+    snapshot.spans["u1"].state = "dropped"
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert not result.ok
+    assert result.messages == ()
+    assert result.conflicts[0]["code"] == "protected_row" or (
+        result.conflicts[0]["code"] == "protected_span"
+    )
+
+
+def test_keep_refuses_a_payload_over_the_rewrite_ceiling():
+    history = [message("user", "go", "u1"), message("assistant", "original", "a1")]
+    request = assemble(history)
+    snapshot = snapshot_for(
+        history,
+        [
+            FakeOperation(kind="drop", span_ids=("a1",)),
+            FakeOperation(kind="keep", span_ids=("a1",)),
+        ],
+    )
+    snapshot.spans["a1"].message = {"role": "assistant", "content": "x" * 32}
+
+    result = project(request, conversation_messages=history, snapshot=snapshot, max_rewrite_bytes=8)
+
+    assert not result.ok
+    assert result.messages == ()
+    assert result.conflicts[0]["code"] == "keep_too_large"
 
 
 def test_last_write_wins_for_repeated_operations():
@@ -142,6 +292,21 @@ def test_last_write_wins_for_repeated_operations():
     result = project(request, conversation_messages=history, snapshot=snapshot)
 
     assert result.messages[2]["content"] == "second"
+
+
+def test_truncated_operation_log_refuses_the_projection():
+    """A capped op log cannot be trusted to describe the context: fail closed."""
+
+    history = history_three()
+    request = assemble(history)
+    snapshot = snapshot_for(history, [FakeOperation(kind="drop", span_ids=("a1",))])
+    snapshot.operations_truncated = True
+
+    result = project(request, conversation_messages=history, snapshot=snapshot)
+
+    assert not result.ok
+    assert result.messages == ()
+    assert [item["code"] for item in result.conflicts] == ["operations_truncated"]
 
 
 def test_unknown_span_is_inert_not_fatal():

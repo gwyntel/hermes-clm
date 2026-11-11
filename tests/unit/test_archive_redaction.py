@@ -73,6 +73,96 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn("sk-abcdefghij", canonical_json(outcome.message))
         self.assertNotIn("ghp_abcdefghij", canonical_json(outcome.message))
 
+    def test_secret_in_a_mapping_key_is_scrubbed(self) -> None:
+        message = {
+            "role": "tool",
+            "content": "clean",
+            "meta": {"sk-abcdefghijklmnopqrstuvwx": "label"},
+        }
+        outcome = redact_message(message)
+        self.assertGreaterEqual(outcome.count, 1)
+        keys = list(outcome.message["meta"])
+        self.assertEqual(keys, ["[REDACTED:openai_key]"])
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwx", canonical_json(outcome.message))
+
+    def test_key_scrubbing_preserves_structured_values_and_types(self) -> None:
+        message = {
+            "role": "tool",
+            "content": "clean",
+            "meta": {
+                "sk-abcdefghijklmnopqrstuvwx": {"nested": [1, 2.5, None, True]},
+                "count": 3,
+            },
+        }
+        outcome = redact_message(message)
+        self.assertEqual(
+            outcome.message["meta"]["[REDACTED:openai_key]"], {"nested": [1, 2.5, None, True]}
+        )
+        self.assertEqual(outcome.message["meta"]["count"], 3)
+
+    def test_colliding_scrubbed_keys_are_disambiguated_deterministically(self) -> None:
+        first = "sk-abcdefghijklmnopqrstuvwx"
+        second = "sk-zyxwvutsrqponmlkjihgfedc"
+        message = {"role": "tool", "content": "clean", "meta": {first: "one", second: "two"}}
+        outcome = redact_message(message)
+        keys = list(outcome.message["meta"])
+        self.assertEqual(len(keys), 2, "a key collision must not drop data")
+        self.assertEqual(keys[0], "[REDACTED:openai_key]")
+        self.assertEqual(outcome.message["meta"][keys[0]], "one")
+        self.assertEqual(outcome.message["meta"][keys[1]], "two")
+        self.assertTrue(keys[1].startswith("[REDACTED:openai_key]"))
+        # Deterministic: same input, same keys, every time.
+        self.assertEqual(list(redact_message(message).message["meta"]), keys)
+
+    def test_scrubbed_key_does_not_displace_a_literal_key(self) -> None:
+        """A literal key keeps its exact spelling; the scrubbed one is suffixed."""
+
+        secret = "sk-" + "q" * 24
+        message = {
+            "role": "tool",
+            "content": "clean",
+            "meta": {secret: "from-secret", "[REDACTED:openai_key]": "literal"},
+        }
+        meta = redact_message(message).message["meta"]
+        self.assertEqual(len(meta), 2, "collision must not drop data")
+        self.assertEqual(meta["[REDACTED:openai_key]"], "literal")
+        self.assertEqual(meta["[REDACTED:openai_key]#2"], "from-secret")
+
+    def test_literal_key_first_still_keeps_its_name(self) -> None:
+        """The order the two keys appear in must not rename the literal one."""
+
+        secret = "sk-" + "q" * 24
+        message = {
+            "role": "tool",
+            "content": "clean",
+            "meta": {"[REDACTED:openai_key]": "literal", secret: "from-secret"},
+        }
+        meta = redact_message(message).message["meta"]
+        self.assertEqual(len(meta), 2, "collision must not drop data")
+        self.assertEqual(meta["[REDACTED:openai_key]"], "literal")
+        self.assertEqual(meta["[REDACTED:openai_key]#2"], "from-secret")
+
+    def test_literal_key_collision_preserves_structured_values(self) -> None:
+        """Both orderings keep every value and its type, never a merged row."""
+
+        secret = "sk-" + "q" * 24
+        structured = {"nested": [1, 2.5, None, True]}
+        for meta_in in (
+            {secret: structured, "[REDACTED:openai_key]": 7},
+            {"[REDACTED:openai_key]": 7, secret: structured},
+        ):
+            meta = redact_message({"role": "tool", "content": "clean", "meta": meta_in}).message[
+                "meta"
+            ]
+            self.assertEqual(meta["[REDACTED:openai_key]"], 7)
+            self.assertEqual(meta["[REDACTED:openai_key]#2"], structured)
+            self.assertIsInstance(meta["[REDACTED:openai_key]#2"], dict)
+            # Idempotent: re-scrubbing the output changes nothing.
+            again = redact_message({"role": "tool", "content": "clean", "meta": meta}).message[
+                "meta"
+            ]
+            self.assertEqual(again, meta)
+
     def test_input_is_not_mutated(self) -> None:
         message = {"role": "user", "content": "sk-abcdefghijklmnopqrstuvwx"}
         original = copy.deepcopy(message)

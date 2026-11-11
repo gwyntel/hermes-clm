@@ -126,6 +126,12 @@ class FakeSpan:
     origin: str = "agent"
     protected: bool = False
     content_sha256: Optional[str] = None
+    #: Current rewrite for this span, when the snapshot carries one.
+    rewrite_text: Optional[str] = None
+    #: Span state the snapshot reports (``None`` means "no state": active).
+    #: The store's snapshot uses a ``SpanState`` enum here; these fakes use the
+    #: string spelling the projector also accepts.
+    state: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.content_sha256 is None:
@@ -152,6 +158,8 @@ class FakeSnapshot:
     spans: Dict[str, FakeSpan] = field(default_factory=dict)
     pins: Tuple[str, ...] = ()
     head_hash: str = ""
+    #: True when the store capped its replayed operation log.
+    operations_truncated: bool = False
 
 
 def spans_from_history(

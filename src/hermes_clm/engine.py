@@ -32,7 +32,8 @@ from .auxiliary import (
 )
 from .budget import TokenCalibration
 from .errors import CLMError
-from .projection import DEFAULT_MAX_REWRITE_BYTES, ProjectionResult, project
+from .models import MAX_REWRITE_BYTES
+from .projection import ProjectionResult, project
 from .tools import ToolHandlers, ToolLimits, build_tool_specs
 
 #: Default reserve kept free for the next completion.
@@ -185,7 +186,7 @@ class EngineConfig:
     archive_redact: bool = True
     retention_sessions: int = 32
     max_retrieve_bytes: int = 32_768
-    max_rewrite_bytes: int = DEFAULT_MAX_REWRITE_BYTES
+    max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_aux_spans: int = 8
     hermes_home: Optional[str] = None
 
@@ -216,9 +217,7 @@ class EngineConfig:
             archive_redact=bool(_config_value(source, "archive_redact", True)),
             retention_sessions=int(_config_value(source, "retention_sessions", 32)),
             max_retrieve_bytes=int(_config_value(source, "max_retrieve_bytes", 32_768)),
-            max_rewrite_bytes=int(
-                _config_value(source, "max_rewrite_bytes", DEFAULT_MAX_REWRITE_BYTES)
-            ),
+            max_rewrite_bytes=int(_config_value(source, "max_rewrite_bytes", MAX_REWRITE_BYTES)),
             max_aux_spans=int(_config_value(source, "max_aux_spans", 8)),
             hermes_home=_config_value(source, "hermes_home", None),
         )
@@ -420,6 +419,28 @@ def _payload(result: Any, *, ok: bool = True) -> dict[str, Any]:
     return payload
 
 
+def _decode_tool_arguments(raw: str | bytes) -> Any:
+    """Decode a JSON-string argument payload; a blank string means no arguments."""
+
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    if not text.strip():
+        return {}
+    return json.loads(text)
+
+
+def _invalid_arguments(name: str, detail: str) -> str:
+    """Structured refusal for a tool call whose arguments are not an object."""
+
+    message = f"Invalid arguments for {name}: {detail}"
+    return json.dumps(
+        {
+            "ok": False,
+            "error": message,
+            "errors": [{"code": "invalid_arguments", "message": message}],
+        }
+    )
+
+
 class ToolService:
     """Scoped store access for tool handlers.
 
@@ -431,15 +452,6 @@ class ToolService:
 
     def __init__(self, engine: "CLMEngine") -> None:
         self._engine = engine
-
-    @property
-    def _proposal_hashes(self) -> dict[tuple[str, str], str]:
-        """``(proposal_id, aux digest) -> store digest`` on the owning engine.
-
-        Tool services are cheap and created per call, so the digest pair has to
-        live on the engine for a propose/accept pair to meet.
-        """
-        return self._engine._proposal_hashes
 
     def _require_store(self) -> Any:
         store = self._engine.store
@@ -592,11 +604,11 @@ class ToolService:
         refuses operations whose actor disagrees with the calling actor, and an
         auxiliary proposal is by definition an aux edit.
 
-        Two digests are in play for the same operations: the store's records
-        ``proposal_sha256``, and the auxiliary layer's own canonical form
-        (:func:`hermes_clm.auxiliary.canonical_proposal_sha256`) which it prints
-        for review. Both are deterministic over identical operation content, so
-        the service remembers the pair and accepts either hash later.
+        The store owns proposal identity: the returned ``proposal_sha256`` is the
+        store's digest, and ``accept_proposal`` requires exactly that value. The
+        auxiliary layer's :func:`hermes_clm.auxiliary.canonical_proposal_sha256`
+        is only a compatibility helper for callers that reviewed a proposal
+        before the store owned identity — it is not an alternative accepted hash.
         """
         store = self._require_store()
         base = self._live_revision(store) if base_revision is None else int(base_revision)
@@ -642,9 +654,9 @@ class ToolService:
     ) -> dict[str, Any]:
         """Remove pins. Operator authority only: agents can pin, never unpin.
 
-        The store's ``unpin`` is per-span and each successful call bumps the head
-        revision, so a batch is applied one span at a time with derived
-        idempotency keys; the first refusal stops the batch and is reported.
+        A batch goes to the store's atomic unpin (``operator_unpin_many``): one
+        transaction, one revision, one ``txn_id``, all-or-nothing. An unknown
+        span aborts the whole batch instead of leaving a partial unpin behind.
         """
         if str(actor_origin) != "operator":
             return {
@@ -659,38 +671,60 @@ class ToolService:
                 "receipts": [],
             }
         store = self._require_store()
-        unpin = getattr(store, "unpin", None)
-        if not callable(unpin):
-            raise RuntimeError("clm store does not implement unpin()")
+        targets = [str(item) for item in span_ids]
         revision = int(expected_revision)
-        applied: list[dict[str, Any]] = []
-        errors: list[dict[str, Any]] = []
-        for index, span_id in enumerate(str(item) for item in span_ids):
+
+        def _unpin_result(result: dict[str, Any]) -> dict[str, Any]:
+            applied = [dict(item) for item in result.get("applied") or ()]
+            return {
+                "ok": bool(result.get("ok", True)),
+                "revision": int(result.get("revision", revision)),
+                "applied": applied,
+                "inert": [dict(item) for item in result.get("inert") or ()],
+                "errors": [dict(item) for item in result.get("errors") or ()],
+                "receipts": applied,
+            }
+
+        def _unpin_refused(exc: CLMError) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "revision": self._live_revision(store),
+                "applied": [],
+                "inert": [],
+                "errors": [exc.to_dict()],
+                "receipts": [],
+            }
+
+        # One call, one transaction: the store validates every target before
+        # removing any pin, so a refusal cannot leave a partial unpin behind.
+        batch = getattr(store, "operator_unpin_many", None)
+        if not callable(batch):
+            batch = getattr(store, "operator_unpin", None)
+        if callable(batch):
             try:
-                result = _payload(
-                    unpin(
-                        span_id,
+                return _unpin_result(
+                    _payload(batch(targets, expected_revision=revision, txn_id=txn_id))
+                )
+            except CLMError as exc:
+                return _unpin_refused(exc)
+        legacy = getattr(store, "unpin", None)
+        if not callable(legacy):
+            raise RuntimeError("clm store does not implement unpin()")
+        # Contract-minimal stores only expose ``unpin``; it accepts the batch too,
+        # so the caller still gets one revision for one txn id.
+        try:
+            return _unpin_result(
+                _payload(
+                    legacy(
+                        targets,
                         expected_revision=revision,
-                        txn_id=f"{txn_id}.{index}",
+                        txn_id=txn_id,
                         actor_origin="operator",
                     )
                 )
-            except CLMError as exc:
-                errors.append(exc.to_dict())
-                break
-            if result.get("ok") is False:
-                errors.extend(dict(item) for item in result.get("errors") or ())
-                break
-            revision = int(result.get("revision", revision))
-            applied.extend(dict(item) for item in result.get("applied") or ())
-        return {
-            "ok": not errors,
-            "revision": revision,
-            "applied": applied,
-            "inert": [],
-            "errors": errors,
-            "receipts": applied,
-        }
+            )
+        except CLMError as exc:
+            return _unpin_refused(exc)
 
 
 class CLMEngine(_EngineBase):
@@ -739,8 +773,6 @@ class CLMEngine(_EngineBase):
             self.service_for_session, limits=self._tool_limits, aux=self.aux
         )
         self._tool_specs: list[Any] | None = None
-        #: The two deterministic digest forms of each proposal's operations.
-        self._proposal_hashes: dict[tuple[str, str], str] = {}
         # Per-model threshold overrides; the host assigns this after construction.
         self.model_thresholds: Dict[str, float] = {}
         self._config_threshold_percent = float(getattr(self, "threshold_percent", 0.75) or 0.75)
@@ -1011,6 +1043,11 @@ class CLMEngine(_EngineBase):
                 return None
             snapshot = self._snapshot()
             if snapshot is None:
+                return None
+            if bool(getattr(snapshot, "operations_truncated", False)):
+                # The op log is capped and no longer describes the context.
+                # Fail closed: leave the request byte-identical.
+                self._last_error = "operations_truncated"
                 return None
             if int(getattr(snapshot, "revision", 0) or 0) <= 0 and not tuple(
                 getattr(snapshot, "operations", ()) or ()
@@ -1447,11 +1484,22 @@ class CLMEngine(_EngineBase):
             payload: dict[str, Any]
             if isinstance(args, Mapping):
                 payload = dict(args)
-            elif isinstance(args, str) and args.strip():
-                decoded = json.loads(args)
-                payload = dict(decoded) if isinstance(decoded, Mapping) else {}
-            else:
+            elif isinstance(args, (str, bytes)):
+                try:
+                    decoded = _decode_tool_arguments(args)
+                except (TypeError, ValueError):
+                    return _invalid_arguments(name, "arguments are not valid JSON")
+                if not isinstance(decoded, Mapping):
+                    return _invalid_arguments(name, "arguments did not decode to an object")
+                payload = dict(decoded)
+            elif args is None:
                 payload = {}
+            else:
+                # A list/scalar payload is a caller bug, not an empty request:
+                # refusing keeps a mistyped edit from silently doing nothing.
+                return _invalid_arguments(
+                    name, f"arguments must be an object, got {type(args).__name__}"
+                )
             if messages:
                 # A mid-turn tool call must see the rows that already arrived.
                 self._ingest(messages)
