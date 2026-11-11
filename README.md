@@ -45,7 +45,7 @@ The design and its invariants are specified in [`docs/architecture.md`](docs/arc
 - Python 3.11 or newer (CI covers 3.11, 3.12, 3.13 and 3.14).
 - Hermes Agent is an optional host. The runtime package imports and its CLI runs without
   Hermes installed; host adapters import Hermes lazily.
-- No runtime dependencies. The store, projection and CLI use the standard library only.
+- No runtime dependencies. Every shipped module imports with the standard library alone.
 
 ## Install
 

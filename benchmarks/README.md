@@ -90,7 +90,7 @@ Evidence class: **offline-simulation**. Reproduced with `python -m benchmarks` o
 | D — CLM + mock aux | 56 | 59,763 | 0.1013 | 9 | 20/20 | 7/7 | 7/7 |
 
 Per-fixture details, including peak tokens, retention, injection, recovery and handoff
-fidelity, are in [`benchmarks/results/offline-results.md`](../benchmarks/results/offline-results.md).
+fidelity, are in [`results/offline-results.md`](results/offline-results.md).
 
 ### How to read these numbers
 

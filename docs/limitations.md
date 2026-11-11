@@ -118,9 +118,11 @@ not enforceable, it is listed here rather than implied by the architecture.
     artifacts do not depend on PyPI.
 34. **CI results are local until pushed.** The workflows are committed but no remote run has
     been observed from this branch. Do not report a green CI run that has not happened.
-35. **Python 3.14 is covered by the matrix but only 3.11, 3.12 and 3.14 were exercised
+35. **Python 3.14 is in the CI matrix, but only 3.11, 3.12 and 3.14 were exercised
     locally** during the delivery branch; 3.13 is CI-only. The package uses no version-
     specific syntax, but the matrix is the proof.
 36. **Release Please owns version bumps.** Hand-editing `pyproject.toml` or `_version.py`
     without the release PR breaks the single-source contract; the packaging test fails if
-    they disagree.
+    they disagree. The manifest is seeded at `0.0.0` with `initial-version: 0.1.0`, so the
+    first release PR should produce `v0.1.0`; later releases follow Conventional Commits.
+    No tag or release exists yet.

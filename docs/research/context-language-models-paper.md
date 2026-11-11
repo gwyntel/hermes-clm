@@ -10,9 +10,9 @@ Tags: **[M]** = measured/reported claim in paper · **[C]** = verified in releas
 |---|---|
 | Paper | Shao, Shen, Yin, … Zettlemoyer, Koh. "Context Language Models". arXiv:2609.37725 [v1], dated 2026-09-29. |
 | Abs | https://arxiv.org/abs/2609.37725 |
-| HTML (read in full) | https://arxiv.org/html/2609.37725v1 → local `src/paper.html`, text at `src/paper.txt` |
-| PDF (downloaded, not parsed page-by-page) | https://arxiv.org/pdf/2609.37725 → local `src/paper.pdf` (2.8 MB; no poppler/pymupdf on host, so text layer came from HTML) |
-| Code (cloned, commit pinned) | https://github.com/facebookresearch/context-language-models — `483198229ab7b90c0eed4651306ab3b3505aaf50`, 2026-10-13 → local `src/repo/` |
+| HTML (read in full) | https://arxiv.org/html/2609.37725v1 → downloaded HTML and extracted text |
+| PDF (downloaded, not parsed page-by-page) | https://arxiv.org/pdf/2609.37725 → downloaded PDF (2.8 MB); text was read from the HTML because no PDF text extractor was used |
+| Code (cloned, commit pinned) | https://github.com/facebookresearch/context-language-models — `483198229ab7b90c0eed4651306ab3b3505aaf50`, 2026-10-13 → a temporary reference clone |
 | ContextBench method skills (fetched) | https://github.com/RulinShao/ContextBench (branch `master`), `clm_exp/skills/{clm,base,summary,acm,rlm,context_folding,self_compact}/*.md` |
 | Corr. author | Rulin Shao, rulin@cs.washington.edu |
 
@@ -26,7 +26,7 @@ Read end-to-end from the HTML text (all body text, all appendix prose, all figur
 - Appendix A Extended Related Work (8 sub-blocks); Appendix B Suffix Cache Reuse (6 sub-blocks); Appendix C Prefix-Reuse FLOPs Computation; Appendix D ContextBench (design, instructions, Table 3/4); Appendix E Experimental Configurations (all 8 subsections incl. steering/evolution/RL recipes); Appendix F Supplementary Results; Appendix G Context-Length Awareness.
 - Tables 1–5 (all cells). Figures 1–30: **captions read, plotted values not** (see §9 gaps).
 
-Read in code (`src/repo/`): `clm_harness/README.md`, `clm_agent/prompts.yaml`, `clm_agent/harness.py` (all 825 lines), `context_env/env.py`, `context_env/edit_gate.py`, `context_env/paths.py`, `context_utils/context_string.py`, `utils/budget.py`, `utils/tokens.py`, `utils/skills.py`, `utils/finish_policy.py`, `flops_metrics/kv_cache_flops.py` (header), `configs/bcp.yaml`, `task_templates/terminal_agent_tasks.yaml`, `clm_contextbench/README.md`, `clm_icl/note.py` (header), `suffix_cache_reuse/vllm/DESIGN.md` (header).
+Read in code (the pinned reference clone): `clm_harness/README.md`, `clm_agent/prompts.yaml`, `clm_agent/harness.py` (all 825 lines), `context_env/env.py`, `context_env/edit_gate.py`, `context_env/paths.py`, `context_utils/context_string.py`, `utils/budget.py`, `utils/tokens.py`, `utils/skills.py`, `utils/finish_policy.py`, `flops_metrics/kv_cache_flops.py` (header), `configs/bcp.yaml`, `task_templates/terminal_agent_tasks.yaml`, `clm_contextbench/README.md`, `clm_icl/note.py` (header), `suffix_cache_reuse/vllm/DESIGN.md` (header).
 
 **Not read:** the 397-line reference list (skimmed only); `clm_rl/*` patches and `slime` bridge code; `suffix_cache_reuse/sglang|vllm` implementation bodies beyond DESIGN.md header; `agent_trajectory_format/*` (ATIF-CTX schema) beyond README mention; ContextBench task generator code; `clm_icl/propose.py`, `evolve.py`, `proposer_prompt.md` beyond note.py header. None of these change the plugin requirements below, except possibly ATIF-CTX (would matter for trajectory export fidelity).
 
@@ -91,7 +91,7 @@ Software World (GPT-5.6-Sol, 272K ctx, six agents, 24 h+, judged on 4 unseen dow
 
 ## 4. Mechanism, as implemented [C]
 
-All paths/lines from `src/repo` at the pinned commit.
+All paths/lines from the pinned reference clone.
 
 ### 4.1 Mirror + turn headers
 - Mirror path `/tmp/.live_ctx/LIVE_CTX_MAIN.txt`; bash-state dir `/tmp/.bash_ctx_state`; `_PROTECT = 2` (system + task pinned) — `harness.py:103-106`.
