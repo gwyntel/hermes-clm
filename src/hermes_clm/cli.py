@@ -133,7 +133,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bench.add_argument("--json", default=None, help="write the JSON report to this path")
     bench.add_argument("--markdown", default=None, help="write the Markdown report to this path")
-    bench.add_argument("--out", default=None, help="write the JSON report to stdout file")
+    bench.add_argument("--out", default=None, help="write the JSON report to this file")
     bench.set_defaults(func=_cmd_bench)
     return parser
 
