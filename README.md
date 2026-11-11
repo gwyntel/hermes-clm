@@ -16,7 +16,9 @@ byte-identically.
 > `ruff check`, `ruff format --check`, `mypy src`, `python -m build` and
 > `twine check` pass. The remaining skips are two media-blob probes that do not apply to
 > inline archives and one tool-schema probe with no module-level schema object.
-> No remote CI run or released artifact exists yet; public APIs may change before `v0.1.0`.
+> Remote CI passes lint, types, tests on Python 3.11–3.14, mutation, security, build and
+> the aggregate gate. Only a GitHub prerelease exists until operator acceptance completes;
+> no PyPI publication has occurred. Public APIs may change before `v0.1.0`.
 > Exact commands and remaining limitations are in
 > [`docs/limitations.md`](docs/limitations.md#current-gates).
 

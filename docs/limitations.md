@@ -5,8 +5,9 @@ not enforceable, it is listed here rather than implied by the architecture.
 
 ## Current gates
 
-Measured locally on macOS/CPython 3.14 from `feat/integration`. No remote CI run or clean-clone
-install has been observed yet; this table is not a substitute for CI.
+Measured locally on macOS/CPython 3.14 from `feat/integration`, with matching remote CI on
+GitHub (run 43091861486). Only a GitHub prerelease exists; no PyPI or production-Hermes
+deployment has occurred.
 
 | Gate | Command | Result |
 |---|---|---|
