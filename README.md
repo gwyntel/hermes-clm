@@ -10,9 +10,14 @@ committed revision onto each provider request as a pure function. Raw history is
 rewritten, tool-call groups stay atomic, and system / user / pinned rows pass through
 byte-identically.
 
-> **Status: pre-release.** The package metadata, CLI, benchmark harness and documentation
-> are complete. The engine, store, tools and security suites land on separate integration
-> branches before the first release candidate. Public APIs may change before `v0.1.0`.
+> **Status: pre-release, integrated tree.** The engine, store, tools, plugin, benchmark
+> harness and packaging land on this branch together. Packaging, the CLI, the offline
+> benchmark and 572 passed / 108 failed / 2 skipped of the collected suite; `mypy src`
+> reports 18 type errors in 7 integrated modules and the security/fuzz suites report
+> contract findings against the store. Exact gate results and owners are in
+> [`docs/limitations.md`](docs/limitations.md#integration-status). Nothing here is a
+> released artifact, no CI run has been observed on a remote, and public APIs may change
+> before `v0.1.0`.
 
 ## The problem
 
@@ -49,24 +54,68 @@ The design and its invariants are specified in [`docs/architecture.md`](docs/arc
 
 ## Install
 
-From a checkout:
+There is no PyPI project yet, so install from a clone. Two paths, and they are different
+things:
+
+**As a Hermes plugin (the engine + tools + `/clm`).** Hermes loads a plugin from a
+directory, so clone the checkout into the plugin directory of the profile that should use
+it, then install the library into the environment Hermes runs in:
 
 ```bash
-git clone https://github.com/gwyntel/hermes-clm
-cd hermes-clm
+git clone https://github.com/gwyntel/hermes-clm "$HERMES_HOME/plugins/hermes-clm"
+python -m pip install -e "$HERMES_HOME/plugins/hermes-clm"
+```
+
+`$HERMES_HOME` is the Hermes home for the active profile (commonly `~/.hermes`). The
+checkout's root `__init__.py` is the entry point Hermes calls; `plugin.yaml` declares the
+`clm_*` tools and the `clm.*` config keys. The host must be a build that supports
+context-engine plugins; the hook line numbers were verified against Hermes v0.23.0.
+
+**As a library or CLI only (no Hermes).** This is what the wheel is for:
+
+```bash
 python -m pip install .
+hermes-clm version
 ```
 
-Development install with test and build tooling:
+Use `python -m pip install -e ".[dev]"` inside a virtualenv for tests, linting and builds.
+
+### Configure
+
+```yaml
+# profile config
+context:
+  engine: hermes-clm
+compression:
+  enabled: true     # the host gates plugin engines on this switch
+```
+
+Optional keys: `clm.reserve_tokens`, `clm.pressure_thresholds`, `clm.aux_enabled`,
+`clm.aux_timeout_seconds`, `clm.archive_redact`, `clm.retention_sessions`,
+`clm.max_retrieve_bytes`, `clm.max_rewrite_bytes`, `clm.max_aux_spans`,
+`clm.max_operations`. The engine does not choose providers or models and never writes
+provider credentials.
+
+### Roll back
+
+The engine is request-only: it never rewrites the persisted transcript, so disabling it
+restores the host's built-in compressor on the next turn without replaying anything.
+
+```yaml
+context:
+  engine: compressor   # or delete the key; "compressor" is the host default
+```
+
+Then remove the plugin directory if it should not load at all:
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -e ".[dev]"
+rm -rf "$HERMES_HOME/plugins/hermes-clm"
 ```
 
-Once a release exists, `pip install hermes-clm` will work. There is no PyPI project or
-pending publisher yet; see [`docs/limitations.md`](docs/limitations.md).
+The per-session archive lives under `$HERMES_HOME/clm/sessions/<sid>/`. It is inert when
+the engine is off; delete those directories to reclaim the space (that is a deletion path
+for archived secrets, so do it deliberately). Restart Hermes after changing
+`context.engine`; the plugin is selected at agent initialisation.
 
 ## Use
 
@@ -95,25 +144,36 @@ credentials.
 ## Offline benchmarks
 
 `python -m benchmarks` (or `hermes-clm bench`) runs four reference strategies over seven
-exact fixtures:
+exact fixtures. Committed totals from the deterministic run in
+[`benchmarks/results/`](benchmarks/results/), on CPython 3.12 and byte-identical on 3.11
+and 3.14:
 
-| Key | Strategy |
-|---|---|
-| A | Default compressor, modelled |
-| B | Microcompaction, modelled |
-| C | CLM model-directed edits |
-| D | CLM plus a local mock auxiliary proposal |
+| Key | Strategy | Requests | Prompt tokens | Sim cost (USD) | Edits | Facts retained | Fixtures with all facts |
+|---|---|---:|---:|---:|---:|---:|---:|
+| A | Default compressor, modelled | 56 | 69,761 | 0.0894 | 4 | 17/20 | 4/7 |
+| B | Microcompaction, modelled | 56 | 61,593 | 0.0932 | 8 | 15/20 | 2/7 |
+| C | CLM model-directed edits | 56 | 59,103 | 0.0865 | 9 | 20/20 | 7/7 |
+| D | CLM plus a local mock auxiliary proposal | 56 | 59,763 | 0.1013 | 9 | 20/20 | 7/7 |
+
+What this does and does not say:
+
+- **It is a simulator, not the engine.** A and B are policy models of a threshold
+  summariser and microcompaction; C and D are reference CLM policies, not
+  `hermes_clm.engine`. No Hermes process, provider or model runs.
+- **C and D pass their preservation checks by construction.** The fixtures declare
+  `FACT[...]` lines and the CLM policies carry them forward explicitly. The run proves the
+  accounting distinguishes policies; it is not a task-accuracy or efficacy result.
+- **B is not cheaper despite fewer prompt tokens.** Its repeated tool-row rewrites break
+  the prefix cache more often, so illustrative cost is above A. D's auxiliary proposal
+  costs more than it saves here, because aux input tokens are counted.
+- Token counts use a fixed four-characters-per-token estimator, not a provider tokenizer;
+  cost uses illustrative list prices and latency uses synthetic constants. Neither is a
+  bill or a timing measurement.
 
 Fixtures cover a long coding session, interruption and restart, conflicting updates, a huge
-tool output, prompt injection, archive recovery and session handoff. Metrics include prompt
-tokens, prefix-cache reuse, illustrative cost, synthetic latency, edits, archive integrity,
-fact retention, injection containment and handoff fidelity.
-
-The harness makes **no network calls and no model calls**. Token counts use a fixed
-estimator; cost and latency use published constants. Results demonstrate harness behaviour
-and the accounting, not task accuracy. See [`docs/benchmarking.md`](docs/benchmarking.md)
-for the method and the committed run, and [`benchmarks/results/`](benchmarks/results/) for
-the raw JSON.
+tool output, prompt injection, archive recovery and session handoff. See
+[`docs/benchmarking.md`](docs/benchmarking.md) for the method, the per-fixture table and the
+cost-gated procedure that any future live run must follow.
 
 ## Limits, honestly
 

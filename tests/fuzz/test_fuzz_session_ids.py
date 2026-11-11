@@ -12,9 +12,7 @@ import random
 import string
 
 import pytest
-
 from _support import contract as C
-from _support.assertions import expect_refusal
 
 C.need(C.STORE_MOD)
 

@@ -12,7 +12,7 @@ import store_testkit as kit
 
 from hermes_clm.errors import IdempotencyConflictError
 from hermes_clm.recovery import recover_session
-from hermes_clm.store import DB_FILENAME, ContextStore
+from hermes_clm.store import DB_FILENAME
 
 CHILD = Path(__file__).with_name("store_crash_child.py")
 

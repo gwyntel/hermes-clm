@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from _clm_fakes import assistant_call, coding_turns, message, tool_result
-
 from hermes_clm.budget import (
     CALIBRATION_ALPHA,
     DEFAULT_RESERVE_TOKENS,

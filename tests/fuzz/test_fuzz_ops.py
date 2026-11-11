@@ -10,7 +10,6 @@ import os
 import random
 
 import pytest
-
 from _support import contract as C
 from _support.assertions import msg
 

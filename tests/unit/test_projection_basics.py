@@ -13,7 +13,6 @@ from _clm_fakes import (
     message,
     snapshot_for,
 )
-
 from hermes_clm.projection import offload_stub, project
 
 

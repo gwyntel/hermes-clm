@@ -22,8 +22,9 @@ from _clm_fakes import (
     snapshot_for,
     tool_result,
 )
-from hermes_clm.auxiliary import AuxCompressor, AuxLimits, canonical_proposal_sha256
+from hermes_clm.auxiliary import AuxCompressor, AuxLimits
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
+from hermes_clm.models import canonical_sha256
 
 SYSTEM_PROMPT = "You are Hermes. Follow the operator's instructions."
 
@@ -476,9 +477,14 @@ def test_real_store_proposal_roundtrip_with_a_mocked_aux_hash(tmp_path):
 
     assert proposed["ok"] is True, proposed
     proposal = proposed["proposal"]
-    expected_hash = canonical_proposal_sha256(
-        [{"kind": "rewrite", "span_ids": [target], "replacement": aux_client.rewrite_text}],
-        base_revision=revision,
+    expected_hash = canonical_sha256(
+        {
+            "base_revision": revision,
+            "operations": [
+                {"kind": "rewrite", "span_ids": [target], "replacement": aux_client.rewrite_text}
+            ],
+            "origin": "aux",
+        }
     )
     assert proposal["proposal_sha256"] == expected_hash
     assert proposal["base_revision"] == revision

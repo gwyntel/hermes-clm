@@ -16,7 +16,6 @@ import os
 import random
 
 import pytest
-
 from _support import contract as C
 from _support.adversarial import ROGUE_ROLES, SPOOF_BODIES, TEXT_TOOL_CALLS
 from _support.assertions import msg

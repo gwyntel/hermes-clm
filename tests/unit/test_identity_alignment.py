@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from _clm_fakes import assemble, assistant_call, message, tool_result
-
 from hermes_clm import identity
 from hermes_clm.identity import (
     absorbed_uids,
