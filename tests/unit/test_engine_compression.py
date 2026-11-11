@@ -12,7 +12,6 @@ from _clm_fakes import (
     snapshot_for,
     tool_result,
 )
-
 from hermes_clm.budget import estimate_messages_tokens
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
 
@@ -146,12 +145,52 @@ def test_overflow_offloads_the_oldest_unpinned_tool_group_and_commits():
     assert len(factory.store.commits) == 1
     staged_ops, expected_revision, txn_id, actor_origin = factory.store.staged[0]
     assert expected_revision == 1
-    assert actor_origin == "engine:overflow"
+    # Overflow is engine policy, so the actor must be a valid store actor.
+    assert actor_origin == "system"
     assert txn_id.startswith("overflow-")
     assert [op.kind for op in staged_ops] == ["offload"]
     assert set(staged_ops[0].span_ids) == {"a1", "t1"}
     assert factory.store.commits[0] == {"txn_id": txn_id, "expected_revision": 1}
     assert engine.compression_count == 1
+
+
+def test_overflow_uses_the_edit_operation_shape_the_store_accepts():
+    """A real ``EditOperation`` must be built, not the structural fallback."""
+    history = big_history()
+    engine, factory, _ = _overflow_engine(snapshot_for(history, [], revision=1), history)
+
+    engine.compress(history, bypass_cooldown=True)
+
+    staged_ops, _, _, actor_origin = factory.store.staged[0]
+    for operation in staged_ops:
+        # The fallback spec would carry no provenance and would be rejected by
+        # the store's coerce_operations(); the real type is importable here.
+        assert operation.__class__.__name__ == "EditOperation"
+        assert str(operation.actor_origin) == actor_origin == "system"
+
+
+def test_overflow_treats_pin_records_and_pin_mappings_as_pins():
+    """``StoreSnapshot.pins`` is ``Mapping[span_id, PinRecord]``; both pin shapes block offload."""
+    from hermes_clm.models import ActorOrigin, PinRecord
+
+    history = big_history()
+    as_sequence = snapshot_for(history, [], revision=1)
+    as_sequence.pins = (  # type: ignore[assignment]
+        PinRecord(span_id="a1", actor_origin=ActorOrigin.OPERATOR, revision=1),
+        PinRecord(span_id="t1", actor_origin=ActorOrigin.OPERATOR, revision=1),
+    )
+    as_mapping = snapshot_for(history, [], revision=1)
+    as_mapping.pins = {  # type: ignore[assignment]
+        "a1": PinRecord(span_id="a1", actor_origin=ActorOrigin.OPERATOR, revision=1),
+        "t1": PinRecord(span_id="t1", actor_origin=ActorOrigin.OPERATOR, revision=1),
+    }
+
+    for snapshot in (as_sequence, as_mapping):
+        engine, factory, before = _overflow_engine(snapshot, history)
+        result = engine.compress(history, bypass_cooldown=True)
+        assert "[clm.offloaded" not in "".join(str(row.get("content")) for row in result)
+        assert factory.store.commits == []
+        assert estimate_messages_tokens(result) == before
 
 
 def test_overflow_never_offloads_pinned_groups():

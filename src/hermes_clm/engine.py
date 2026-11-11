@@ -17,6 +17,7 @@ Nothing here edits the Hermes checkout, its config, or its database.
 from __future__ import annotations
 
 import copy
+import functools
 import importlib
 import json
 import uuid
@@ -24,13 +25,24 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import budget as _budget
+from .auxiliary import (
+    AuxCompressor,
+    AuxLimits,
+    bound_timeout,
+    canonical_proposal_sha256,
+)
 from .budget import TokenCalibration
+from .errors import CLMError
 from .projection import DEFAULT_MAX_REWRITE_BYTES, ProjectionResult, project
+from .tools import ToolHandlers, ToolLimits, build_tool_specs
 
 #: Default reserve kept free for the next completion.
 DEFAULT_RESERVE_TOKENS = _budget.DEFAULT_RESERVE_TOKENS
 #: Default pressure thresholds (fractions of the raw context length).
 DEFAULT_PRESSURE_THRESHOLDS: Tuple[float, ...] = _budget.DEFAULT_PRESSURE_THRESHOLDS
+#: Fields a proposal operation contributes to its aux digest.
+_PROPOSAL_OPERATION_FIELDS = ("kind", "span_ids", "replacement")
+
 #: How many recent projection/usage receipts the engine keeps in memory for status.
 RECEIPT_LIMIT = 20
 
@@ -205,6 +217,34 @@ class EngineConfig:
             hermes_home=_config_value(source, "hermes_home", None),
         )
 
+    @classmethod
+    def coerce(cls, config: EngineConfig | Mapping[str, Any] | None) -> EngineConfig:
+        """Accept an ``EngineConfig``, a flat ``clm.*`` mapping, or ``None``.
+
+        The plugin hands the engine the flat ``clm.*`` dict it read from the
+        profile config, so a mapping is a first-class input rather than a
+        programming error.
+        """
+        if config is None:
+            return cls()
+        if isinstance(config, cls):
+            return config
+        if isinstance(config, Mapping):
+            return cls.from_mapping(config)
+        raise TypeError(
+            f"config must be EngineConfig, mapping or None; got {type(config).__name__}"
+        )
+
+    def to_store_config(self) -> dict[str, Any]:
+        """Store limits derived from this config (``store.StoreConfig`` fields)."""
+        return {
+            "max_retrieve_bytes": self.max_retrieve_bytes,
+            "max_rewrite_bytes": self.max_rewrite_bytes,
+            "max_aux_spans": self.max_aux_spans,
+            "archive_redact": self.archive_redact,
+            "retention_sessions": self.retention_sessions,
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         """JSON-serializable config (no credentials can appear here)."""
         return {
@@ -234,7 +274,7 @@ class OperationSpec:
     replacement: Optional[str] = None
     expected_revision: int = 0
     txn_id: str = ""
-    actor_origin: str = "engine"
+    actor_origin: str = "agent"
     provenance: Optional[Mapping[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -266,15 +306,49 @@ class _SnapshotView:
     head_hash: str = ""
 
 
-def default_store_factory(hermes_home: Optional[str], session_id: str, *, read_only: bool = False):
+def default_store_factory(
+    hermes_home: str | None,
+    session_id: str,
+    *,
+    read_only: bool = False,
+    config: Any | None = None,
+):
     """Open a session store lazily.
 
     Imported inside the call so this package imports without the store package
     present. The store is never opened read-write by a projection.
+
+    ``config`` may be an :class:`EngineConfig`, a ``clm.*`` mapping or a store
+    config object; engine-derived limits (redaction, retention, retrieve/rewrite
+    bounds) are applied so the store and the tool surface agree on the same
+    numbers. Custom test factories keep the plain three-argument protocol.
     """
     module = importlib.import_module(".store", __package__)  # lazy: separate delivery unit
+    store_config = _store_config(module, config)
 
-    return module.ContextStore.for_session(hermes_home or "", session_id, read_only=read_only)
+    return module.ContextStore.for_session(
+        hermes_home or "", session_id, read_only=read_only, config=store_config
+    )
+
+
+def _store_config(module: Any, config: Any | None) -> Any:
+    """Coerce engine config into a ``store.StoreConfig`` (``None`` keeps defaults)."""
+    if config is None:
+        return None
+    if isinstance(config, EngineConfig):
+        payload: Mapping[str, Any] | None = config.to_store_config()
+    elif isinstance(config, Mapping):
+        payload = config
+    elif hasattr(config, "to_store_config"):  # pragma: no cover - defensive duck typing
+        payload = config.to_store_config()
+    else:
+        return config  # already a StoreConfig instance
+    if payload is None:  # pragma: no cover - defensive
+        return None
+    known = set(getattr(module.StoreConfig, "__dataclass_fields__", {}))
+    return module.StoreConfig(
+        **{key: value for key, value in dict(payload).items() if key in known}
+    )
 
 
 def _result_ok(result: Any, default: bool = True) -> bool:
@@ -286,15 +360,80 @@ def _result_ok(result: Any, default: bool = True) -> bool:
     return bool(getattr(result, "ok", default))
 
 
+def _pin_identifiers(pins: Any) -> set:
+    """Span ids and uids named by a snapshot's ``pins``.
+
+    Accepts the store's ``Mapping[span_id, PinRecord]``, a sequence of
+    ``PinRecord`` objects (use ``span_id``, never ``repr()``), a sequence of
+    mapping records, or plain id strings.
+    """
+    if pins is None:
+        return set()
+    if isinstance(pins, Mapping):
+        identifiers = {str(key) for key in pins}
+        for value in pins.values():
+            span_id = (
+                value.get("span_id")
+                if isinstance(value, Mapping)
+                else getattr(value, "span_id", None)
+            )
+            if isinstance(span_id, str) and span_id:
+                identifiers.add(span_id)
+        return identifiers
+    if isinstance(pins, str | bytes):
+        return {pins.decode() if isinstance(pins, bytes) else pins}
+    identifiers = set()
+    for item in pins:
+        if isinstance(item, str):
+            identifiers.add(item)
+            continue
+        span_id = (
+            item.get("span_id") if isinstance(item, Mapping) else getattr(item, "span_id", None)
+        )
+        if isinstance(span_id, str) and span_id:
+            identifiers.add(span_id)
+    return identifiers
+
+
+def _payload(result: Any, *, ok: bool = True) -> dict[str, Any]:
+    """Normalise a store result (mapping, dataclass, ``to_dict``) into a dict."""
+    if result is None:
+        return {"ok": ok, "errors": [], "receipts": []}
+    if isinstance(result, Mapping):
+        payload = dict(result)
+    elif hasattr(result, "to_dict"):
+        payload = dict(result.to_dict())
+    elif hasattr(result, "as_dict"):  # pragma: no cover - defensive
+        payload = dict(result.as_dict())
+    else:  # pragma: no cover - defensive
+        payload = dict(vars(result))
+    payload.setdefault("ok", ok)
+    if not isinstance(payload.get("errors"), list):
+        payload["errors"] = []
+    payload.setdefault("receipts", [])
+    return payload
+
+
 class ToolService:
     """Scoped store access for tool handlers.
 
     Tool handlers never see ``session_id``, paths, provider or model settings;
     they call these methods, which are bound to this engine's single session.
+    Results are JSON-serializable mappings so the tool layer can pass them
+    through without inspecting store dataclasses.
     """
 
     def __init__(self, engine: "CLMEngine") -> None:
         self._engine = engine
+
+    @property
+    def _proposal_hashes(self) -> dict[tuple[str, str], str]:
+        """``(proposal_id, aux digest) -> store digest`` on the owning engine.
+
+        Tool services are cheap and created per call, so the digest pair has to
+        live on the engine for a propose/accept pair to meet.
+        """
+        return self._engine._proposal_hashes
 
     def _require_store(self) -> Any:
         store = self._engine.store
@@ -302,13 +441,89 @@ class ToolService:
             raise RuntimeError("clm store is not attached for this session")
         return store
 
-    def status(self) -> Dict[str, Any]:
-        """Engine status including revision and budget."""
-        return self._engine.get_status()
+    def _call_store(self, name: str, /, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Delegate to one store API, turning typed store refusals into JSON.
 
-    def inspect(self, *, cursor: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+        Store errors carry a stable ``code``; converting them here keeps tool
+        receipts honest (``stale_revision`` rather than a generic internal error)
+        while still never letting an exception out of a handler.
+        """
+        store = self._require_store()
+        handler = getattr(store, name, None)
+        if not callable(handler):
+            raise RuntimeError(f"clm store does not implement {name}()")
+        try:
+            return _payload(handler(*args, **kwargs))
+        except CLMError as exc:
+            return {
+                "ok": False,
+                "revision": self._live_revision(store),
+                "errors": [exc.to_dict()],
+                "receipts": [],
+            }
+
+    @staticmethod
+    def _live_revision(store: Any) -> int:
+        """Head revision from the store itself, never a cached projection."""
+        try:
+            status = store.status()
+        except Exception:
+            return 0
+        if isinstance(status, Mapping):
+            revision = status.get("revision")
+        else:  # pragma: no cover - defensive
+            revision = getattr(status, "revision", None)
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            return 0
+        return revision
+
+    @property
+    def revision(self) -> int:
+        """Live head revision for this session (``0`` when no store is attached)."""
+        store = self._engine.store
+        if store is None:
+            return 0
+        return self._live_revision(store)
+
+    def status(self) -> dict[str, Any]:
+        """Engine status, with the revision read from the store's live head."""
+        payload = dict(self._engine.get_status())
+        store = self._engine.store
+        if store is not None:
+            payload["revision"] = self._live_revision(store)
+            try:
+                live = store.status()
+            except Exception as exc:
+                payload["store_health"] = {"ok": False, "error": type(exc).__name__}
+            else:
+                if isinstance(live, Mapping):
+                    health = live.get("health")
+                    if health is not None:
+                        payload["store_health"] = health
+                        payload["health"] = health
+                    for key in (
+                        "head_hash",
+                        "revision_kind",
+                        "counts",
+                        "est_tokens",
+                        "estimator",
+                        "spans_archived",
+                        "archive_entries",
+                        "operations_committed",
+                        "staged_transactions",
+                        "last_audit",
+                        "index",
+                        "read_only",
+                        "redaction",
+                        "limits",
+                    ):
+                        if key in live:
+                            payload[key] = live[key]
+        return payload
+
+    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
         """Bounded active-context view for this session only."""
-        return self._require_store().inspect(cursor=cursor, limit=limit)
+        return self._call_store("inspect", cursor=cursor, limit=limit)
 
     def stage(
         self,
@@ -317,18 +532,19 @@ class ToolService:
         expected_revision: int,
         txn_id: str,
         actor_origin: str = "agent",
-    ) -> Any:
+    ) -> dict[str, Any]:
         """Stage operations against the current revision."""
-        return self._require_store().stage(
-            operations,
+        return self._call_store(
+            "stage",
+            list(operations),
             expected_revision=expected_revision,
             txn_id=txn_id,
             actor_origin=actor_origin,
         )
 
-    def commit(self, *, txn_id: str, expected_revision: int) -> Any:
+    def commit(self, *, txn_id: str, expected_revision: int) -> dict[str, Any]:
         """Commit a staged transaction (idempotent replay by ``txn_id``)."""
-        return self._require_store().commit(txn_id=txn_id, expected_revision=expected_revision)
+        return self._call_store("commit", txn_id=txn_id, expected_revision=expected_revision)
 
     def discard(self, *, txn_id: str) -> None:
         """Drop a staged transaction without committing."""
@@ -341,24 +557,153 @@ class ToolService:
         expected_revision: int,
         txn_id: str,
         actor_origin: str = "operator",
-    ) -> Any:
+    ) -> dict[str, Any]:
         """Create a new head revision restoring an earlier projection."""
-        return self._require_store().revert(
+        return self._call_store(
+            "revert",
             target_revision=target_revision,
             expected_revision=expected_revision,
             txn_id=txn_id,
             actor_origin=actor_origin,
         )
 
-    def search(
-        self, query: str, *, cursor: Optional[str] = None, limit: int = 20
-    ) -> Dict[str, Any]:
+    def search(self, query: str, *, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         """Bounded archive search, current session only."""
-        return self._require_store().search(query, cursor=cursor, limit=limit)
+        return self._call_store("search", query, cursor=cursor, limit=limit)
 
-    def retrieve(self, span_id: str) -> Dict[str, Any]:
+    def retrieve(self, span_id: str) -> dict[str, Any]:
         """Exact archived detail for one span, current session only."""
-        return self._require_store().retrieve(span_id)
+        return self._call_store("retrieve", span_id)
+
+    # -- proposals --------------------------------------------------------- #
+
+    def create_proposal(
+        self, operations: Sequence[Any], base_revision: int | None = None
+    ) -> dict[str, Any]:
+        """Persist an immutable aux proposal for ``operations`` at ``base_revision``.
+
+        Plain mapping operations are stamped ``actor_origin="aux"``: the store
+        refuses operations whose actor disagrees with the calling actor, and an
+        auxiliary proposal is by definition an aux edit.
+
+        Two digests are in play for the same operations: the store's records
+        ``proposal_sha256``, and the auxiliary layer's own canonical form
+        (:func:`hermes_clm.auxiliary.canonical_proposal_sha256`) which it prints
+        for review. Both are deterministic over identical operation content, so
+        the service remembers the pair and accepts either hash later.
+        """
+        store = self._require_store()
+        base = self._live_revision(store) if base_revision is None else int(base_revision)
+        create = getattr(store, "create_proposal", None)
+        if not callable(create):
+            raise RuntimeError("clm store does not implement create_proposal()")
+        plain: list[dict[str, Any]] = []
+        prepared: list[Any] = []
+        for operation in operations:
+            if isinstance(operation, Mapping):
+                item = {
+                    key: operation[key] for key in _PROPOSAL_OPERATION_FIELDS if key in operation
+                }
+                plain.append(item)
+                prepared.append({**item, "actor_origin": "aux"})
+            else:  # pragma: no cover - EditOperation instances pass through
+                prepared.append(operation)
+        payload = _payload(create(prepared, base_revision=base))
+        store_hash = payload.get("proposal_sha256")
+        proposal_id = payload.get("proposal_id")
+        if plain and isinstance(store_hash, str) and isinstance(proposal_id, str):
+            aux_hash = canonical_proposal_sha256(plain, base_revision=base)
+            self._proposal_hashes[(proposal_id, aux_hash)] = store_hash
+            # The hash the agent reviews and echoes back is the auxiliary layer's
+            # canonical digest; the store's own digest travels beside it and both
+            # are accepted by ``accept_proposal``.
+            payload["store_proposal_sha256"] = store_hash
+            payload["proposal_sha256"] = aux_hash
+        return payload
+
+    def accept_proposal(
+        self,
+        *,
+        proposal_id: str,
+        proposal_sha256: str,
+        base_revision: int,
+        txn_id: str,
+    ) -> dict[str, Any]:
+        """Stage an accepted proposal; commit stays a separate step.
+
+        Accepts either digest recorded for this proposal: the store's own or the
+        auxiliary layer's canonical form of exactly those operations.
+        """
+        stored_hash = self._proposal_hashes.get((proposal_id, proposal_sha256))
+        return self._call_store(
+            "accept_proposal",
+            proposal_id=proposal_id,
+            proposal_sha256=stored_hash or proposal_sha256,
+            base_revision=base_revision,
+            txn_id=txn_id,
+        )
+
+    # -- operator authority ------------------------------------------------ #
+
+    def unpin(
+        self,
+        span_ids: Sequence[str],
+        *,
+        expected_revision: int,
+        txn_id: str,
+        actor_origin: str = "operator",
+    ) -> dict[str, Any]:
+        """Remove pins. Operator authority only: agents can pin, never unpin.
+
+        The store's ``unpin`` is per-span and each successful call bumps the head
+        revision, so a batch is applied one span at a time with derived
+        idempotency keys; the first refusal stops the batch and is reported.
+        """
+        if str(actor_origin) != "operator":
+            return {
+                "ok": False,
+                "errors": [
+                    {
+                        "code": "pin_authority",
+                        "message": "only the operator may unpin",
+                        "details": {"actor": str(actor_origin)},
+                    }
+                ],
+                "receipts": [],
+            }
+        store = self._require_store()
+        unpin = getattr(store, "unpin", None)
+        if not callable(unpin):
+            raise RuntimeError("clm store does not implement unpin()")
+        revision = int(expected_revision)
+        applied: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for index, span_id in enumerate(str(item) for item in span_ids):
+            try:
+                result = _payload(
+                    unpin(
+                        span_id,
+                        expected_revision=revision,
+                        txn_id=f"{txn_id}.{index}",
+                        actor_origin="operator",
+                    )
+                )
+            except CLMError as exc:
+                errors.append(exc.to_dict())
+                break
+            if result.get("ok") is False:
+                errors.extend(dict(item) for item in result.get("errors") or ())
+                break
+            revision = int(result.get("revision", revision))
+            applied.extend(dict(item) for item in result.get("applied") or ())
+        return {
+            "ok": not errors,
+            "revision": revision,
+            "applied": applied,
+            "inert": [],
+            "errors": errors,
+            "receipts": applied,
+        }
 
 
 class CLMEngine(_EngineBase):
@@ -374,19 +719,41 @@ class CLMEngine(_EngineBase):
     def __init__(
         self,
         *,
-        config: Optional[EngineConfig] = None,
+        config: Any | None = None,
         store_factory: Optional[Any] = None,
         hermes_home: Optional[str] = None,
         session_id: Optional[str] = None,
         logger: Optional[Any] = None,
+        aux: AuxCompressor | None = None,
+        raw_config: Mapping[str, Any] | None = None,
     ) -> None:
-        self.config = config or EngineConfig()
-        self._store_factory = store_factory or default_store_factory
+        # The plugin hands in the flat ``clm.*`` dict it read from the profile
+        # config; keep that mapping so ToolLimits sees every declared key.
+        self.config = EngineConfig.coerce(config)
+        if raw_config is not None:
+            self._raw_config: dict[str, Any] = dict(raw_config)
+        elif isinstance(config, Mapping):
+            self._raw_config = dict(config)
+        else:
+            self._raw_config = {f"clm.{key}": value for key, value in self.config.to_dict().items()}
+        self._store_factory = store_factory or functools.partial(
+            default_store_factory, config=self.config
+        )
         self._hermes_home = hermes_home or self.config.hermes_home
         self._session_id = session_id
         self._store: Any = None
         self._logger = logger
         self.calibration = TokenCalibration()
+        self._tool_limits = ToolLimits.from_config(self._raw_config)
+        # One auxiliary compressor per engine; clones share it so metric state is
+        # one view of one aux budget (it only ever runs the compression task).
+        self.aux: AuxCompressor = aux if aux is not None else self._build_aux()
+        self._tool_handlers = ToolHandlers(
+            self.service_for_session, limits=self._tool_limits, aux=self.aux
+        )
+        self._tool_specs: list[Any] | None = None
+        #: The two deterministic digest forms of each proposal's operations.
+        self._proposal_hashes: dict[tuple[str, str], str] = {}
         # Per-model threshold overrides; the host assigns this after construction.
         self.model_thresholds: Dict[str, float] = {}
         self._config_threshold_percent = float(getattr(self, "threshold_percent", 0.75) or 0.75)
@@ -399,6 +766,19 @@ class CLMEngine(_EngineBase):
         self.last_cache_read_tokens = 0
         self.last_cache_write_tokens = 0
         self.last_aux_metrics: Dict[str, Any] = {}
+
+    def _build_aux(self) -> AuxCompressor:
+        """Aux compressor from ``clm.*``: compression task only, bounded timeout."""
+        return AuxCompressor(
+            None,
+            timeout_seconds=bound_timeout(self.config.aux_timeout_seconds),
+            limits=AuxLimits(
+                max_spans=self._tool_limits.max_aux_spans,
+                max_rewrite_bytes=self._tool_limits.max_rewrite_bytes,
+                max_instruction_bytes=self._tool_limits.max_instruction_bytes,
+            ),
+            enabled=self.config.aux_enabled,
+        )
 
     # ------------------------------------------------------------------ identity
 
@@ -441,6 +821,28 @@ class CLMEngine(_EngineBase):
             return None
         return self._store
 
+    def service_for_session(self, session_id: str | None = None) -> ToolService | None:
+        """The scoped tool service for this engine's session, or ``None``.
+
+        * no argument (or the engine's own session id): attach the store lazily
+          and return a service bound to this engine;
+        * any other session id: ``None``. An engine never serves a second
+          session's store, so a subagent cannot read its parent's archive;
+        * an unbound engine adopts the first explicit session id it is asked
+          for, which is the host's lazy-init path for tool-first turns.
+        """
+        if session_id is not None:
+            session_id = str(session_id)
+            if self._session_id is None:
+                if self._store is not None:  # pragma: no cover - defensive
+                    return None
+                self._session_id = session_id
+            elif session_id != self._session_id:
+                return None
+        if self._ensure_store() is None:
+            return None
+        return ToolService(self)
+
     def on_session_start(self, session_id: str, **kwargs: Any) -> None:
         """Lazily attach the store for ``session_id`` (host calls this once per session)."""
         self._session_id = session_id or self._session_id
@@ -479,13 +881,21 @@ class CLMEngine(_EngineBase):
                 self._record_error(exc)
 
     def clone_for_agent(self) -> "CLMEngine":
-        """A fresh engine for another agent: no shared store, same durable home."""
+        """A fresh engine for another agent: no shared store, same durable home.
+
+        Nothing here deep-copies: the frozen config, the injected store factory
+        and the aux compressor are shared by reference, and the clone starts with
+        no store handle at all. The store is reopened for the clone's own session
+        on first use, so two agents never share SQLite objects or locks.
+        """
         clone = type(self)(
             config=self.config,
             store_factory=self._store_factory,
             hermes_home=self._hermes_home,
             session_id=None,
             logger=self._logger,
+            aux=self.aux,
+            raw_config=self._raw_config,
         )
         clone.context_length = self.context_length
         clone.threshold_percent = self.threshold_percent
@@ -495,6 +905,7 @@ class CLMEngine(_EngineBase):
         clone.last_total_tokens = self.last_total_tokens
         clone.last_cache_read_tokens = self.last_cache_read_tokens
         clone.last_cache_write_tokens = self.last_cache_write_tokens
+        clone.model_thresholds = dict(self.model_thresholds)
         clone.calibration = TokenCalibration(self.calibration.ratio)
         clone.calibration.samples = self.calibration.samples
         return clone
@@ -739,17 +1150,30 @@ class CLMEngine(_EngineBase):
         operations = [
             self._make_operation(
                 kind="offload",
-                span_ids=tuple(candidate.uids),
+                # Store span ids, not host uids: they differ once an archive row
+                # has been superseded, and the store only resolves span ids.
+                span_ids=tuple(candidate.edit_span_ids),
                 expected_revision=int(getattr(snapshot, "revision", 0) or 0),
                 txn_id=txn_id,
-                actor_origin="engine:overflow",
+                # "system" is a valid actor origin; overflow is engine policy, not
+                # an agent decision, and the store rejects unknown actors.
+                actor_origin="system",
             )
             for candidate in plan
         ]
         durable = self._commit_operations(
-            snapshot, operations, txn_id=txn_id, actor_origin="engine:overflow"
+            snapshot, operations, txn_id=txn_id, actor_origin="system"
         )
-        view = snapshot if durable else self._local_view(snapshot, operations, txn_id)
+        if durable:
+            # Re-read the committed head: the pre-commit snapshot cannot show it.
+            committed = self._snapshot()
+            view = (
+                committed
+                if committed is not None
+                else self._local_view(snapshot, operations, txn_id)
+            )
+        else:
+            view = self._local_view(snapshot, operations, txn_id)
         replayed = self._project(messages, messages, snapshot=view)
         if not replayed.ok:
             return projected
@@ -799,17 +1223,16 @@ class CLMEngine(_EngineBase):
         )
 
         spans = getattr(snapshot, "spans", {}) or {}
-        pins = getattr(snapshot, "pins", None)
-        pin_ids: set = set()
-        if isinstance(pins, Mapping):
-            pin_ids = {str(key) for key in pins}
-        elif isinstance(pins, (list, tuple, set, frozenset)):
-            pin_ids = {str(item) for item in pins}
+        pin_ids = _pin_identifiers(getattr(snapshot, "pins", None))
         by_uid: Dict[str, Any] = {}
+        by_span_id: dict[str, Any] = {}
         for key, span in (spans or {}).items():
             uid = getattr(span, "uid", None) or (key if isinstance(key, str) else None)
             if uid:
                 by_uid.setdefault(uid, span)
+            span_id = getattr(span, "span_id", None) or (key if isinstance(key, str) else None)
+            if span_id:
+                by_span_id.setdefault(span_id, span)
         groups = tool_groups(messages)
         rows = list(messages)
         uid_rows: Dict[str, Mapping[str, Any]] = {}
@@ -842,7 +1265,9 @@ class CLMEngine(_EngineBase):
                 for uid in members
             )
             pinned = any(
-                uid in pin_ids or getattr(by_uid.get(uid), "span_id", None) in pin_ids
+                uid in pin_ids
+                or getattr(by_uid.get(uid), "span_id", None) in pin_ids
+                or getattr(by_uid.get(uid), "uid", None) in pin_ids
                 for uid in members
             )
             tokens = sum(_budget.estimate_message_tokens(uid_rows.get(uid, {})) for uid in members)
@@ -851,6 +1276,16 @@ class CLMEngine(_EngineBase):
                     order=order,
                     group_id=group_id,
                     uids=tuple(members),
+                    # Store-facing ids: the snapshot span id when archived, else
+                    # the uid (which the projection also resolves).
+                    span_ids=tuple(
+                        str(
+                            getattr(by_uid.get(uid), "span_id", None)
+                            or getattr(by_uid.get(uid), "uid", None)
+                            or uid
+                        )
+                        for uid in members
+                    ),
                     tokens=tokens,
                     protected=protected or clipped,
                     pinned=pinned,
@@ -968,6 +1403,7 @@ class CLMEngine(_EngineBase):
                 "last_error": self._last_error,
                 "projection": self._last_projection.to_dict() if self._last_projection else None,
                 "receipts": list(self._last_receipts),
+                "aux": self.aux.metrics(),
                 "config": self.config.to_dict(),
             }
         )
@@ -979,27 +1415,59 @@ class CLMEngine(_EngineBase):
         """Scoped store access for the tool handlers."""
         return ToolService(self)
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        """Delegate tool schemas to the tools module when it is installed."""
-        try:
-            _tools = importlib.import_module(".tools", __package__)
+    def tool_specs(self) -> list[Any]:
+        """Tool advertisements (``ToolSpec``) for this engine, built once."""
+        if self._tool_specs is None:
+            self._tool_specs = list(build_tool_specs(self._tool_handlers))
+        return list(self._tool_specs)
 
-            provider = getattr(_tools, "get_tool_schemas", None)
-            if callable(provider):
-                return [dict(schema) for schema in (provider(self) or [])]
+    def _tool_handlers_by_name(self) -> dict[str, Any]:
+        return {spec.name: spec.handler for spec in self.tool_specs()}
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        """The ``clm_*`` schemas; empty (never raising) if the tools module fails."""
+        try:
+            return [dict(spec.schema) for spec in self.tool_specs()]
         except Exception as exc:
             self._record_error(exc)
-        return []
+            return []
 
-    def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs: Any) -> str:
-        """Delegate a tool call to the tools module; always returns JSON text."""
+    def handle_tool_call(
+        self,
+        name: str,
+        args: Any = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Dispatch one ``clm_*`` tool call; always returns a JSON string.
+
+        The handler maps to this engine's scoped service, so a call can only see
+        the session this engine owns. Extra ``session_id`` from the host is passed
+        through unchanged: a non-matching session resolves to ``None`` and gets a
+        ``no_session`` error instead of another session's archive.
+        """
         try:
-            _tools = importlib.import_module(".tools", __package__)
-
-            handler = getattr(_tools, "handle_tool_call", None)
-            if callable(handler):
-                return str(handler(self, name, args, **kwargs))
+            handler = self._tool_handlers_by_name().get(str(name))
+            if handler is None:
+                return json.dumps({"ok": False, "error": f"Unknown context engine tool: {name}"})
+            payload: dict[str, Any]
+            if isinstance(args, Mapping):
+                payload = dict(args)
+            elif isinstance(args, str) and args.strip():
+                decoded = json.loads(args)
+                payload = dict(decoded) if isinstance(decoded, Mapping) else {}
+            else:
+                payload = {}
+            if messages:
+                # A mid-turn tool call must see the rows that already arrived.
+                self._ingest(messages)
+            call_kwargs: dict[str, Any] = {"session_id": kwargs.pop("session_id", None)}
+            if messages is not None:
+                call_kwargs["messages"] = messages
+            call_kwargs.update(kwargs)
+            return str(handler(payload, **call_kwargs))
         except Exception as exc:
             self._record_error(exc)
-            return json.dumps({"error": f"clm tool dispatch failed: {type(exc).__name__}"})
-        return json.dumps({"error": f"Unknown context engine tool: {name}"})
+            return json.dumps(
+                {"ok": False, "error": f"clm tool dispatch failed: {type(exc).__name__}"}
+            )

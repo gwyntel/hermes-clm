@@ -132,18 +132,36 @@ def _span_index(snapshot: Any) -> Dict[str, Any]:
 
 
 def _pin_ids(snapshot: Any) -> frozenset:
-    """Pinned span/uid identifiers from either a mapping or a sequence."""
+    """Pinned span/uid identifiers from a mapping, ``PinRecord`` sequence or ids.
+
+    The store publishes ``pins`` as ``Mapping[span_id, PinRecord]``; a structural
+    snapshot may use a sequence instead. ``PinRecord.span_id`` is the identifier
+    in both cases — ``str(record)`` would never match a span.
+    """
     pins = _field(snapshot, "pins", None)
     if pins is None:
         return frozenset()
     if isinstance(pins, Mapping):
-        return frozenset(str(key) for key in pins.keys())
+        identifiers = {str(key) for key in pins.keys()}
+        for value in pins.values():
+            span_id = _field(value, "span_id", None)
+            if isinstance(span_id, str) and span_id:
+                identifiers.add(span_id)
+        return frozenset(identifiers)
     if isinstance(pins, (str, bytes)):
         return frozenset({pins.decode() if isinstance(pins, bytes) else pins})
+    identifiers = set()
     try:
-        return frozenset(str(item) for item in pins)
+        for item in pins:
+            if isinstance(item, str):
+                identifiers.add(item)
+                continue
+            span_id = _field(item, "span_id", None)
+            if isinstance(span_id, str) and span_id:
+                identifiers.add(span_id)
     except TypeError:  # pragma: no cover - defensive, store pins are iterable
         return frozenset()
+    return frozenset(identifiers)
 
 
 def _span_content(span: Any) -> Any:

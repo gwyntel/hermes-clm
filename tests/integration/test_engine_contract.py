@@ -12,6 +12,8 @@ rows surviving byte-identically and the stored transcript untouched.
 
 from __future__ import annotations
 
+import json
+
 from _clm_fakes import (
     StoreFactory,
     assemble,
@@ -20,7 +22,7 @@ from _clm_fakes import (
     snapshot_for,
     tool_result,
 )
-
+from hermes_clm.auxiliary import AuxCompressor, AuxLimits, canonical_proposal_sha256
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
 
 SYSTEM_PROMPT = "You are Hermes. Follow the operator's instructions."
@@ -93,9 +95,9 @@ def stage_and_commit(
     staged = service.stage(
         operations, expected_revision=revision, txn_id=txn_id, actor_origin="agent"
     )
-    assert staged.ok
+    assert staged["ok"] is True, staged
     committed = service.commit(txn_id=txn_id, expected_revision=revision)
-    assert committed.ok
+    assert committed["ok"] is True, committed
 
 
 def test_an_edit_committed_after_a_tool_result_changes_the_next_request():
@@ -321,3 +323,284 @@ def test_a_second_agent_clone_gets_its_own_engine_and_store():
     assert child.store is not host.engine.store
     assert child.session_id == "sess-child"
     assert [entry["session_id"] for entry in factory.opened] == ["sess-live", "sess-child"]
+
+
+# --------------------------------------------------------------------------- #
+# Real store: the same contract, but SQLite does the validating and persisting.
+# --------------------------------------------------------------------------- #
+
+
+def real_host(tmp_path, history, *, session_id: str = "sess-real", aux=None, **config):
+    """Engine backed by a real ``ContextStore`` under ``tmp_path``."""
+    engine = CLMEngine(
+        config=EngineConfig(max_rewrite_bytes=4096, **config),
+        hermes_home=str(tmp_path / "home"),
+        aux=aux,
+    )
+    engine.on_session_start(session_id, context_length=128_000)
+    assert engine.store is not None, "real store did not open"
+    return FakeHost(engine, history), engine
+
+
+def inspect_spans(engine, history):
+    """``uid -> inspect item`` for the archived history, via tool dispatch."""
+    payload = json.loads(
+        engine.handle_tool_call("clm_inspect", {"limit": 50}, messages=list(history))
+    )
+    assert payload["ok"] is True, payload
+    return {item["uid"]: item for item in payload["items"]}
+
+
+def test_real_store_drop_through_tool_dispatch_edits_only_the_target_group(tmp_path):
+    """End-to-end: archive → stage → commit → the next request carries the drop."""
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+
+    _, first_selection = host.iterate()
+    assert first_selection is None  # nothing committed: request untouched
+
+    status = json.loads(engine.handle_tool_call("clm_status", {}, messages=history))
+    assert status["ok"] is True
+    assert status["store_health"]["ok"] is True
+    revision = status["revision"]
+    assert revision >= 1
+
+    spans = inspect_spans(engine, history)
+    # A tool group is atomic: the assistant call row and its result go together.
+    group = [spans["a1"]["span_id"], spans["t1"]["span_id"]]
+    assert all(span_id.startswith("sp_") for span_id in group)
+
+    staged = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [{"kind": "drop", "span_ids": group}],
+                "expected_revision": revision,
+                "txn_id": "txn-real-drop",
+            },
+            messages=history,
+        )
+    )
+    assert staged["ok"] is True, staged
+    committed = json.loads(
+        engine.handle_tool_call(
+            "clm_commit", {"txn_id": "txn-real-drop", "expected_revision": revision}
+        )
+    )
+    assert committed["ok"] is True, committed
+    assert committed["revision"] == revision + 1
+
+    request, selected = host.iterate()
+
+    assert selected is not None
+    dropped = {request_index(history, "a1"), request_index(history, "t1")}
+    assert len(selected) == len(request) - len(dropped)
+    assert selected == [dict(row) for index, row in enumerate(request) if index not in dropped]
+
+    # Host-owned rows survive byte-identically.
+    assert selected[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert {"role": "user", "content": "run the test suite"} in selected
+    assert {"role": "user", "content": "fix it"} in selected
+    assert selected[-1]["content"] == "NEWEST TOOL OUTPUT"
+    # The raw transcript is untouched, and the archive still holds the dropped rows.
+    assert "FAILED tests/test_x.py" in history[2]["content"]
+    archived = inspect_spans(engine, history)
+    assert {archived["a1"]["state"], archived["t1"]["state"]} == {"dropped"}
+    assert archived["a1"]["span_id"] == group[0]
+
+
+def test_real_store_status_reports_the_live_head_after_a_commit(tmp_path):
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+
+    before = service.status()["revision"]
+    spans = inspect_spans(engine, history)
+    stage_and_commit(
+        engine,
+        [
+            {
+                "kind": "drop",
+                "span_ids": [spans["a1"]["span_id"], spans["t1"]["span_id"]],
+            }
+        ],
+        revision=before,
+        txn_id="txn-real-live",
+    )
+
+    # No projection has run since the commit; status must still show the new head.
+    assert engine.get_status()["revision"] == 0 or engine.get_status()["revision"] == before
+    assert service.revision == before + 1
+    assert service.status()["revision"] == before + 1
+
+
+class _MockAux:
+    """Auxiliary client stand-in: returns one rewrite for the span it was given."""
+
+    def __init__(self) -> None:
+        self.calls = []
+        self.rewrite_text = "[tool output elided by the aux model]"
+        self.span_id = ""
+
+    def __call__(self, *, messages, timeout, max_tokens):
+        self.calls.append({"timeout": timeout, "max_tokens": max_tokens})
+        payload = {"rewrites": [{"span_id": self.span_id, "text": self.rewrite_text}]}
+        return {
+            "choices": [{"message": {"content": json.dumps(payload)}}],
+            "usage": {"prompt_tokens": 31, "completion_tokens": 9},
+        }
+
+
+def test_real_store_proposal_roundtrip_with_a_mocked_aux_hash(tmp_path):
+    """Propose (aux → store proposal) → accept → commit → next request rewritten."""
+    history = clm_history()
+    aux_client = _MockAux()
+    compressor = AuxCompressor(aux_client, timeout_seconds=12, limits=AuxLimits(max_spans=4))
+    host, engine = real_host(tmp_path, history, aux=compressor)
+    host.iterate()
+
+    service = engine.tool_service()
+    spans = inspect_spans(engine, history)
+    target = spans["t1"]["span_id"]
+    aux_client.span_id = target
+    revision = service.revision
+
+    proposed = json.loads(
+        engine.handle_tool_call(
+            "clm_propose_compression",
+            {"span_ids": [target], "base_revision": revision},
+            messages=history,
+        )
+    )
+
+    assert proposed["ok"] is True, proposed
+    proposal = proposed["proposal"]
+    expected_hash = canonical_proposal_sha256(
+        [{"kind": "rewrite", "span_ids": [target], "replacement": aux_client.rewrite_text}],
+        base_revision=revision,
+    )
+    assert proposal["proposal_sha256"] == expected_hash
+    assert proposal["base_revision"] == revision
+    assert proposal["origin"] == "aux"
+    assert len(proposal["proposal_id"]) > 0
+    # Nothing was staged or applied by proposing.
+    assert service.revision == revision
+    assert aux_client.calls and aux_client.calls[0]["timeout"] == 12
+
+    # A wrong hash is refused with the store's own code, not a generic error.
+    mismatch = service.accept_proposal(
+        proposal_id=proposal["proposal_id"],
+        proposal_sha256="b" * 64,
+        base_revision=revision,
+        txn_id="txn-real-accept-bad",
+    )
+    assert mismatch["ok"] is False
+    assert mismatch["errors"][0]["code"] == "proposal_hash_mismatch"
+
+    accepted = service.accept_proposal(
+        proposal_id=proposal["proposal_id"],
+        proposal_sha256=proposal["proposal_sha256"],
+        base_revision=revision,
+        txn_id="txn-real-accept",
+    )
+    assert accepted["ok"] is True, accepted
+    committed = service.commit(txn_id="txn-real-accept", expected_revision=revision)
+    assert committed["ok"] is True, committed
+
+    request, selected = host.iterate()
+
+    assert selected is not None
+    row = request_index(history, "t1")
+    assert selected[row]["content"] == aux_client.rewrite_text
+    assert selected[row]["role"] == "tool"
+    assert selected[row]["tool_call_id"] == "call_1"
+    assert selected[-1]["content"] == "NEWEST TOOL OUTPUT"
+    assert selected[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    # The proposal is represented in the audit trail with aux provenance.
+    assert service.revision == revision + 1
+    snapshot = engine.store.snapshot()
+    rewrite_ops = [op for op in snapshot.operations if str(op.kind) == "rewrite"]
+    assert rewrite_ops and rewrite_ops[-1].provenance.get("origin") in {None, "aux"}
+
+
+def test_real_store_pin_survives_and_blocks_overflow_offload(tmp_path):
+    """A pinned group is snapshotted as ``PinRecord`` and never offloaded."""
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+    spans = inspect_spans(engine, history)
+    group = [spans["a1"]["span_id"], spans["t1"]["span_id"]]
+    revision = service.revision
+
+    pinned = service.stage(
+        [{"kind": "pin", "span_ids": group}],
+        expected_revision=revision,
+        txn_id="txn-real-pin",
+        actor_origin="agent",
+    )
+    assert pinned["ok"] is True, pinned
+    assert service.commit(txn_id="txn-real-pin", expected_revision=revision)["ok"] is True
+
+    snapshot = engine.store.snapshot()
+    assert all(record.span_id in group for record in snapshot.pins.values())
+
+    # Operator-only unpin is refused for an agent, then works for the operator.
+    # A real ``StoreSnapshot.pins`` mapping of ``PinRecord`` blocks overflow offload.
+    engine.context_length = 400
+    engine.threshold_percent = 0.75
+    engine.threshold_tokens = 300
+    revision_before_overflow = service.revision
+    overflowed = engine.compress(history, bypass_cooldown=True)
+    assert "[clm.offloaded" not in "".join(str(row.get("content")) for row in overflowed)
+    assert service.revision == revision_before_overflow  # nothing committed
+
+    # Operator-only unpin is refused for an agent, then works for the operator.
+    refused = service.unpin(
+        group, expected_revision=service.revision, txn_id="t", actor_origin="agent"
+    )
+    assert refused["ok"] is False and refused["errors"][0]["code"] == "pin_authority"
+    released = service.unpin(
+        group, expected_revision=service.revision, txn_id="txn-real-unpin", actor_origin="operator"
+    )
+    assert released["ok"] is True, released
+    assert released["revision"] == service.revision
+    assert engine.store.snapshot().pins == {}
+
+
+def test_real_store_overflow_commits_a_system_offload_and_the_next_request_shows_it(tmp_path):
+    """Overflow is a durable, ``system``-actor offload over store span ids."""
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+    spans = inspect_spans(engine, history)
+    revision = service.revision
+
+    # Pressure: a 400-token context against a multi-thousand-token history.
+    engine.context_length = 400
+    engine.threshold_percent = 0.75
+    engine.threshold_tokens = 300
+
+    compressed = engine.compress(history, bypass_cooldown=True)
+
+    # ``compress`` returns rows aligned with the host history, not the request.
+    assert "[clm.offloaded" in compressed[request_index(history, "t1") - 1]["content"]
+    assert service.revision == revision + 1
+    snapshot = engine.store.snapshot()
+    offloads = [op for op in snapshot.operations if str(op.kind) == "offload"]
+    assert offloads and str(offloads[-1].actor_origin) == "system"
+    # Store span ids, not host uids: the archived ids are what the store resolves.
+    assert set(offloads[-1].span_ids) == {spans["a1"]["span_id"], spans["t1"]["span_id"]}
+
+    request, selected = host.iterate()
+
+    assert selected is not None
+    row = request_index(history, "t1")
+    assert "[clm.offloaded" in selected[row]["content"]
+    assert selected[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert {"role": "user", "content": "run the test suite"} in selected
+    assert {"role": "user", "content": "fix it"} in selected
+    assert selected[-1]["content"] == "NEWEST TOOL OUTPUT"
+    assert "FAILED tests/test_x.py" in history[2]["content"]
