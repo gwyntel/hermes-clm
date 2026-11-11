@@ -2455,15 +2455,8 @@ class ContextStore:
                     )
                 if resolved_id not in resolved:
                     resolved.append(resolved_id)
-            pinned_rows = {
-                str(row[0])
-                for row in cur.execute(
-                    "SELECT span_id FROM pins WHERE span_id IN ("
-                    + ",".join("?" for _ in resolved)
-                    + ")",
-                    tuple(resolved),
-                )
-            }
+            all_pins = {str(row[0]) for row in cur.execute("SELECT span_id FROM pins").fetchall()}
+            pinned_rows = {span_id for span_id in resolved if span_id in all_pins}
             now = self._now()
             revision = head + 1
             head_row = self._head_row(cur)
