@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local CLM store data (never commit session databases or the derived index)
+**/clm/sessions/
+session.db
+session.db-wal
+session.db-shm
+active.json
+store.lock
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
