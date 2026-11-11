@@ -1,8 +1,10 @@
 """End-to-end flow through the registered tool surface.
 
-Uses the plugin registration (fake ctx, fake engine, fake store) so the path is the
-same one Hermes takes: named tool → handler → service. Proves the auxiliary
-proposal cannot apply itself and that a stale proposal is refused.
+Uses plugin registration (fake engine, fake store) plus the engine tool seam
+(``build_engine_handlers``) so the path is the same one Hermes takes: the engine
+advertises ``get_tool_schemas()`` and dispatches named calls into a handler bound
+to its own session service. Proves the auxiliary proposal cannot apply itself and
+that a stale proposal is refused.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import json
 from clm_fakes import FakeService, RecordingAuxClient, aux_json
 from test_plugin import FakeCtx, FakeEngine
 
+from hermes_clm import tools as tools_module
 from hermes_clm.auxiliary import AuxCompressor
 from hermes_clm.plugin import register
 
@@ -25,13 +28,12 @@ def build(revision: int = 2):
     service.add_span("m-0001", "verbose pytest output " * 40)
     engine.sessions["sess-1"] = service
     client = RecordingAuxClient(aux_json(REPLY))
-    register(
-        ctx,
-        engine=engine,
-        config={"clm.aux_enabled": True},
-        aux=AuxCompressor(client, timeout_seconds=20),
+    register(ctx, engine=engine, config={"clm.aux_enabled": True})
+    handlers = tools_module.build_engine_handlers(
+        engine, aux=AuxCompressor(client, timeout_seconds=20)
     )
-    tools = {tool["name"]: tool["handler"] for tool in ctx.tools}
+    specs = tools_module.build_tool_specs(handlers)
+    tools = {spec.name: spec.handler for spec in specs}
     return ctx, engine, service, client, tools
 
 

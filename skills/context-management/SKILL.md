@@ -15,6 +15,19 @@ CLM keeps the raw transcript immutable and projects a **revision** of it into th
 next provider request. Editing context is a transaction: inspect, stage, commit.
 Nothing you stage reaches the model until you commit it.
 
+## Enabling it
+
+- Install the directory as `$HERMES_HOME/plugins/hermes-clm/` and set
+  `context.engine: hermes-clm` in `config.yaml`. No `plugins.enabled` entry is
+  needed: directory discovery finds the entry point, which registers the
+  `ContextEngine` and the operator `/clm` command.
+- The `clm_*` tools come from the engine's `get_tool_schemas()`, injected into
+  the agent's toolset by the host. They are not separate plugin tools; do not
+  also register them with `register_tool` — duplicate names are the failure mode.
+- Configuration lives under `clm.*` in the profile config (`clm.aux_enabled`,
+  `clm.aux_timeout_seconds`, `clm.reserve_tokens`, …). No model, provider or
+  API key is ever read by this plugin.
+
 ## When to use
 
 - A long tool result is crowding the context and you will not need its details again.

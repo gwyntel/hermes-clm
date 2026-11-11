@@ -259,7 +259,7 @@ def _service(resolve_service: Callable[[str | None], Any] | None, session_id: st
         return None
     try:
         return resolve_service(session_id)
-    except Exception:  # noqa: BLE001 - a slash command never raises at the operator
+    except Exception:
         return None
 
 
@@ -270,7 +270,7 @@ def _result(method: Callable[..., Any] | None, *args: Any, **kwargs: Any) -> dic
         return None
     try:
         raw = method(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     if raw is None:
         return {}

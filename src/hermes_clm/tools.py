@@ -30,11 +30,13 @@ are *not* exposed as tools — see :mod:`hermes_clm.commands`.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import json
 import re
 import uuid
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -48,7 +50,10 @@ __all__ = [
     "ToolHandlers",
     "ToolLimits",
     "ToolSpec",
+    "build_engine_handlers",
     "build_tool_specs",
+    "get_tool_schemas",
+    "handle_tool_call",
 ]
 
 TOOLSET = "clm"
@@ -192,7 +197,7 @@ def _guarded(method: Callable[..., Mapping[str, Any]]) -> Callable[..., str]:
             return _dump(payload)
         except _Invalid as exc:
             return _dump(exc.payload())
-        except Exception as exc:  # noqa: BLE001 - never leak a traceback to the model
+        except Exception as exc:
             return _dump(error_payload("internal_error", _sanitise_exception(exc)))
 
     return wrapper
@@ -978,3 +983,185 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
             handlers.accept_proposal,
         ),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Context-engine seam
+# --------------------------------------------------------------------------- #
+#
+# Hermes reaches a directory-loaded context engine through
+# ``engine.get_tool_schemas()`` and ``engine.handle_tool_call(name, args, **kw)``
+# (``agent/agent_init.py:_inject_context_engine_tools``,
+# ``agent/tool_executor.py``).  The engine delegates those two calls to this
+# module, so the adapters below are the only bridge between the host contract
+# and :class:`ToolHandlers`.  They add no authority: the same strict handlers
+# run, bound to the engine's *own* session-scoped service.
+
+_DEFAULT = object()
+
+
+@dataclass(frozen=True)
+class _EngineToolset:
+    """One engine's handlers plus the prebuilt dispatch table and schemas."""
+
+    handlers: ToolHandlers
+    by_name: Mapping[str, Callable[..., str]]
+    schemas: tuple[dict[str, Any], ...]
+
+
+#: Per-engine cache: rebuilding handlers on every tool call would reset aux
+#: metrics and re-read config.  Weak keys keep cloned engines collectable.
+_ENGINE_TOOLSETS: weakref.WeakKeyDictionary[Any, _EngineToolset] = weakref.WeakKeyDictionary()
+
+
+def _engine_config(engine: Any) -> dict[str, Any]:
+    """Flat ``clm.*`` view of the engine's config, whether mapping or dataclass."""
+
+    raw = getattr(engine, "config", None)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    converter = getattr(raw, "to_dict", None)
+    if callable(converter):
+        try:
+            converted = converter()
+        except Exception:
+            return {}
+        return dict(converted) if isinstance(converted, Mapping) else {}
+    return {}
+
+
+def _config_value(config: Mapping[str, Any], key: str, default: Any) -> Any:
+    """Read ``clm.<key>`` or a bare ``<key>`` (engine dataclasses use bare names)."""
+
+    full = f"clm.{key}"
+    return config[full] if full in config else config.get(key, default)
+
+
+def _config_bool(config: Mapping[str, Any], key: str, default: bool) -> bool:
+    value = _config_value(config, key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _engine_aux(config: Mapping[str, Any]) -> Any:
+    """Auxiliary compressor for engine-owned tools, built from ``clm.*`` only.
+
+    The host gives a directory-loaded engine no LLM lane (``ctx.llm`` is not on
+    ``_EngineCollector``), so the default client is the in-process auxiliary
+    route the host's own compressor uses.  Provider/model selection stays
+    host-owned; nothing here names one.
+    """
+
+    try:
+        from .auxiliary import AuxCompressor, AuxLimits, bound_timeout
+    except Exception:  # pragma: no cover - auxiliary is stdlib-only
+        return None
+    limits = ToolLimits.from_config(config)
+    return AuxCompressor(
+        None,
+        timeout_seconds=bound_timeout(_config_value(config, "aux_timeout_seconds", 45.0)),
+        limits=AuxLimits(
+            max_spans=limits.max_aux_spans,
+            max_rewrite_bytes=limits.max_rewrite_bytes,
+            max_instruction_bytes=limits.max_instruction_bytes,
+        ),
+        enabled=_config_bool(config, "aux_enabled", True),
+    )
+
+
+def _engine_service(engine: Any) -> Callable[[str | None], Any]:
+    """Resolver for the engine's *current* session service.
+
+    ``service_for_session`` is the documented seam; ``tool_service()`` is the
+    host engine's per-instance binder and covers engines that own exactly one
+    session (the usual case for a per-agent clone).
+    """
+
+    def resolve(session_id: str | None = None) -> Any:
+        resolver = getattr(engine, "service_for_session", None)
+        if callable(resolver):
+            try:
+                service = resolver(session_id)
+            except Exception:
+                service = None
+            if service is not None:
+                return service
+        factory = getattr(engine, "tool_service", None)
+        if callable(factory):
+            try:
+                return factory()
+            except Exception:
+                return None
+        return None
+
+    return resolve
+
+
+def build_engine_handlers(engine: Any, *, aux: Any = _DEFAULT) -> ToolHandlers:
+    """Handlers bound to ``engine``'s session service (``aux`` overrides the default)."""
+
+    config = _engine_config(engine)
+    return ToolHandlers(
+        _engine_service(engine),
+        limits=ToolLimits.from_config(config),
+        aux=_engine_aux(config) if aux is _DEFAULT else aux,
+    )
+
+
+def _build_engine_toolset(engine: Any, aux: Any = _DEFAULT) -> _EngineToolset:
+    handlers = build_engine_handlers(engine, aux=aux)
+    specs = build_tool_specs(handlers)
+    return _EngineToolset(
+        handlers=handlers,
+        by_name={spec.name: spec.handler for spec in specs},
+        schemas=tuple(dict(spec.schema) for spec in specs),
+    )
+
+
+def engine_toolset(engine: Any, *, aux: Any = _DEFAULT) -> _EngineToolset:
+    """Cached toolset for ``engine`` (uncached when ``aux`` is injected by a test)."""
+
+    if aux is _DEFAULT:
+        try:
+            cached = _ENGINE_TOOLSETS.get(engine)
+        except TypeError:  # unhashable/unweakref-able engine stand-in
+            cached = None
+        if cached is not None:
+            return cached
+    toolset = _build_engine_toolset(engine, aux)
+    if aux is _DEFAULT:
+        try:
+            _ENGINE_TOOLSETS[engine] = toolset
+        except TypeError:
+            pass
+    return toolset
+
+
+def get_tool_schemas(engine: Any) -> list[dict[str, Any]]:
+    """Tool advertisements for ``engine.get_tool_schemas()``."""
+
+    return [copy.deepcopy(schema) for schema in engine_toolset(engine).schemas]
+
+
+def handle_tool_call(engine: Any, name: str, args: Any, **kwargs: Any) -> str:
+    """Dispatch one host tool call; always returns a JSON string."""
+
+    toolset = engine_toolset(engine)
+    handler = toolset.by_name.get(name) if isinstance(name, str) else None
+    if handler is None:
+        return _dump(
+            error_payload(
+                "unknown_tool",
+                f"unknown CLM tool: {name}",
+                hint=f"available: {', '.join(sorted(toolset.by_name))}",
+            )
+        )
+    session_id = kwargs.get("session_id") or getattr(engine, "session_id", None)
+    return handler(args if args is not None else {}, session_id=session_id)

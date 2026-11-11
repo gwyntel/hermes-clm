@@ -186,6 +186,16 @@ def test_unpin_is_operator_only_and_reports_the_new_revision():
     assert kwargs["expected_revision"] == 8
 
 
+def test_unpin_passes_one_span_list_for_a_batch():
+    """The store's batch unpin takes one list and commits one revision."""
+
+    service = FakeService(revision=4)
+    text = run("unpin m-0001 m-0002 m-0003", service=service)
+    assert "unpinned m-0001, m-0002, m-0003" in text and "revision 5" in text
+    assert service.args_for("unpin") == (["m-0001", "m-0002", "m-0003"],)
+    assert service.names().count("unpin") == 1, "one atomic batch call, not one per span"
+
+
 def test_unpin_requires_span_ids():
     text = run("unpin", service=FakeService())
     assert "usage" in text.lower()
