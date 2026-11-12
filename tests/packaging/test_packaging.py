@@ -218,17 +218,20 @@ def test_plugin_manifest_agrees_with_the_package() -> None:
     assert ENGINE_NAME == "hermes-clm"
 
 
-def test_plugin_manifest_declares_the_shipped_tool_surface() -> None:
+def test_plugin_manifest_does_not_claim_engine_tools_as_plugin_registrations() -> None:
+    """Engine tools ship via ``get_tool_schemas``, not ``ctx.register_tool``.
+
+    ``provides_tools`` describes what ``register()`` adds to the plugin tool
+    registry; listing the engine surface there makes ``hermes plugins doctor``
+    report a warn-level drift for every tool.
+    """
+
     from hermes_clm.tools import ToolHandlers, build_tool_specs
 
     specs = build_tool_specs(ToolHandlers(lambda session_id: None))
     manifest = (REPO_ROOT / "plugin.yaml").read_text()
-    declared = {
-        line.strip().removeprefix("- ").strip()
-        for line in manifest.splitlines()
-        if line.strip().startswith("- clm_")
-    }
-    assert declared == {spec.name for spec in specs}, "plugin.yaml tool list drifted"
+    assert "provides_tools:" not in manifest
+    assert len(specs) == 12
 
 
 def test_source_manifest_carries_the_plugin_scaffold() -> None:

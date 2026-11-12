@@ -160,7 +160,7 @@ def test_fallback_lane_registers_the_same_tools_without_an_engine():
     assert ctx.engines == []
     assert len(ctx.tools) == 12
     assert all(tool["toolset"] == TOOLSET for tool in ctx.tools)
-    assert {tool["name"] for tool in ctx.tools} == set(_manifest_tools())
+    assert {tool["name"] for tool in ctx.tools} == set(_clm_tool_names())
     assert [command["name"] for command in ctx.commands] == ["clm"]
     assert runtime.engine is engine
 
@@ -214,7 +214,7 @@ def test_no_tool_name_the_engine_owns_is_registered_in_the_dual_lane():
     ctx = GeneralLaneCtx()
     register(ctx, config={}, engine_selected=True)
     registered = {tool["name"] for tool in ctx.tools}
-    assert registered == set(), registered & set(_manifest_tools())
+    assert registered == set(), registered & set(_clm_tool_names())
 
 
 def test_dual_enablement_reads_the_selection_from_the_profile(monkeypatch):
@@ -253,7 +253,7 @@ def test_plugins_only_fallback_keeps_its_tools_and_command_when_not_selected():
     runtime = register(ctx, config={}, engine_selected=False)
 
     assert len(ctx.tools) == 12
-    assert {tool["name"] for tool in ctx.tools} == set(_manifest_tools())
+    assert {tool["name"] for tool in ctx.tools} == set(_clm_tool_names())
     assert [command["name"] for command in ctx.commands] == ["clm"]
     assert len(ctx.sections) == 1
     assert runtime.deferred_to_engine is False
@@ -281,24 +281,35 @@ def test_engine_lane_is_unaffected_by_the_deferral():
     assert runtime.deferred_to_engine is False and runtime.engine is engine
 
 
-def _manifest_tools() -> list[str]:
-    """Read ``provides_tools`` without a YAML dependency."""
+def _clm_tool_names() -> set[str]:
+    """The CLM tool surface, sourced from the engine rather than the manifest."""
 
-    lines = PLUGIN_YAML.read_text(encoding="utf-8").splitlines()
-    tools: list[str] = []
-    in_block = False
-    for line in lines:
-        if line.startswith("provides_tools:"):
-            in_block = True
-            continue
-        if in_block:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if not stripped.startswith("- "):
-                break
-            tools.append(stripped[2:].strip())
-    return tools
+    from hermes_clm import tools as tools_module
+    from hermes_clm.plugin import build_engine
+
+    return {schema["name"] for schema in tools_module.get_tool_schemas(build_engine({}))}
+
+
+def test_manifest_does_not_declare_engine_tools_as_provided_by_register():
+    """``provides_tools`` is a plugin-lane contract; engine tools are not registered there.
+
+    Hermes documents engine tools as exposed via ``get_tool_schemas()`` with "no
+    registry registration needed", and ``hermes plugins doctor`` diffs
+    ``provides_tools`` against ``register_tool`` calls only — declaring the engine
+    surface here produces twelve structurally guaranteed false warnings.
+    """
+
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load(PLUGIN_YAML.read_text(encoding="utf-8"))
+    assert "provides_tools" not in data
+    assert all(key.startswith("clm.") for key in data["config_keys"])
+    assert data["kind"] == "standalone"
+
+
+def test_engine_still_advertises_the_full_tool_surface():
+    ctx, _, _ = fallback_ctx()
+    assert len(ctx.tools) == 12
+    assert {tool["name"] for tool in ctx.tools} == _clm_tool_names()
 
 
 def test_every_registered_tool_has_a_closed_strict_schema():
@@ -363,7 +374,7 @@ def test_engine_lane_tools_come_from_the_engine_tool_schemas():
     engine = EngineWithService()
     engine.sessions["sess-a"] = FakeService(revision=3)
     schemas = tools_module.get_tool_schemas(engine)
-    assert {schema["name"] for schema in schemas} == set(_manifest_tools())
+    assert {schema["name"] for schema in schemas} == set(_clm_tool_names())
 
     payload = load(tools_module.handle_tool_call(engine, "clm_status", {}, messages=[]))
     assert payload["ok"] is True
@@ -543,13 +554,12 @@ def test_plugin_module_does_not_import_hermes():
 # --------------------------------------------------------------------------- #
 
 
-def test_manifest_tool_list_matches_registration():
+def test_manifest_metadata_is_valid():
     yaml = pytest.importorskip("yaml")
     data = yaml.safe_load(PLUGIN_YAML.read_text(encoding="utf-8"))
-    ctx, _, _ = fallback_ctx()
-    assert set(data["provides_tools"]) == {tool["name"] for tool in ctx.tools}
     assert all(key.startswith("clm.") for key in data["config_keys"])
     assert data["kind"] == "standalone"
+    assert data["name"] == "hermes-clm"
 
 
 SKILL_MD = REPO_ROOT / "skills" / "context-management" / "SKILL.md"
