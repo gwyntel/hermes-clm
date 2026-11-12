@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Run Release Please
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           # Org policy currently blocks GITHUB_TOKEN from opening release PRs.
           # Set a RELEASE_PLEASE_TOKEN secret (fine-grained PAT: contents +
