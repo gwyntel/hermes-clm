@@ -30,6 +30,7 @@ import base64
 import copy
 import errno
 import fcntl
+import functools
 import json
 import os
 import re
@@ -284,6 +285,27 @@ def _harden_file(path: Path) -> None:
         )
     if stat.S_IMODE(st.st_mode) != 0o600:
         os.chmod(path, 0o600)
+
+
+def _serialized(method):
+    """Serialise every use of the shared sqlite connection.
+
+    The store keeps one connection (``check_same_thread=False``) and a
+    re-entrant lock.  Write paths already hold that lock for the whole
+    transaction, but read surfaces used to touch the connection without it,
+    so a reader could interleave statements with another thread's open
+    transaction — sqlite then returns truncated/empty result sets, which
+    surfaced as ``TypeError``/``IndexError``/``CorruptStoreError`` under
+    concurrency.  Callers that already hold the lock are unaffected because
+    the lock is re-entrant.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 def _acquire_writer_lock(lock_path: Path) -> int:
@@ -889,6 +911,7 @@ class ContextStore:
         self._generation += 1
         self._snapshot_cache = None
 
+    @_serialized
     def _read_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
@@ -2936,6 +2959,7 @@ class ContextStore:
                 },
             }
 
+    @_serialized
     def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
         """Bounded, session-scoped view of current spans (never cross-session)."""
 
@@ -2989,6 +3013,7 @@ class ContextStore:
             "limit": n,
         }
 
+    @_serialized
     def search(self, query: str, *, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         """Substring search over this session's archive only."""
 
@@ -3047,6 +3072,7 @@ class ContextStore:
             "limit": n,
         }
 
+    @_serialized
     def retrieve(self, span_id: str) -> dict[str, Any]:
         """Exact archived detail for one span of **this** session only."""
 
@@ -3116,11 +3142,13 @@ class ContextStore:
         finally:
             cur.close()
 
+    @_serialized
     def _revision_read(self) -> int:
         row = self._conn.execute("SELECT MAX(revision) FROM revisions").fetchone()
         return int(row[0] or 0)
 
     # -- integrity / recovery primitives ---------------------------------
+    @_serialized
     def verify(self) -> dict[str, Any]:
         """Full integrity pass: payload hashes, archive chain, revision chain.
 
@@ -3208,6 +3236,7 @@ class ContextStore:
             "archive_entries": len(rows),
         }
 
+    @_serialized
     def verify_chain(self) -> dict[str, Any]:
         """Bounded hash-chain verification (revision chain + archive chain).
 
@@ -3282,6 +3311,7 @@ class ContextStore:
             "problems": problems,
         }
 
+    @_serialized
     def _verify_state_consistency_from_scratch(self) -> list[dict[str, Any]]:
         """Consistency check against the replayed chain (used by recovery)."""
 
@@ -3399,6 +3429,7 @@ class ContextStore:
         return {"changed": changed, "revision": head}
 
     # -- derived index ----------------------------------------------------
+    @_serialized
     def _index_payload(self) -> dict[str, Any]:
         cur = self._conn.cursor()
         try:
@@ -3450,7 +3481,7 @@ class ContextStore:
         path = self._dir / INDEX_FILENAME
         try:
             payload = self._index_payload()
-            tmp = self._dir / f".{INDEX_FILENAME}.{os.getpid()}.tmp"
+            tmp = self._dir / f".{INDEX_FILENAME}.{os.getpid()}.{threading.get_ident()}.tmp"
             data = canonical_json(payload).encode("utf-8")
             fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC, 0o600)
             try:

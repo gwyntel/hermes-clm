@@ -141,6 +141,97 @@ class ConcurrencyTests(kit.StoreTestCase):
         )
         self.assertEqual(store.snapshot().revision, 2)
 
+    def test_repeated_cas_races_never_leak_reader_or_sqlite_errors(self) -> None:
+        """Regression: unlocked read surfaces interleaved with a live write txn.
+
+        A reader touching the shared connection while another thread held an
+        open transaction used to see truncated result sets, so the losing
+        committer surfaced ``IndexError``/``TypeError``/``CorruptStoreError``
+        instead of a clean ``stale_revision``.
+        """
+
+        store = self.open_store()
+        ids = self.ingest(store)
+        for round_no in range(25):
+            head = store.snapshot().revision
+            store.stage(
+                [kit.EditOperation(kind=kit.EditKind.DROP, span_ids=(ids["u-a2"],))],
+                expected_revision=head,
+                txn_id=f"round-{round_no}-a",
+                actor_origin="agent",
+            )
+            store.stage(
+                [kit.EditOperation(kind=kit.EditKind.DROP, span_ids=(ids["u-a1"], ids["u-t1"]))],
+                expected_revision=head,
+                txn_id=f"round-{round_no}-b",
+                actor_origin="agent",
+            )
+            outcomes: list[str] = []
+
+            def run(txn_id: str, base: int = head, bucket: list[str] = outcomes) -> None:
+                try:
+                    store.commit(txn_id=txn_id, expected_revision=base)
+                    bucket.append(f"ok:{txn_id}")
+                except Exception as exc:  # noqa: BLE001 - recorded for assertion
+                    bucket.append(f"{getattr(exc, 'code', type(exc).__name__)}:{txn_id}")
+
+            threads = [
+                threading.Thread(target=run, args=(txn,))
+                for txn in (f"round-{round_no}-a", f"round-{round_no}-b")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+            self.assertEqual(
+                sorted(item.split(":")[0] for item in outcomes),
+                ["ok", "stale_revision"],
+                (round_no, outcomes),
+            )
+            self.assertEqual(store.snapshot().revision, head + 1)
+
+    def test_readers_never_see_a_partial_commit(self) -> None:
+        """Concurrent read surfaces stay consistent while commits are applied."""
+
+        store = self.open_store()
+        ids = self.ingest(store)
+        stop = threading.Event()
+        errors: list[str] = []
+
+        def read_loop() -> None:
+            while not stop.is_set():
+                try:
+                    snapshot = store.snapshot()
+                    self.assertGreaterEqual(snapshot.revision, 1)
+                    self.assertEqual(len(snapshot.spans), 6)
+                    store.status()
+                    store.inspect(limit=5)
+                    store.search("refactor", limit=5)
+                    store.verify_chain()
+                    store.index_status()
+                except Exception as exc:  # noqa: BLE001 - recorded for assertion
+                    errors.append(repr(exc))
+                    return
+
+        readers = [threading.Thread(target=read_loop) for _ in range(3)]
+        for reader in readers:
+            reader.start()
+        try:
+            for round_no in range(20):
+                head = store.snapshot().revision
+                store.stage(
+                    [kit.EditOperation(kind=kit.EditKind.DROP, span_ids=(ids["u-a2"],))],
+                    expected_revision=head,
+                    txn_id=f"reader-round-{round_no}",
+                    actor_origin="agent",
+                )
+                store.commit(txn_id=f"reader-round-{round_no}", expected_revision=head)
+        finally:
+            stop.set()
+            for reader in readers:
+                reader.join(timeout=30)
+        self.assertEqual(errors, [])
+
     def test_parallel_ingest_is_serialised_and_idempotent(self) -> None:
         store = self.open_store()
         errors: list[str] = []
