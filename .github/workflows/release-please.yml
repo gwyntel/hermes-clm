@@ -21,5 +21,9 @@ jobs:
       - name: Run Release Please
         uses: googleapis/release-please-action@v4
         with:
+          # Org policy currently blocks GITHUB_TOKEN from opening release PRs.
+          # Set a RELEASE_PLEASE_TOKEN secret (fine-grained PAT: contents +
+          # pull-requests write) to re-enable automated release PRs.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
