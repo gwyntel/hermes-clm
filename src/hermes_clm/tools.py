@@ -271,6 +271,21 @@ def _optional_text(args: Mapping[str, Any], key: str, *, max_bytes: int) -> str 
     return _require_text(args, key, max_bytes=max_bytes, allow_empty=False)
 
 
+def _optional_cursor(args: Mapping[str, Any], key: str = "cursor") -> str | None:
+    """Pagination cursor where absent, ``null`` and ``""`` all mean "first page".
+
+    The store decodes ``None`` and ``""`` identically (``store._decode_cursor``
+    returns the initial position for both), and models routinely spell "no
+    cursor" as an empty string, so the tool boundary normalises all three
+    spellings instead of rejecting the one the schema does not advertise.
+    A real cursor is never empty: it is base64 of a JSON payload.
+    """
+
+    if key not in args or args.get(key) is None or args.get(key) == "":
+        return None
+    return _require_text(args, key, max_bytes=256, allow_empty=False)
+
+
 def _span_id(value: Any, *, field: str = "span_id") -> str:
     if not isinstance(value, str) or not value.strip():
         raise _Invalid("invalid_field", f"{field} must be a non-empty string")
@@ -503,7 +518,7 @@ class ToolHandlers:
         self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
     ) -> Mapping[str, Any]:
         _check_keys(args, allowed=("cursor", "limit"))
-        cursor = _optional_text(args, "cursor", max_bytes=256)
+        cursor = _optional_cursor(args)
         limit = _optional_int(args, "limit", 50, maximum=self.limits.inspect_limit_max)
         return self._call(self._service(session_id), "inspect", cursor=cursor, limit=limit)
 
@@ -513,7 +528,7 @@ class ToolHandlers:
     ) -> Mapping[str, Any]:
         _check_keys(args, allowed=("query", "cursor", "limit"), required=("query",))
         query = _require_text(args, "query", max_bytes=512)
-        cursor = _optional_text(args, "cursor", max_bytes=256)
+        cursor = _optional_cursor(args)
         limit = _optional_int(args, "limit", 20, maximum=self.limits.search_limit_max)
         return self._call(self._service(session_id), "search", query, cursor=cursor, limit=limit)
 
@@ -806,8 +821,11 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "cursor": {
-                        "type": "string",
-                        "description": "Opaque cursor from a previous page.",
+                        "type": ["string", "null"],
+                        "description": (
+                            "Opaque cursor from a previous page. Omit it, pass null, "
+                            "or pass an empty string to request the first page."
+                        ),
                     },
                     "limit": {
                         "type": "integer",
@@ -892,7 +910,13 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "cursor": {"type": "string"},
+                    "cursor": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Opaque cursor from a previous page. Omit it, pass null, "
+                            "or pass an empty string to request the first page."
+                        ),
+                    },
                     "limit": {
                         "type": "integer",
                         "minimum": 1,

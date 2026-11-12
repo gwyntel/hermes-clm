@@ -423,6 +423,53 @@ def test_inspect_passes_bounded_limit(handlers: ToolHandlers, service: FakeServi
     assert service.kwargs_for("inspect") == {"cursor": "c1", "limit": 7}
 
 
+def test_inspect_treats_omitted_null_and_empty_cursor_as_the_first_page(
+    handlers: ToolHandlers, service: FakeService
+):
+    """Regression: the schema advertises a string, models spell "no cursor" as "".
+
+    ``store._decode_cursor`` already treats ``None`` and ``""`` as the initial
+    position; the tool boundary used to reject ``""`` before it got there, so a
+    first-page request failed even though every layer below accepted it.
+    """
+
+    for args in ({}, {"cursor": None}, {"cursor": ""}):
+        payload = load(handlers.inspect(dict(args)))
+        assert payload["ok"] is True, args
+        assert service.kwargs_for("inspect")["cursor"] is None, args
+
+
+def test_search_treats_omitted_null_and_empty_cursor_as_the_first_page(
+    handlers: ToolHandlers, service: FakeService
+):
+    for args in (
+        {"query": "traceback"},
+        {"query": "traceback", "cursor": None},
+        {"query": "traceback", "cursor": ""},
+    ):
+        payload = load(handlers.search(dict(args)))
+        assert payload["ok"] is True, args
+        assert service.kwargs_for("search")["cursor"] is None, args
+
+
+def test_cursor_rejects_wrong_types_and_overlong_values(handlers: ToolHandlers):
+    assert load(handlers.inspect({"cursor": 123}))["errors"][0]["code"] == "invalid_field"
+    assert load(handlers.inspect({"cursor": "x" * 257}))["errors"][0]["code"] == "limit_exceeded"
+    assert (
+        load(handlers.search({"query": "q", "cursor": False}))["errors"][0]["code"]
+        == "invalid_field"
+    )
+
+
+def test_cursor_schema_admits_null_and_documents_the_first_page(handlers: ToolHandlers):
+    for spec in build_tool_specs(handlers):
+        if spec.name not in {"clm_inspect", "clm_search"}:
+            continue
+        cursor = spec.schema["parameters"]["properties"]["cursor"]
+        assert cursor["type"] == ["string", "null"], spec.name
+        assert "first page" in cursor["description"], spec.name
+
+
 def test_search_requires_query(handlers: ToolHandlers):
     payload = load(handlers.search({}))
     assert payload["ok"] is False

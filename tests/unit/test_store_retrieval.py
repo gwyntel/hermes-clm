@@ -46,6 +46,27 @@ class InspectTests(kit.StoreTestCase):
         with self.assertRaises(ValidationError):
             self.store.inspect(limit=0)
 
+    def test_empty_cursor_is_the_first_page(self) -> None:
+        """The tools layer normalises "" to None on the strength of this contract."""
+
+        first = self.store.inspect(limit=2)
+        empty = self.store.inspect(limit=2, cursor="")
+        none = self.store.inspect(limit=2, cursor=None)
+        self.assertEqual(
+            [item["span_id"] for item in empty["items"]],
+            [item["span_id"] for item in first["items"]],
+        )
+        self.assertEqual(empty["next_cursor"], first["next_cursor"])
+        self.assertEqual(none["items"], empty["items"])
+
+    def test_search_empty_cursor_is_the_first_page(self) -> None:
+        first = self.store.search("a.py", limit=2)
+        empty = self.store.search("a.py", limit=2, cursor="")
+        self.assertEqual(
+            [item["span_id"] for item in empty["items"]],
+            [item["span_id"] for item in first["items"]],
+        )
+
     def test_inspect_never_lists_another_session(self) -> None:
         other = self.open_store("other-session")
         other.ingest([{"message_uid": "u-other", "role": "assistant", "content": "other"}])
