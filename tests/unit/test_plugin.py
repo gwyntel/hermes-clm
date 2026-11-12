@@ -196,15 +196,28 @@ def test_dual_enablement_defers_tools_command_and_engine_construction():
     assert runtime.handlers is not None, "the runtime object stays inert, not absent"
 
 
-def test_dual_enablement_still_registers_the_static_usage_section():
+def test_dual_enablement_still_registers_the_usage_section(monkeypatch):
     """Tools remain callable (from the engine), so guidance must still ship."""
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_profile_home",
+        lambda profile: None if profile is None else "/profiles/" + profile,
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_read_profile_config",
+        lambda home=None: {"context": {"engine": ENGINE_NAME}},
+    )
 
     ctx = GeneralLaneCtx()
     runtime = register(ctx, config={}, engine_selected=True)
 
     assert [section["id"] for section in ctx.sections] == [SYSTEM_PROMPT_SECTION_ID]
     section = ctx.sections[0]
-    assert section["content"] == SYSTEM_PROMPT_SECTION_TEXT
+    content = section["content"]
+    rendered = content({"profile_name": "clmtest"}) if callable(content) else content
+    assert rendered == SYSTEM_PROMPT_SECTION_TEXT
     assert section["position"] == SYSTEM_PROMPT_SECTION_POSITION
     assert section["max_chars"] == SYSTEM_PROMPT_SECTION_MAX_CHARS
     assert runtime.prompt_section == f"handle:{SYSTEM_PROMPT_SECTION_ID}"
@@ -221,7 +234,9 @@ def test_dual_enablement_reads_the_selection_from_the_profile(monkeypatch):
     """Production passes only ``ctx``; the gate must read ``context.engine``."""
 
     monkeypatch.setattr(
-        plugin_module, "_read_profile_config", lambda: {"context": {"engine": ENGINE_NAME}}
+        plugin_module,
+        "_read_profile_config",
+        lambda home=None: {"context": {"engine": ENGINE_NAME}},
     )
     ctx = GeneralLaneCtx()
     runtime = register(ctx, config={})

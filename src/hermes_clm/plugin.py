@@ -9,13 +9,18 @@
    context engine advertises the same tools through ``get_tool_schemas()``, and
    registering them twice is how duplicate tool names happen,
 4. registers the operator-only ``/clm`` slash command when the context can,
-5. registers one static system-prompt section (:mod:`hermes_clm.guidance`) when
-   the host offers that API **and** the model can actually call the tools:
-   ``context.engine`` selects this engine in the engine lane, or the fallback
-   lane registered the tools itself. The host renders it once per new session
-   and restores those frozen bytes on resume. A host without the API (the
-   engine-only ``_EngineCollector`` path) still loads — it just gets no
-   guidance, which ``docs/limitations.md`` records.
+5. registers one system-prompt section (:mod:`hermes_clm.guidance`) when the
+   host offers that API. Its text is static, but in the engine lane *whether*
+   it applies is decided at render time, per served profile: the section is
+   emitted only where ``context.engine`` selects this engine, or where the
+   fallback lane registered the tools itself. Registration-time config cannot
+   answer that — a multiplexed gateway discovers plugins once, under whichever
+   profile was ambient then — so the engine lane registers a content callable
+   that re-reads ``context.engine`` for the profile the host names in its
+   session info. The host renders it once per new session and restores those
+   frozen bytes on resume. A host without the API (the engine-only
+   ``_EngineCollector`` path) still loads — it just gets no guidance, which
+   ``docs/limitations.md`` records.
 
 Hermes is imported lazily and only inside the functions that need it, so this
 module imports cleanly in a bare environment (tests use fakes for ``ctx``).
@@ -73,19 +78,54 @@ DEFAULT_AUX_TIMEOUT_SECONDS = 45.0
 DEFAULT_AUX_ENABLED = True
 
 
-def _read_profile_config() -> Mapping[str, Any]:
-    """Active profile config, or ``{}`` when Hermes is absent or unreadable.
+def _profile_home(profile: str | None) -> str | None:
+    """``HERMES_HOME`` of a *named* live profile, or ``None``.
+
+    ``None`` covers both "no profile named" (the ambient read is then the right
+    one) and "this name is not a live profile" (a custom home, a typo, a host
+    without profiles): those callers must keep reading the ambient config.
+    """
+
+    if not isinstance(profile, str) or not profile:
+        return None
+    try:
+        from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+
+        if profile == get_active_profile_name():
+            return None
+        home = get_profile_dir(profile)
+        return str(home) if home.is_dir() else None
+    except Exception:
+        return None
+
+
+def _read_profile_config(home: str | None = None) -> Mapping[str, Any]:
+    """Profile config, or ``{}`` when Hermes is absent or unreadable.
 
     ``load_config_readonly`` is the host's own read path (the plugin layer uses
     it for ``plugins.hook_callback_timeout``); it never writes and never loads
     secrets. A bare environment without Hermes yields ``{}``, which keeps every
     caller on defaults.
+
+    *home* names another profile's directory (``_profile_home``); the read then
+    runs under the host's own context-local ``HERMES_HOME`` override and is
+    restored immediately, so a multiplexed process can answer "does *that*
+    profile select this engine?" without mutating ``os.environ``.
     """
 
     try:
         from hermes_cli.config import load_config_readonly
 
-        config = load_config_readonly() or {}
+        if home is None:
+            config = load_config_readonly() or {}
+        else:
+            from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+            token = set_hermes_home_override(home)
+            try:
+                config = load_config_readonly() or {}
+            finally:
+                reset_hermes_home_override(token)
     except Exception:
         return {}
     return config if isinstance(config, Mapping) else {}
@@ -106,8 +146,8 @@ def read_clm_config() -> dict[str, Any]:
     return {f"{CONFIG_SECTION}.{key}": value for key, value in section.items()}
 
 
-def read_context_engine() -> str | None:
-    """Name in ``context.engine`` for the active profile, or ``None``.
+def read_context_engine(profile: str | None = None) -> str | None:
+    """Name in ``context.engine`` for *profile* (or the ambient profile), or ``None``.
 
     This is the host's own selection mechanism: ``agent/agent_init.py`` reads
     ``context.engine`` and passes it to the engine loader verbatim, so a profile
@@ -115,19 +155,24 @@ def read_context_engine() -> str | None:
     never activates this one. ``None`` means "not selected" for every caller;
     the value is never normalised, because a host miss on ``" hermes-clm "``
     must not turn into claimed guidance for a tool surface that is absent.
+
+    *profile* names a live profile other than the active one (the multiplexed
+    gateway serves several); the answer then comes from that profile's config.
+    A name that is not a live profile falls back to the ambient read.
     """
 
-    context = _read_profile_config().get("context")
+    config = _read_profile_config(_profile_home(profile))
+    context = config.get("context")
     if not isinstance(context, Mapping):
         return None
     engine = context.get("engine")
     return engine if isinstance(engine, str) and engine else None
 
 
-def clm_engine_selected() -> bool:
-    """Whether the active profile selects this context engine."""
+def clm_engine_selected(profile: str | None = None) -> bool:
+    """Whether the active (or *profile*)'s profile selects this context engine."""
 
-    return read_context_engine() == ENGINE_NAME
+    return read_context_engine(profile) == ENGINE_NAME
 
 
 def _config_get(config: Mapping[str, Any], key: str, default: Any) -> Any:
@@ -169,6 +214,48 @@ def prompt_section_enabled(*, engine_lane: bool, selected: bool | None = None) -
     if not engine_lane:
         return True
     return clm_engine_selected() if selected is None else bool(selected)
+
+
+def _selected_for_render(session_info: Mapping[str, Any]) -> bool:
+    """Whether the profile being rendered selects this engine, read *now*.
+
+    The host renders a section once per new session and hands the callable a
+    read-only session info mapping carrying ``profile_name`` — the profile this
+    prompt is being built for. That is the only trustworthy selection signal at
+    render time: registration can happen in a process that serves several
+    profiles (Hermes' multiplexed gateway discovers plugins once, and a routed
+    turn resolves its own home later), so a config read taken at registration
+    describes whichever profile was ambient then, not the session at hand.
+
+    A name that is not a live profile (a custom home, a host without profiles)
+    keeps the ambient read, which is that process's own profile.
+    """
+
+    name = session_info.get("profile_name") if isinstance(session_info, Mapping) else None
+    if _profile_home(name) is not None:
+        return clm_engine_selected(name)
+    return clm_engine_selected()
+
+
+def _section_content(engine_lane: bool) -> Callable[[Mapping[str, Any]], str]:
+    """Section content the host evaluates per session; ``""`` means "skip".
+
+    The engine lane's tool surface exists only while the profile being rendered
+    selects this engine, so that lane answers at render time. The text itself
+    stays a constant — nothing from the session, the archive or a tool result
+    is interpolated — and the host drops an empty section, so a profile that
+    does not select the engine receives no guidance.
+    """
+
+    def render(session_info: Mapping[str, Any]) -> str:
+        selected = _selected_for_render(session_info) if engine_lane else True
+        return (
+            SYSTEM_PROMPT_SECTION_TEXT
+            if prompt_section_enabled(engine_lane=engine_lane, selected=selected)
+            else ""
+        )
+
+    return render
 
 
 def build_aux(
@@ -343,11 +430,14 @@ def register(
     (:attr:`PluginRuntime.deferred_to_engine`). The tools are still callable:
     they arrive from the selected engine.
 
-    The system-prompt section follows selection (see
-    :func:`prompt_section_enabled`): it is registered when the host offers
-    ``register_system_prompt_section`` *and* guidance would be true, including
-    in the deferred lane, because the engine lane's tools will exist. A ctx
-    without that API (the directory-loaded engine path) still loads.
+    The system-prompt section is registered whenever the host offers
+    ``register_system_prompt_section``, including in the deferred lane. The
+    engine lane decides per rendered session whether the profile being served
+    selects this engine (:func:`_section_content`), because a selection read at
+    registration time describes the discovering process, not the profile the
+    host renders for; ``""`` makes the host skip the section, so a profile that
+    does not select the engine still gets no guidance. A ctx without that API
+    (the directory-loaded engine path) still loads.
 
     Injection points exist for tests and for integration: ``engine`` (a ready
     engine), ``engine_factory``, ``aux`` (a compressor), ``aux_call`` (the
@@ -375,7 +465,7 @@ def register(
             ENGINE_NAME,
         )
         # The tools are callable (from the selected engine), so guidance holds.
-        _register_prompt_section(ctx, runtime, engine_lane=True, selected=True)
+        _register_prompt_section(ctx, runtime, engine_lane=True)
         return runtime
 
     compressor = aux if aux is not None else build_aux(cfg, call=aux_call)
@@ -396,7 +486,7 @@ def register(
                 description=spec.description,
             )
 
-    _register_prompt_section(ctx, runtime, engine_lane=engine_lane, selected=selected)
+    _register_prompt_section(ctx, runtime, engine_lane=engine_lane)
 
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
@@ -409,26 +499,30 @@ def register(
     return runtime
 
 
-def _register_prompt_section(
-    ctx: Any, runtime: PluginRuntime, *, engine_lane: bool, selected: bool | None
-) -> None:
-    """Register the frozen usage section when the host and the tools allow it.
+def _register_prompt_section(ctx: Any, runtime: PluginRuntime, *, engine_lane: bool) -> None:
+    """Register the usage section when the host offers the API.
 
     The host renders this section once per new session and freezes the bytes, so
     it must stay static: nothing here interpolates archive, tool or user data.
-    Guidance follows the tool surface (:func:`prompt_section_enabled`), and a
-    missing host API is a limitation rather than an error.
+    Which profiles may see it follows the tool surface
+    (:func:`prompt_section_enabled`); the engine lane answers that per session
+    (:func:`_section_content`) because registration-time config describes the
+    process, not necessarily the profile being served. A missing host API is a
+    limitation rather than an error.
     """
 
     register_section = getattr(ctx, "register_system_prompt_section", None)
     if not callable(register_section):
         return
-    if not prompt_section_enabled(engine_lane=engine_lane, selected=selected):
-        return
+    # The fallback lane registered the tools itself, so its text is constant; the
+    # engine lane defers the selection decision to the host's render-time pass.
+    content: str | Callable[[Mapping[str, Any]], str] = (
+        _section_content(engine_lane=True) if engine_lane else SYSTEM_PROMPT_SECTION_TEXT
+    )
     try:
         runtime.prompt_section = register_section(
             SYSTEM_PROMPT_SECTION_ID,
-            SYSTEM_PROMPT_SECTION_TEXT,
+            content,
             position=SYSTEM_PROMPT_SECTION_POSITION,
             max_chars=SYSTEM_PROMPT_SECTION_MAX_CHARS,
         )

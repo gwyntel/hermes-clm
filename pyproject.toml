@@ -125,5 +125,5 @@ pretty = true
 # Hermes is an optional host, imported lazily behind guards. Its modules are not installed
 # in the packaging/CI environment, so missing stubs are expected rather than an error.
 [[tool.mypy.overrides]]
-module = ["agent.*", "hermes_cli.*"]
+module = ["agent.*", "hermes_cli.*", "hermes_constants"]
 ignore_missing_imports = true

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 
 import pytest
 
@@ -130,6 +131,41 @@ class RejectingSectionCtx(HypotheticalEngineAndSectionCtx):
         raise AssertionError("engine lane must not call register_tool")
 
 
+class SimulatedHostProfiles:
+    """A host with several profiles, like Hermes' multiplexed gateway.
+
+    Registration happens once, under whichever profile was ambient then (here
+    the top-level/default one); the host then builds prompts for other
+    profiles, naming them in the read-only session info it passes to a section
+    callable. ``_profile_home`` maps a name to that profile's home, and a
+    config read of ``None`` is the ambient read.
+    """
+
+    def __init__(self, configs: dict[str | None, dict]) -> None:
+        self.configs = configs
+
+    def home(self, profile: str | None) -> str | None:
+        return f"/profiles/{profile}" if profile in {"clmtest", "other"} else None
+
+    def config(self, home: str | None = None) -> Mapping:
+        return self.configs.get(home, {})
+
+
+def host_render(section: dict, session_info: dict) -> str | None:
+    """Render one registered section the way Hermes does.
+
+    ``hermes_cli/plugins_dispatch._render_prompt_section_text``: call a
+    callable with the session info, strip the result, and *skip* the section
+    (``None``, absent from the prompt) when the text is empty.
+    """
+
+    content = section["content"]
+    value = content(session_info) if callable(content) else content
+    assert isinstance(value, str), "a section must render text"
+    text = value.strip()
+    return text or None
+
+
 # --------------------------------------------------------------------------- #
 # Text contract
 # --------------------------------------------------------------------------- #
@@ -207,7 +243,9 @@ def test_guidance_states_the_operating_rules_the_tools_enforce():
 
 def test_selection_reads_the_host_context_engine_key(monkeypatch):
     monkeypatch.setattr(
-        plugin_module, "_read_profile_config", lambda: {"context": {"engine": ENGINE_NAME}}
+        plugin_module,
+        "_read_profile_config",
+        lambda home=None: {"context": {"engine": ENGINE_NAME}},
     )
     assert read_context_engine() == ENGINE_NAME
     assert clm_engine_selected() is True
@@ -227,7 +265,7 @@ def test_selection_reads_the_host_context_engine_key(monkeypatch):
     ],
 )
 def test_only_an_exact_engine_selection_counts(monkeypatch, profile):
-    monkeypatch.setattr(plugin_module, "_read_profile_config", lambda: profile)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", lambda home=None: profile)
     assert clm_engine_selected() is False
     assert read_context_engine() != ENGINE_NAME
 
@@ -236,7 +274,9 @@ def test_engine_selection_is_not_normalised(monkeypatch):
     """The host passes the string verbatim; whitespace would miss the engine."""
 
     monkeypatch.setattr(
-        plugin_module, "_read_profile_config", lambda: {"context": {"engine": " hermes-clm "}}
+        plugin_module,
+        "_read_profile_config",
+        lambda home=None: {"context": {"engine": " hermes-clm "}},
     )
     assert clm_engine_selected() is False
 
@@ -250,11 +290,91 @@ def test_prompt_section_enabled_follows_the_tool_surface():
 
 
 def test_unreadable_config_withholds_guidance(monkeypatch):
-    monkeypatch.setattr(plugin_module, "_read_profile_config", lambda: {})
+    monkeypatch.setattr(plugin_module, "_profile_home", lambda profile: None)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", lambda home=None: {})
     ctx = HypotheticalEngineAndSectionCtx()
     register(ctx, engine=FakeEngine(), config={})
     assert ctx.engines, "the engine must still register"
-    assert ctx.sections == [], "no guidance without a positive context.engine selection"
+    assert host_render(ctx.sections[0], {"profile_name": "clmtest"}) is None, (
+        "no guidance without a positive context.engine selection"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Render-time selection
+# --------------------------------------------------------------------------- #
+
+
+def test_guidance_appears_when_only_the_served_profile_selects_the_engine(monkeypatch):
+    """Registration cannot see the selection; the rendered profile decides.
+
+    Hermes discovers plugins once per process. In the multiplexed gateway that
+    discovery runs under whichever profile was ambient — here one that selects
+    another engine — and the ``clm_*`` tools still arrive for a routed turn
+    whose own ``context.engine`` is ``hermes-clm`` (``agent_init`` loads the
+    engine per routed home). Guidance must follow that served profile, and must
+    stay absent for a sibling profile that selects another engine.
+    """
+
+    profiles = SimulatedHostProfiles(
+        {
+            # Registration-time ambient profile.
+            None: {"context": {"engine": "compressor"}},
+            # Routed profiles the host actually renders prompts for.
+            "/profiles/clmtest": {"context": {"engine": ENGINE_NAME}},
+            "/profiles/other": {"context": {"engine": "compressor"}},
+        }
+    )
+    monkeypatch.setattr(plugin_module, "_profile_home", profiles.home)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", profiles.config)
+
+    ctx = HypotheticalEngineAndSectionCtx()
+    register(ctx, engine=FakeEngine(), config={}, engine_selected=False)
+    assert len(ctx.sections) == 1, "the section must be registered even when the read was blind"
+
+    section = ctx.sections[0]
+    served = host_render(section, {"session_id": "s1", "profile_name": "clmtest"})
+    assert served == guidance.SYSTEM_PROMPT_SECTION_TEXT
+    assert "clm_inspect" in served, "the named tools must be the ones the model sees"
+
+    sibling = host_render(section, {"session_id": "s2", "profile_name": "other"})
+    assert sibling is None, "a profile that selects another engine gets no CLM guidance"
+
+
+def test_guidance_renders_without_a_profile_name_from_the_ambient_profile(monkeypatch):
+    """Older/partial session info: fall back to this process's own selection."""
+
+    profiles = SimulatedHostProfiles({None: {"context": {"engine": ENGINE_NAME}}})
+    monkeypatch.setattr(plugin_module, "_profile_home", profiles.home)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", profiles.config)
+
+    ctx = HypotheticalEngineAndSectionCtx()
+    register(ctx, engine=FakeEngine(), config={}, engine_selected=False)
+    assert host_render(ctx.sections[0], {}) == guidance.SYSTEM_PROMPT_SECTION_TEXT
+
+
+def test_render_time_read_never_leaks_another_profiles_selection(monkeypatch):
+    """The served profile is read, not the ambient one — no cross-profile claim."""
+
+    seen: list[str | None] = []
+    profiles = SimulatedHostProfiles(
+        {
+            None: {"context": {"engine": ENGINE_NAME}},
+            "/profiles/other": {"context": {"engine": "compressor"}},
+        }
+    )
+
+    def config(home=None):
+        seen.append(home)
+        return profiles.config(home)
+
+    monkeypatch.setattr(plugin_module, "_profile_home", profiles.home)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", config)
+
+    ctx = HypotheticalEngineAndSectionCtx()
+    register(ctx, engine=FakeEngine(), config={}, engine_selected=True)
+    assert host_render(ctx.sections[0], {"profile_name": "other"}) is None
+    assert seen[-1] == "/profiles/other", "the render must read the served profile's own config"
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +382,11 @@ def test_unreadable_config_withholds_guidance(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_selected_engine_lane_registers_the_section_once():
+def test_selected_engine_lane_registers_the_section_once(monkeypatch):
+    profiles = SimulatedHostProfiles({"/profiles/clmtest": {"context": {"engine": ENGINE_NAME}}})
+    monkeypatch.setattr(plugin_module, "_profile_home", profiles.home)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", profiles.config)
+
     ctx = HypotheticalEngineAndSectionCtx()
     runtime = register(ctx, engine=FakeEngine(), config={}, engine_selected=True)
     assert len(ctx.sections) == 1
@@ -270,18 +394,29 @@ def test_selected_engine_lane_registers_the_section_once():
     assert section["id"] == guidance.SYSTEM_PROMPT_SECTION_ID
     assert section["position"] == "after_memory"
     assert section["max_chars"] == guidance.SYSTEM_PROMPT_SECTION_MAX_CHARS
-    assert section["content"] is guidance.SYSTEM_PROMPT_SECTION_TEXT, "static text, not a callable"
     assert runtime.prompt_section == "handle:hermes-clm.usage"
     assert runtime.prompt_section_error is None
     assert [command for command in ctx.commands] == ["clm"]
+    # The engine lane answers per rendered session (see the render-time tests
+    # below); the text it yields is still the static guidance.
+    assert host_render(section, {"profile_name": "clmtest"}) == guidance.SYSTEM_PROMPT_SECTION_TEXT
 
 
-def test_unselected_engine_lane_registers_nothing_for_the_model():
+def test_unselected_engine_lane_injects_nothing_for_the_model(monkeypatch):
+    profiles = SimulatedHostProfiles({"/profiles/hermes": {"context": {"engine": "compressor"}}})
+    monkeypatch.setattr(plugin_module, "_profile_home", profiles.home)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", profiles.config)
+
     ctx = HypotheticalEngineAndSectionCtx()
     runtime = register(ctx, engine=FakeEngine(), config={}, engine_selected=False)
     assert ctx.engines, "the engine registration is unchanged"
-    assert ctx.sections == [], "an unselected engine must not inject instructions"
-    assert runtime.prompt_section is None and runtime.prompt_section_error is None
+    assert runtime.prompt_section == "handle:hermes-clm.usage", (
+        "the section is registered so a later served profile can still qualify"
+    )
+    assert runtime.prompt_section_error is None
+    assert host_render(ctx.sections[0], {"profile_name": "hermes"}) is None, (
+        "an unselected engine must not inject instructions"
+    )
 
 
 def test_engine_only_host_without_the_section_api_still_loads():
@@ -390,14 +525,26 @@ def test_guidance_does_not_overclaim_boundary_or_auxiliary_scope():
     assert "sends only the span IDs" not in text
 
 
-def test_section_text_is_never_rebuilt_from_session_data():
-    """The host freezes rendered bytes; a callable would re-run plugin code."""
+def test_section_text_is_never_built_from_session_data(monkeypatch):
+    """Session info decides *whether* guidance applies, never what it says.
+
+    The host freezes the rendered bytes and restores them on resume, so the text
+    must be one constant: no session, archive or tool data is interpolated. The
+    engine lane's callable only answers "does this profile select the engine?".
+    """
+
+    profiles = SimulatedHostProfiles({"/profiles/clmtest": {"context": {"engine": ENGINE_NAME}}})
+    monkeypatch.setattr(plugin_module, "_profile_home", profiles.home)
+    monkeypatch.setattr(plugin_module, "_read_profile_config", profiles.config)
 
     ctx = HypotheticalEngineAndSectionCtx()
     register(ctx, engine=FakeEngine(), config={}, engine_selected=True)
     content = ctx.sections[0]["content"]
-    assert not callable(content)
-    assert content == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
+    first = {"session_id": "a", "profile_name": "clmtest", "cwd": "/tmp", "model": "m"}
+    second = {"session_id": "b", "profile_name": "clmtest", "platform": "cli", "cwd": "/"}
+    assert host_render(ctx.sections[0], first) == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
+    assert host_render(ctx.sections[0], second) == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
+    assert not isinstance(content, str) or content == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
 
 
 def test_runtime_defaults_are_inert():

@@ -123,8 +123,15 @@ from hermes_cli.plugins import (
 hermes_plugins.discover_plugins(force=True)
 manager = get_plugin_manager()
 
-rendered = render_system_prompt_sections({"session_id": "prompt-section-probe"})
-again = render_system_prompt_sections({"session_id": "another-session", "platform": "cli"})
+# Mirror the session info the host actually passes (``agent/system_prompt.py``):
+# the profile name is what a section callable resolves its own selection from.
+_profile_name = os.environ.get("CLM_PROBE_PROFILE", "custom")
+rendered = render_system_prompt_sections(
+    {"session_id": "prompt-section-probe", "profile_name": _profile_name}
+)
+again = render_system_prompt_sections(
+    {"session_id": "another-session", "platform": "cli", "profile_name": _profile_name}
+)
 prompt = format_system_prompt_sections(rendered) + "\n\nConversation started: 2026-01-01 00:00\n"
 
 result["sections"] = _sections_of(rendered)
@@ -421,7 +428,10 @@ def test_resumed_session_recovers_the_frozen_section(selected):
 def test_unselected_engine_renders_no_guidance(inactive):
     assert inactive["engine_name"] == "hermes-clm", "the engine registration itself is unchanged"
     assert inactive["commands"] == ["clm"]
-    assert inactive["section_registry"] == []
+    assert inactive["section_registry"] == ["hermes-clm.usage"], (
+        "registered once, so a routed turn whose own profile selects the engine can still "
+        "qualify; the render below is what must stay empty"
+    )
     assert inactive["sections"] == []
     assert inactive["heading_occurrences"] == 0
     assert inactive["container_occurrences"] == 0
