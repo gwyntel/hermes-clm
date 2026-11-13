@@ -5,6 +5,21 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/); Release Please
 generates release notes from those commits.
 
+## [0.2.0](https://github.com/gwyntel/hermes-clm/compare/v0.1.0...v0.2.0) (2026-11-13)
+
+
+### Features
+
+* **clm:** make compaction, tokens and batch cost readable to the agent ([a632c5f](https://github.com/gwyntel/hermes-clm/commit/a632c5fe6cbd5195167e0635d4efe37fe887f547))
+* improve agent compaction feedback and safety ([550a345](https://github.com/gwyntel/hermes-clm/commit/550a345e928f6ce136cb0771cef467401a26f2cd))
+
+
+### Bug Fixes
+
+* **clm:** stop dropping spans, deleting tool rows, and double-writing ops ([e420fdf](https://github.com/gwyntel/hermes-clm/commit/e420fdf23b0895e05a1c2b66047230d03ce099cc))
+* **engine:** preserve stores across manual compaction ([258d5a7](https://github.com/gwyntel/hermes-clm/commit/258d5a7d21dfa2d3dccca5babaa14b5036d49c3d))
+* **tools:** accept an empty cursor as the first page ([7f7d041](https://github.com/gwyntel/hermes-clm/commit/7f7d04122d694b1880e5d114910e92a8da5ce403))
+
 ## 0.1.0 (2026-11-12)
 
 
