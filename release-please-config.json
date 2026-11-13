@@ -19,6 +19,10 @@
         {
           "type": "generic",
           "path": "pyproject.toml"
+        },
+        {
+          "type": "generic",
+          "path": "plugin.yaml"
         }
       ]
     }

@@ -65,11 +65,16 @@ Releases are automated:
 
 1. Conventional commits land on `main` through a pull request.
 2. Release Please opens or updates a release PR with `CHANGELOG.md` and version bumps for
-   `pyproject.toml` and `src/hermes_clm/_version.py`.
-3. Merging the release PR creates the tag and GitHub release, and runs the build.
-4. PyPI publishing uses OIDC trusted publishing through the `pypi` environment. It is
-   disabled until the PyPI pending publisher exists (see `docs/limitations.md`); the
-   GitHub release and attached artifacts do not depend on it.
+   `pyproject.toml`, `src/hermes_clm/_version.py`, and `plugin.yaml`.
+3. Merging the release PR updates `main`. Until the upstream single-package component
+   mismatch ([release-please-action#1205](https://github.com/googleapis/release-please-action/issues/1205))
+   is fixed, create the tag and GitHub release at the release merge commit and change the
+   release PR label from `autorelease: pending` to `autorelease: tagged`; otherwise the
+   next run aborts on an untagged merged release PR.
+4. The GitHub release runs the build and attaches the distributions. PyPI publishing uses
+   OIDC trusted publishing through the `pypi` environment. It is disabled until the PyPI
+   pending publisher exists (see `docs/limitations.md`); the GitHub release and attached
+   artifacts do not depend on it.
 
 Do not hand-edit the version or changelog for a release that Release Please owns.
 
