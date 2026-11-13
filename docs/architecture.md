@@ -59,7 +59,13 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - Reuse Hermes model/context-length state and rough estimators. Calibrate estimates against real `usage.prompt_tokens` with bounded ratio; record real cache read/write fields when supplied.
 - Default configurable reserve and pressure tiers; `context_status`/tool receipts expose the same estimate used for edit validation.
 - Existing Hermes pressure notices remain intact because newest tool output is protected.
-- Routine projection does not inject changing status rows (would destroy cache). Task-boundary tool creates explicit agent-chosen snapshots/audit markers.
+- Routine projection does not inject changing status rows (would destroy cache). The one
+  injected row is the **compaction notice**: after an operator `/compact` or an overflow
+  offload, a single `[clm.notice rev=N ...]` row anchored right after the system row tells
+  the model its earlier tool results moved to the archive. Its bytes are a pure function of
+  the compaction revision, so it is byte-identical on every turn until the next compaction
+  and the cached prefix survives; a host that echoes the projection back cannot accumulate
+  a second one. Task-boundary tool creates explicit agent-chosen snapshots/audit markers.
 - Record before/after estimated tokens for every edit, aux usage/latency when available, and revision snapshots sufficient for prefix-reuse analysis.
 
 ## Compression and lifecycle
@@ -79,7 +85,7 @@ One SQLite transaction covers operation append, archive additions, revision bump
 The tool surface is useless if the model does not know the operating rules, so the plugin
 registers one static text block through the host's section API
 (`ctx.register_system_prompt_section`): id `hermes-clm.usage`, position `after_memory`,
-`max_chars` 4000 (the host ceiling; the text is ~3.0 KB with headroom because an
+`max_chars` 4000 (the host ceiling; the text is ~3.5 KB with headroom because an
 oversized section is skipped, not truncated).
 
 - **Static by construction.** The section is registered as a string, never a callable.

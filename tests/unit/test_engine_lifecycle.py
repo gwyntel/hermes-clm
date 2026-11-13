@@ -802,7 +802,7 @@ def test_tool_dispatch_status_reads_the_live_store_revision():
     engine, factory = started_engine(snapshot_for(history, [], revision=4))
     factory.store._snapshot.revision = 6
 
-    payload = json.loads(engine.handle_tool_call("clm_status", {}))
+    payload = json.loads(engine.handle_tool_call("clm_status", {"detail": "full"}))
 
     assert payload["ok"] is True
     assert payload["revision"] == 6

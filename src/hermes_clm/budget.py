@@ -7,6 +7,22 @@ projects to byte-identical requests and keeps the provider prefix cache warm.
 These are *rough* estimates. The engine calibrates them against real
 ``usage.prompt_tokens`` with a bounded ratio (:class:`TokenCalibration`) and
 reports the same number it uses for edit validation.
+
+Token vocabulary
+----------------
+Three numbers exist and they are not interchangeable, so they are named:
+
+``spans``
+    raw ``chars/4`` estimate of the archived spans (what the store reports).
+``calibrated``
+    ``spans`` multiplied by the learned :class:`TokenCalibration` ratio. This is
+    the number budgets, tiers and edit validation use.
+``actual``
+    the last ``usage.prompt_tokens`` the provider reported, or ``None`` when no
+    response has been observed yet. Never derived, never estimated.
+
+:func:`token_vocabulary` is the one place that names them, so a status payload
+cannot report three token figures under one label.
 """
 
 from __future__ import annotations
@@ -133,6 +149,55 @@ class TokenCalibration:
         }
 
 
+def _as_int(value: Any) -> Optional[int]:
+    """``value`` as an int, or ``None`` - never an exception on a hostile payload.
+
+    A provider usage field can arrive as a string, a float, ``None`` or a bool;
+    a status payload must stay constructible in all of those cases, because the
+    alternative is losing the whole status read to one malformed number.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def token_vocabulary(
+    *,
+    spans: int,
+    calibration: Optional["TokenCalibration"] = None,
+    actual: Optional[int] = None,
+) -> Dict[str, Any]:
+    """The three token numbers, each under the label that describes it.
+
+    ``spans`` is the raw ``chars/4`` estimate of archived spans, ``calibrated``
+    applies the learned ratio, and ``actual`` is the provider's own
+    ``usage.prompt_tokens`` for the last request (``None`` until one is seen).
+    A caller that sizes an edit off ``spans`` while the budget uses
+    ``calibrated`` is planning against a number the plugin knows is wrong, so
+    every payload reports both rather than one ambiguous figure.
+    """
+
+    raw = max(0, _as_int(spans) or 0)
+    calibrated = max(0, int(calibration.adjust(raw))) if calibration is not None else raw
+    observed = _as_int(actual)
+    observed = None if observed is None else max(0, observed)
+    if observed == 0:
+        # A provider reporting zero prompt tokens is "no measurement", not a
+        # measurement of zero: keep the field honest.
+        observed = None
+    return {
+        "spans": raw,
+        "calibrated": calibrated,
+        "actual": observed,
+        "estimator": "chars/4",
+        "calibration_ratio": round(float(calibration.ratio), 6) if calibration else 1.0,
+    }
+
+
 def pressure_tier(ratio: float, thresholds: Sequence[float] = DEFAULT_PRESSURE_THRESHOLDS) -> str:
     """Bucket a usage ratio into a tier name (``normal`` .. ``critical``)."""
     ordered = sorted(float(value) for value in (thresholds or DEFAULT_PRESSURE_THRESHOLDS))
@@ -158,6 +223,11 @@ class PressureState:
     calibrated_tokens: int = 0
     last_prompt_tokens: int = 0
     thresholds: Tuple[float, ...] = DEFAULT_PRESSURE_THRESHOLDS
+    #: Raw ``chars/4`` estimate *before* calibration. ``estimated_tokens`` and
+    #: ``calibrated_tokens`` both carry the calibrated figure (that is what tiers
+    #: and edit validation use); this field keeps the raw number recoverable so a
+    #: reader can see how far calibration moved it.
+    raw_estimated_tokens: int = 0
 
     @property
     def usable_limit(self) -> int:
@@ -197,6 +267,7 @@ class PressureState:
         return {
             "estimated_tokens": self.estimated_tokens,
             "calibrated_tokens": self.calibrated_tokens,
+            "raw_estimated_tokens": self.raw_estimated_tokens,
             "context_length": self.context_length,
             "reserve_tokens": self.reserve_tokens,
             "usable_limit": self.usable_limit,
@@ -231,6 +302,7 @@ def pressure_state(
         calibrated_tokens=max(0, int(calibrated)),
         last_prompt_tokens=max(0, int(last_prompt_tokens or 0)),
         thresholds=tuple(float(value) for value in (thresholds or DEFAULT_PRESSURE_THRESHOLDS)),
+        raw_estimated_tokens=max(0, int(estimated_tokens or 0)),
     )
 
 

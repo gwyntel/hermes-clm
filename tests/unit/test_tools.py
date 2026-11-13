@@ -606,7 +606,7 @@ def test_status_reports_aux_metrics_when_configured():
 
     aux = AuxCompressor(call=lambda **_: None, enabled=False)
     handlers = ToolHandlers(lambda _: FakeService(), aux=aux)
-    payload = load(handlers.status({}))
+    payload = load(handlers.status({"detail": "full"}))
     assert payload["aux"]["task"] == "compression"
     assert payload["aux"]["enabled"] is False
 

@@ -270,6 +270,8 @@ def build_aux(
         max_spans=limits.max_aux_spans,
         max_rewrite_bytes=limits.max_rewrite_bytes,
         max_instruction_bytes=limits.max_instruction_bytes,
+        max_span_chunks=limits.max_span_chunks,
+        max_aux_calls=limits.max_aux_calls,
     )
     timeout = bound_timeout(_config_get(config, "aux_timeout_seconds", DEFAULT_AUX_TIMEOUT_SECONDS))
     return AuxCompressor(

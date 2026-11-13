@@ -498,17 +498,25 @@ def test_guidance_only_names_advertised_tools_and_real_parameters():
     parameters: set[str] = set()
     for spec in specs:
         parameters.update(spec.schema["parameters"].get("properties", {}))
+    # Response fields the guidance may name: they are part of what the tools
+    # return, not inputs, so they can never be a mistyped argument.
+    response_fields = {"est_calibrated", "last_compaction", "expected_revision"}
     snake_case = {token for token in re.findall(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b", text)}
-    invented = {token for token in snake_case if not token.startswith("clm_")} - parameters
+    invented = (
+        {token for token in snake_case if not token.startswith("clm_")}
+        - parameters
+        - response_fields
+    )
     assert not invented, f"guidance names parameters no schema has: {sorted(invented)}"
 
 
-def test_guidance_states_the_auxiliary_span_size_limit():
-    """Aux refuses spans over 4000 chars: the model must be told, not surprised."""
+def test_guidance_explains_chunked_auxiliary_rewrites_not_a_char_cap():
+    """Aux no longer refuses a >4000-char span; the model must not be told it does."""
 
     text = guidance.SYSTEM_PROMPT_SECTION_TEXT
-    assert "4000" in text
-    assert "refused" in text
+    assert "4000" not in text, "the 4000-char aux refusal is gone: spans are chunked"
+    assert "chunk" in text.lower()
+    assert "refused" in text, "protected and non-text spans are still refused"
     assert "clm_stage" in text, "the guidance must name the tool that can do it instead"
     assert len(text) <= guidance.SYSTEM_PROMPT_SECTION_MAX_CHARS - 500
 

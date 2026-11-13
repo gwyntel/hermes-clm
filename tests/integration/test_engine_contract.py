@@ -360,7 +360,7 @@ def test_real_store_drop_through_tool_dispatch_edits_only_the_target_group(tmp_p
     _, first_selection = host.iterate()
     assert first_selection is None  # nothing committed: request untouched
 
-    status = json.loads(engine.handle_tool_call("clm_status", {}, messages=history))
+    status = json.loads(engine.handle_tool_call("clm_status", {"detail": "full"}, messages=history))
     assert status["ok"] is True
     assert status["store_health"]["ok"] is True
     revision = status["revision"]
@@ -395,8 +395,18 @@ def test_real_store_drop_through_tool_dispatch_edits_only_the_target_group(tmp_p
 
     assert selected is not None
     dropped = {request_index(history, "a1"), request_index(history, "t1")}
-    assert len(selected) == len(request) - len(dropped)
-    assert selected == [dict(row) for index, row in enumerate(request) if index not in dropped]
+    # One extra row: the revision-keyed compaction notice, right after the system
+    # row. It is the only injection, it is not a transcript row, and it names the
+    # revision that archived the dropped group.
+    notices = [row for row in selected if str(row.get("content", "")).startswith("[clm.notice")]
+    assert len(notices) == 1, selected
+    assert selected[1] is notices[0]
+    assert f"rev={committed['revision']}" in notices[0]["content"]
+    without_notice = [row for row in selected if row is not notices[0]]
+    assert len(without_notice) == len(request) - len(dropped)
+    assert without_notice == [
+        dict(row) for index, row in enumerate(request) if index not in dropped
+    ]
 
     # Host-owned rows survive byte-identically.
     assert selected[0] == {"role": "system", "content": SYSTEM_PROMPT}
@@ -610,3 +620,137 @@ def test_real_store_overflow_commits_a_system_offload_and_the_next_request_shows
     assert {"role": "user", "content": "fix it"} in selected
     assert selected[-1]["content"] == "NEWEST TOOL OUTPUT"
     assert "FAILED tests/test_x.py" in history[2]["content"]
+
+
+def test_real_store_last_compaction_names_the_revision_that_archived_output(tmp_path):
+    """The store, not the caller, decides what counts as a compaction."""
+
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+    assert service.status()["last_compaction"] is None, "nothing has been compacted yet"
+
+    revision = service.status()["revision"]
+    spans = inspect_spans(engine, history)
+    stage_and_commit(
+        engine,
+        [{"kind": "offload", "span_ids": [spans["a1"]["span_id"], spans["t1"]["span_id"]]}],
+        revision=revision,
+        txn_id="txn-real-compaction",
+    )
+
+    compaction = service.status()["last_compaction"]
+    assert compaction["revision"] == revision + 1
+    assert compaction["spans_offloaded"] == 2
+    assert compaction["tokens_freed"] >= 0
+    assert compaction["actor"]
+    assert compaction["kind"]
+
+    # A later rewrite-only revision is not a compaction and does not hide it.
+    newer = service.status()["revision"]
+    stage_and_commit(
+        engine,
+        [{"kind": "rewrite", "span_ids": [spans["a2"]["span_id"]], "replacement": "short"}],
+        revision=newer,
+        txn_id="txn-real-rewrite",
+    )
+    assert service.status()["last_compaction"]["revision"] == revision + 1
+
+    # Nor does a revert: the compaction did happen.
+    reverted = service.status()["revision"]
+    outcome = service.revert(
+        target_revision=1, expected_revision=reverted, txn_id="txn-real-revert"
+    )
+    assert outcome["ok"] is True, outcome
+    assert service.status()["last_compaction"]["revision"] == revision + 1
+
+
+def test_real_store_stage_returns_a_pure_preview_without_committing(tmp_path):
+    """An agent can price a batch before committing it, and nothing moves."""
+
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    spans = inspect_spans(engine, history)
+    revision = engine.tool_service().status()["revision"]
+
+    staged = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [
+                    {
+                        "kind": "offload",
+                        "span_ids": [spans["a1"]["span_id"], spans["t1"]["span_id"]],
+                    }
+                ],
+                "expected_revision": revision,
+                "txn_id": "txn-real-preview",
+            },
+            messages=list(history),
+        )
+    )
+
+    assert staged["ok"] is True, staged
+    projected = staged["projected"]
+    assert projected["available"] is True
+    assert projected["ok"] is True
+    assert projected["before"] > projected["after"]
+    assert projected["saved"] == projected["before"] - projected["after"]
+    assert projected["calibrated"]["saved"] == projected["saved"]
+
+    # Pure: the head did not move, and the staged batch is still uncommitted.
+    assert engine.tool_service().status()["revision"] == revision
+    assert engine.store.snapshot().revision == revision
+
+    committed = json.loads(
+        engine.handle_tool_call(
+            "clm_commit",
+            {"txn_id": "txn-real-preview", "expected_revision": revision},
+            messages=list(history),
+        )
+    )
+    assert committed["ok"] is True, committed
+    assert engine.tool_service().status()["revision"] == revision + 1
+
+
+def test_real_store_compaction_notice_reaches_the_next_request(tmp_path):
+    """`/compact` is operator work; the agent has to be told its output moved."""
+
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+
+    engine.compress(list(history), current_tokens=100_000, force=True)
+
+    request, selected = host.iterate()
+
+    assert selected is not None
+    head = "\n".join(str(row.get("content", "")) for row in selected[:2])
+    assert "[clm.notice" in head, selected[:2]
+    assert f"rev={engine.tool_service().status()['revision']}" in head
+    assert selected[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert "[clm.offloaded" in "".join(str(row.get("content", "")) for row in selected)
+
+
+def test_real_store_reverting_a_compaction_keeps_the_notice_honest(tmp_path):
+    """After a revert the rows are live again; the notice still points at the archive."""
+
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    engine.compress(list(history), current_tokens=100_000, force=True)
+    revision = engine.tool_service().status()["revision"]
+
+    outcome = engine.tool_service().revert(
+        target_revision=1, expected_revision=revision, txn_id="txn-real-uncompact"
+    )
+    assert outcome["ok"] is True, outcome
+    request, selected = host.iterate()
+
+    # The revert restored the rows, so no offload stub remains...
+    assert selected is not None
+    assert "[clm.offloaded" not in "".join(str(row.get("content", "")) for row in selected)
+    # ...and the notice still names the revision whose originals are retrievable.
+    assert "[clm.notice" in str(selected[1].get("content", ""))

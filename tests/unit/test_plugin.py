@@ -519,7 +519,7 @@ def test_plugin_register_passes_an_injected_aux_compressor():
     ctx, runtime, _ = fallback_ctx(aux=aux)
     status_tool = next(tool for tool in ctx.tools if tool["name"] == "clm_status")
     runtime.engine.sessions[None] = FakeService()
-    payload = load(status_tool["handler"]({}, session_id=None))
+    payload = load(status_tool["handler"]({"detail": "full"}, session_id=None))
     assert payload["aux"]["enabled"] is False
 
 

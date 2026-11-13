@@ -3325,6 +3325,73 @@ class ContextStore:
                 },
             }
 
+    def last_compaction(self) -> dict[str, Any] | None:
+        """The most recent revision that took content out of the context.
+
+        A "compaction" here is any committed revision carrying a ``drop`` or
+        ``offload`` operation: the engine's ``/compact`` path, an overflow
+        offload, and an agent's own drop all land in the same immutable table,
+        and all of them are what makes a row stop being sent. The newest such
+        revision wins; a revert does **not** erase it, because the fact that the
+        compaction happened stays true (the notice says the originals are
+        retrievable, and a revert restores them to the live context too).
+
+        ``spans_offloaded`` counts the distinct spans named by those operations
+        (a group offload names several), and ``tokens_freed`` is the revision's
+        own estimate delta, floored at zero.
+
+        Read-only and bounded: one indexed lookup on ``revisions`` plus one
+        indexed lookup on the winning revision's operations. Returns ``None``
+        when nothing has ever been compacted, which is the honest answer for a
+        session that only ever rewrote text.
+        """
+
+        self._require_open()
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                row = cur.execute(
+                    "SELECT r.revision AS revision, r.actor_origin AS actor_origin, "
+                    "r.created_at AS created_at, r.kind AS kind, "
+                    "r.est_tokens_before AS est_tokens_before, "
+                    "r.est_tokens_after AS est_tokens_after "
+                    "FROM revisions r WHERE EXISTS ("
+                    "  SELECT 1 FROM operations o WHERE o.revision = r.revision "
+                    "  AND o.kind IN ('drop', 'offload')) "
+                    "ORDER BY r.revision DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                revision = int(row["revision"])
+                payloads = cur.execute(
+                    "SELECT span_ids_json FROM operations WHERE revision = ? "
+                    "AND kind IN ('drop', 'offload')",
+                    (revision,),
+                ).fetchall()
+            finally:
+                cur.close()
+
+        # Distinct span ids, not a row count: a group offload can be recorded in
+        # more than one operation row, and counting rows would report the same
+        # span twice - a number an operator would reasonably read as "spans".
+        spans: set[str] = set()
+        for payload in payloads:
+            try:
+                decoded = json.loads(payload[0])
+            except (TypeError, ValueError):  # pragma: no cover - store wrote it
+                continue
+            if isinstance(decoded, list):
+                spans.update(value for value in decoded if isinstance(value, str) and value)
+        freed = int(row["est_tokens_before"]) - int(row["est_tokens_after"])
+        return {
+            "revision": revision,
+            "at": str(row["created_at"]),
+            "actor": str(row["actor_origin"]),
+            "kind": str(row["kind"]),
+            "spans_offloaded": len(spans),
+            "tokens_freed": max(0, freed),
+        }
+
     @_serialized
     def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
         """Bounded, session-scoped view of current spans (never cross-session)."""

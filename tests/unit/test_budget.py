@@ -17,6 +17,7 @@ from hermes_clm.budget import (
     plan_offload,
     pressure_state,
     pressure_tier,
+    token_vocabulary,
 )
 
 
@@ -170,3 +171,57 @@ def test_tool_result_rows_are_not_grouped_by_the_budget_module():
     """Grouping is identity's job; budget only prices what it is handed."""
     rows = [tool_result("t1", "call_1", "x" * 100), message("assistant", "done", "a1")]
     assert estimate_messages_tokens(rows) > 0
+
+
+# --------------------------------------------------------------------------- #
+# Token vocabulary: one label per number, never one number under two labels
+# --------------------------------------------------------------------------- #
+
+
+def test_token_vocabulary_keeps_raw_and_calibrated_apart():
+    """The counterexample: a status payload reporting calibrated as if raw."""
+
+    calibration = TokenCalibration(ratio=1.5)
+    vocabulary = token_vocabulary(spans=1000, calibration=calibration)
+
+    assert vocabulary["spans"] == 1000, "spans is the raw chars/4 estimate, untouched"
+    assert vocabulary["calibrated"] == 1500
+    assert vocabulary["calibration_ratio"] == 1.5
+    assert vocabulary["estimator"] == "chars/4"
+    assert vocabulary["actual"] is None, "no provider measurement has been seen yet"
+
+
+def test_token_vocabulary_reports_the_provider_number_when_it_exists():
+    vocabulary = token_vocabulary(spans=400, actual=512)
+    assert vocabulary["spans"] == 400
+    assert vocabulary["calibrated"] == 400, "no calibration means calibrated == spans"
+    assert vocabulary["actual"] == 512
+
+
+def test_token_vocabulary_never_reports_a_zero_measurement_as_actual():
+    """A provider that reports zero prompt tokens did not measure zero."""
+
+    for value in (0, -5, None):
+        assert token_vocabulary(spans=10, actual=value)["actual"] is None
+
+
+def test_token_vocabulary_is_total_for_hostile_input():
+    vocabulary = token_vocabulary(spans=None, calibration=None, actual="nope")  # type: ignore[arg-type]
+    assert vocabulary["spans"] == 0
+    assert vocabulary["actual"] is None
+
+
+def test_pressure_state_keeps_the_raw_estimate_recoverable():
+    calibration = TokenCalibration(ratio=2.0)
+    state = pressure_state(estimated_tokens=1_000, context_length=10_000, calibration=calibration)
+
+    assert state.raw_estimated_tokens == 1_000
+    assert state.estimated_tokens == 2_000, "tiers and edit validation use calibrated"
+    assert state.calibrated_tokens == 2_000
+    assert state.to_dict()["raw_estimated_tokens"] == 1_000
+    assert state.to_dict()["estimated_tokens"] == 2_000
+
+
+def test_pressure_state_raw_estimate_equals_calibrated_without_calibration():
+    state = pressure_state(estimated_tokens=1_000, context_length=10_000)
+    assert state.raw_estimated_tokens == state.estimated_tokens == 1_000

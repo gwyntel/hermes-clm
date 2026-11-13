@@ -61,6 +61,14 @@ __all__ = [
 TOOLSET = "clm"
 AGENT_ORIGIN = "agent"
 
+#: ``clm_status`` detail levels. The default is a summary on purpose: a diagnostic
+#: payload that costs a few thousand tokens to answer "how much room do I have?"
+#: is self-defeating, and the model asks it often.
+STATUS_DETAILS = ("summary", "full")
+#: A full status keeps only the newest receipts (each carries a whole alignment
+#: block); the engine keeps the rest in memory for its own diagnostics.
+STATUS_RECEIPT_LIMIT = 3
+
 #: Operation kinds the general ``clm_stage`` tool accepts. ``pin`` and
 #: ``boundary`` have dedicated tools so their semantics are not blurred into a
 #: free-form batch; ``unpin`` is operator-only and never agent-reachable.
@@ -95,6 +103,12 @@ class ToolLimits:
     max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_aux_spans: int = 12
     max_instruction_bytes: int = 600
+    #: Auxiliary chunking budget (see ``hermes_clm.auxiliary``): the largest span
+    #: is ``prompt chunk * max_span_chunks`` and one proposal spends at most
+    #: ``max_aux_calls`` calls. Literal defaults rather than an import, because
+    #: ``auxiliary`` imports this module.
+    max_span_chunks: int = 8
+    max_aux_calls: int = 8
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any] | None) -> ToolLimits:
@@ -104,7 +118,13 @@ class ToolLimits:
         if not isinstance(config, Mapping):
             return defaults
         values: dict[str, int] = {}
-        for field in ("max_rewrite_bytes", "max_aux_spans", "max_operations"):
+        for field in (
+            "max_rewrite_bytes",
+            "max_aux_spans",
+            "max_operations",
+            "max_span_chunks",
+            "max_aux_calls",
+        ):
             raw = config.get(f"clm.{field}", config.get(field))
             if isinstance(raw, bool):
                 continue
@@ -445,6 +465,105 @@ def _service_result(result: Any, *, ok_key: str = "ok") -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Status shaping
+# --------------------------------------------------------------------------- #
+
+
+def _status_detail(args: Mapping[str, Any]) -> str:
+    """``detail`` argument: ``summary`` (default) or ``full``, nothing else."""
+
+    if "detail" not in args or args["detail"] is None:
+        return "summary"
+    value = args["detail"]
+    if not isinstance(value, str) or value not in STATUS_DETAILS:
+        raise _Invalid(
+            "invalid_field",
+            "detail must be 'summary' or 'full'",
+            hint=f"allowed: {', '.join(STATUS_DETAILS)}",
+        )
+    return value
+
+
+def _status_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The small answer: is context pressure fine, and what changed last.
+
+    Deliberately excludes ``projection``, ``budget``, ``receipts``, ``config``,
+    ``limits``, ``index``, ``health`` and ``aux`` metrics - the fields that made
+    ``clm_status`` cost thousands of tokens. ``detail="full"`` still returns them.
+    """
+
+    budget = payload.get("budget")
+    budget = budget if isinstance(budget, Mapping) else {}
+    tokens = payload.get("tokens")
+    summary: dict[str, Any] = {
+        "ok": payload.get("ok", True),
+        "detail": "summary",
+        "revision": payload.get("revision"),
+    }
+    tier = budget.get("tier")
+    if isinstance(tier, str) and tier:
+        summary["tier"] = tier
+    usage = payload.get("usage_percent")
+    if isinstance(usage, (int, float)) and not isinstance(usage, bool):
+        summary["usage_percent"] = round(float(usage), 1)
+    context_length = payload.get("context_length", budget.get("context_length"))
+    if isinstance(context_length, int) and not isinstance(context_length, bool):
+        summary["context_length"] = context_length
+    if isinstance(tokens, Mapping):
+        summary["tokens"] = dict(tokens)
+    counts = payload.get("counts")
+    if isinstance(counts, Mapping):
+        summary["counts"] = dict(counts)
+    staged = payload.get("staged_transactions")
+    if isinstance(staged, list) and staged:
+        summary["staged"] = len(staged)
+    summary["last_compaction"] = payload.get("last_compaction")
+    summary["last_error"] = payload.get("last_error")
+    summary["hint"] = (
+        'call clm_status with detail="full" for budget, projection, receipts, config and limits'
+    )
+    return summary
+
+
+def _status_view(payload: Mapping[str, Any], detail: str) -> dict[str, Any]:
+    """Render one service status payload at the requested detail level."""
+
+    full = dict(payload)
+    full.setdefault("ok", True)
+    if detail == "summary":
+        return _status_summary(full)
+    receipts = full.get("receipts")
+    if isinstance(receipts, list) and len(receipts) > STATUS_RECEIPT_LIMIT:
+        full["receipts"] = receipts[-STATUS_RECEIPT_LIMIT:]
+        full["receipts_omitted"] = len(receipts) - STATUS_RECEIPT_LIMIT
+    full["detail"] = "full"
+    return full
+
+
+def _preview(service: Any, operations: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Price a staged batch through the service's pure preview, when it has one.
+
+    ``None`` means "this service cannot price a batch" (a contract-minimal store,
+    a fake, or a preview that raised): the stage itself already succeeded, so a
+    missing projection is absent detail rather than an error.
+    """
+
+    preview = getattr(service, "preview", None)
+    if not callable(preview):
+        return None
+    try:
+        result = preview(operations)
+    except Exception:
+        return None
+    if result is None:
+        return None
+    try:
+        return _result_mapping(result)
+    except _Invalid:
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Handlers
 # --------------------------------------------------------------------------- #
 
@@ -505,13 +624,14 @@ class ToolHandlers:
     def status(
         self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
     ) -> Mapping[str, Any]:
-        _check_keys(args, allowed=())
+        _check_keys(args, allowed=("detail",))
+        detail = _status_detail(args)
         payload = self._call(self._service(session_id), "status")
         if self.aux is not None:
             metrics = getattr(self.aux, "metrics", None)
             if callable(metrics):
                 payload.setdefault("aux", metrics())
-        return payload
+        return _status_view(payload, detail)
 
     @_guarded
     def inspect(
@@ -554,8 +674,9 @@ class ToolHandlers:
         operations = _normalise_operations(args["operations"], self.limits)
         expected_revision = _require_int(args, "expected_revision")
         txn_id = _txn_id(args, required=False)
+        service = self._service(session_id)
         payload = self._call(
-            self._service(session_id),
+            service,
             "stage",
             operations,
             expected_revision=expected_revision,
@@ -569,6 +690,9 @@ class ToolHandlers:
             payload.setdefault(
                 "note", "staged only; call clm_commit with expected_revision to apply"
             )
+            projected = _preview(service, operations)
+            if projected is not None:
+                payload["projected"] = projected
         return payload
 
     @_guarded
@@ -809,8 +933,23 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
         _spec(
             "clm_status",
             "Report the context-management revision, token pressure, span counts, "
-            "store health and last error for this session. Read-only.",
-            {"type": "object", "properties": {}, "additionalProperties": False},
+            "last compaction and last error for this session. Returns a small summary "
+            "by default; pass detail='full' for budget, projection, receipts, config "
+            "and limits. Read-only.",
+            {
+                "type": "object",
+                "properties": {
+                    "detail": {
+                        "type": "string",
+                        "enum": list(STATUS_DETAILS),
+                        "description": (
+                            "summary (default) reports revision, tier, usage, counts, "
+                            "last_compaction and last_error; full adds the diagnostics."
+                        ),
+                    }
+                },
+                "additionalProperties": False,
+            },
             handlers.status,
         ),
         _spec(
@@ -840,8 +979,9 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
         _spec(
             "clm_stage",
             "Stage keep/drop/rewrite/offload/restore edits against an expected revision. "
-            "Nothing changes until clm_commit succeeds. Use clm_pin for pins and "
-            "clm_boundary for task boundaries.",
+            "Nothing changes until clm_commit succeeds; the result includes a pure "
+            "'projected' preview (before/after/saved tokens) of what the batch would "
+            "send. Use clm_pin for pins and clm_boundary for task boundaries.",
             {
                 "type": "object",
                 "properties": {
@@ -973,9 +1113,10 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
         ),
         _spec(
             "clm_propose_compression",
-            "Ask the auxiliary compressor to propose rewrites for editable spans. Returns an "
-            "immutable proposal (ID, hash, base revision) and review text. Nothing is staged "
-            "or applied until clm_accept_proposal and clm_commit.",
+            "Ask the auxiliary compressor to propose rewrites for editable spans. Long "
+            "spans are rewritten in bounded chunks and reassembled into one whole-span "
+            "rewrite. Returns an immutable proposal (ID, hash, base revision) and review "
+            "text. Nothing is staged or applied until clm_accept_proposal and clm_commit.",
             {
                 "type": "object",
                 "properties": {
@@ -1097,6 +1238,8 @@ def _engine_aux(config: Mapping[str, Any]) -> Any:
             max_spans=limits.max_aux_spans,
             max_rewrite_bytes=limits.max_rewrite_bytes,
             max_instruction_bytes=limits.max_instruction_bytes,
+            max_span_chunks=limits.max_span_chunks,
+            max_aux_calls=limits.max_aux_calls,
         ),
         enabled=_config_bool(config, "aux_enabled", True),
     )

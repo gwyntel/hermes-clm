@@ -404,17 +404,26 @@ rewrite onto a dropped span. `rebuild_state()` on a consistent store reports `ch
 
 ### 9.1 What the auxiliary compressor will and will not send
 
-`AuxCompressor.propose` rewrites **whole spans**, so it refuses anything it cannot show the
-model whole:
+`AuxCompressor.propose` rewrites **whole spans**. A real tool result routinely runs 8k-27k
+characters, so a span larger than one prompt chunk is rewritten **map-reduce style**: it is
+split on newline boundaries into lossless chunks (`"".join(chunks) == span`), each chunk gets
+its own request tagged `part=i/n`, and the returned parts are concatenated in order into one
+whole-span rewrite. Safety does not rest on the 4k figure — the auxiliary output is untrusted
+and the store pins the proposal by hash either way.
 
-* a span longer than `prompt_span_chars` (4000) is refused *before* the aux call with
-  `span_too_large` (message names the span and both sizes; hint: drop it, split it into
-  smaller spans, or `clm_stage` a rewrite). The batch is refused as a unit — no partial
-  proposal, no second call, no spent budget. Span text is never truncated, so a returned
-  rewrite always covers exactly the bytes the model saw.
-* the total prompt is bounded by `prompt_total_chars` (24000): spans that no longer fit are
-  left out of the request entirely rather than clipped.
-* a returned rewrite larger than `max_rewrite_bytes` is refused (`aux_invalid_output`).
+* the largest single request payload is `prompt_span_chars` (8000) characters of span text;
+  the total prompt is bounded by `prompt_total_chars` (24000). Spans that do not fit the
+  batch prompt are left out of the request entirely rather than clipped, never truncated
+  mid-span.
+* one span may be split into at most `max_span_chunks` (8) chunks, and one proposal may spend
+  at most `max_aux_calls` (8) auxiliary calls. A span or batch that would need more is refused
+  *before* the first call with `span_too_large` (message names the span, its size and the
+  budget), so there is no partial proposal and no spent budget.
+* every chunk must come back: a chunked span whose parts are incomplete is refused with
+  `aux_incomplete` rather than joined from a prefix, which is the one way a chunked rewrite
+  could silently lose its tail.
+* a returned rewrite larger than `max_rewrite_bytes` is refused (`aux_invalid_output`),
+  checked per part **and** on the reassembled whole span (parts that each fit can sum past it).
 
 ### 9.2 Proposal identity
 

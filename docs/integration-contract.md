@@ -12,6 +12,7 @@ Delegates may refine internals, not these public semantics. Python type annotati
 - `discard(*, txn_id: str) -> None`
 - `revert(*, target_revision: int, expected_revision: int, txn_id: str, actor_origin: str) -> CommitResult` — new head revision, no truncation.
 - `status() -> dict[str, Any]`
+- `last_compaction() -> dict[str, Any] | None` — newest revision carrying a `drop` or `offload`, as `{revision, at, actor, kind, spans_offloaded, tokens_freed}`; `None` when nothing was ever compacted. A revert does not erase it, and it counts distinct spans. Optional: a store without it is supported (the engine then reports no compaction).
 - `inspect(*, cursor: str | None = None, limit: int = 50) -> dict[str, Any]`
 - `search(query: str, *, cursor: str | None = None, limit: int = 20) -> dict[str, Any]`
 - `retrieve(span_id: str) -> dict[str, Any]` — current session only.
@@ -45,6 +46,8 @@ Engine calls only `for_session`, `ingest`, `snapshot`, `status`, lifecycle/close
 
 Engine exposes `store` only through its own scoped tool-service methods. Tool handlers never accept `session_id`, paths, provider, model, base URL or API keys. All return JSON strings. Tool schemas contain no provider configuration.
 
+`clm_status` takes an optional `detail`: `summary` (default) returns revision, tier, usage, token vocabulary, counts, `last_compaction`, `last_error` and a hint; `full` adds budget, projection, config, limits, health, aux metrics and receipts capped to the newest three with `receipts_omitted`. `clm_stage` prices a batch it just staged through the engine's pure `preview(operations) -> {before, after, saved, calibrated, conflicts}` and reports it as `projected`; no `preview` means absent detail, never a failed stage.
+
 ## Configuration
 
 Read only `clm.*` from profile config plus Hermes-supplied model/context state. Suggested keys:
@@ -56,6 +59,7 @@ Read only `clm.*` from profile config plus Hermes-supplied model/context state. 
 - `clm.archive_redact` (default true)
 - `clm.retention_sessions` (default 32; pinned content exempt until operator purge)
 - `clm.max_retrieve_bytes`, `clm.max_rewrite_bytes`, `clm.max_aux_spans`
+- `clm.max_span_chunks`, `clm.max_aux_calls` (bounded chunking for long auxiliary spans; defaults 8 and 8)
 
 No model IDs or provider fallback configuration. Do not change production config to test defaults; inject config into constructors in tests.
 

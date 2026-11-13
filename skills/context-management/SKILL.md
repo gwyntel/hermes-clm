@@ -42,9 +42,9 @@ only what is already there.
 
 | Tool | Purpose |
 |---|---|
-| `clm_status` | Revision, token pressure, span counts, store health, aux metrics |
-| `clm_inspect` | Page through editable spans: IDs, roles, origins, token estimates |
-| `clm_stage` | Batch of `keep`/`drop`/`rewrite`/`offload`/`restore` against a revision |
+| `clm_status` | Revision, tier, usage, counts, last compaction (small by default) |
+| `clm_inspect` | Page through editable spans: IDs, roles, origins, `est_tokens` and `est_calibrated` |
+| `clm_stage` | Stage a batch of `keep`/`drop`/`rewrite`/`offload`/`restore`; returns a projected `before`/`after`/`saved` |
 | `clm_commit` | Apply a staged transaction |
 | `clm_discard` | Throw a staged transaction away |
 | `clm_revert` | Restore an earlier revision as a new head revision |
@@ -60,15 +60,27 @@ the prose, and correct the call.
 
 ## Workflow
 
-1. `clm_status` → read `revision`.
+1. `clm_status` → read `revision` (add `detail: "full"` only when you need budget,
+   projection or receipts — the summary is deliberately cheap).
 2. `clm_inspect` → collect the span IDs you actually want to change.
 3. `clm_stage` with `expected_revision` = that revision and a `txn_id` you reuse on retry.
-4. Review the staged receipt (`applied`, `inert`, `conflicting`).
+4. Review `projected` (`before`, `after`, `saved` plus any `conflicts`) against the
+   staged receipt (`applied`, `inert`). Nothing has been applied at this point.
 5. `clm_commit` with the **same** `txn_id` and `expected_revision`.
 
 The next request reflects the new revision. The host transcript does not change:
 `/undo`, `/rewind` and `/branch` still win, and operations on spans that no longer
 exist become inert.
+
+### Addressability and timing
+
+- Only rows a later turn can still see are editable. The system row, the current
+  turn and the newest tool result are host-owned: a tool result can be compacted on
+  a later turn, never in the turn that produced it.
+- An operator can compact mid-task. Earlier results then render as
+  `[clm.offloaded span=... sha256=...]` stubs and a single `[clm.notice rev=N ...]`
+  row names the revision. That is the archive, not lost work — `clm_retrieve` the
+  original instead of re-running the tool.
 
 ### Revision discipline
 
@@ -103,6 +115,11 @@ of its results together, or not at all.
 Proposals are immutable. A changed hash, a stale base revision, or a span that moved
 will be refused — propose again instead of editing the proposal. The auxiliary model
 cannot stage, commit or pin anything.
+
+Long spans are rewritten in bounded chunks and reassembled into one whole-span
+rewrite, so a 20k-char tool result is proposable. If a chunk comes back missing the
+proposal is refused (`aux_incomplete`) rather than assembled from a prefix: never
+commit a rewrite the tool refused.
 
 ## Operator actions (not yours)
 

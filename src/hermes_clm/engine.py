@@ -29,13 +29,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import budget as _budget
+from . import notice as _notice
 from ._version import __version__ as _ENGINE_VERSION
 from .auxiliary import (
     AuxCompressor,
     AuxLimits,
     bound_timeout,
 )
-from .budget import TokenCalibration
+from .budget import TokenCalibration, token_vocabulary
 from .errors import CLMError
 from .models import MAX_REWRITE_BYTES
 from .projection import ProjectionResult, project
@@ -634,6 +635,9 @@ class ToolService:
         store = self._engine.store
         if store is not None:
             payload["revision"] = self._live_revision(store)
+            # Refresh (never guess) what the last compaction did: the operator's
+            # ``/compact`` writes revisions this engine did not author.
+            payload["last_compaction"] = self._engine.compaction_summary()
             try:
                 live = store.status()
             except Exception as exc:
@@ -665,8 +669,33 @@ class ToolService:
         return payload
 
     def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        """Bounded active-context view for this session only."""
-        return self._call_store("inspect", cursor=cursor, limit=limit)
+        """Bounded active-context view for this session only.
+
+        Each span keeps the store's raw ``est_tokens`` (``chars/4``) and gains
+        ``est_calibrated``: the same estimate after the learned ratio. Sizing an
+        edit from the raw figure while the budget uses the calibrated one is the
+        mismatch this field exists to end.
+        """
+        payload = self._call_store("inspect", cursor=cursor, limit=limit)
+        items = payload.get("items")
+        if isinstance(items, list):
+            calibration = self._engine.calibration
+            enriched: list[Any] = []
+            for item in items:
+                if isinstance(item, Mapping):
+                    fresh = dict(item)
+                    raw = fresh.get("est_tokens")
+                    if isinstance(raw, int) and not isinstance(raw, bool):
+                        fresh.setdefault("est_calibrated", calibration.adjust(raw))
+                    enriched.append(fresh)
+                else:
+                    enriched.append(item)
+            payload["items"] = enriched
+        return payload
+
+    def preview(self, operations: Sequence[Any]) -> dict[str, Any]:
+        """Pure projection of a staged batch (no write, no revision bump)."""
+        return self._engine.preview(operations)
 
     def stage(
         self,
@@ -934,6 +963,16 @@ class CLMEngine(_EngineBase):
         self._last_summary_error: Optional[str] = None
         self._last_receipts: List[Dict[str, Any]] = []
         self._last_estimate = 0
+        #: The last request this engine was asked to project, and the history it
+        #: was aligned against. Kept (shallow copies of row references, never
+        #: mutated) so ``clm_stage`` can price a batch *before* committing it:
+        #: the projection is pure, so the preview needs no write.
+        self._last_request: Optional[List[Mapping[str, Any]]] = None
+        self._last_history: Optional[List[Mapping[str, Any]]] = None
+        #: Memo of the store-derived compaction summary, keyed by the head
+        #: revision it was read at. Compaction state only changes when a new
+        #: revision lands, so this makes the per-turn notice check free.
+        self._compaction_cache: Optional[Tuple[int, Optional[Dict[str, Any]]]] = None
         self._usage_receipts: List[Dict[str, Any]] = []
         self.last_cache_read_tokens = 0
         self.last_cache_write_tokens = 0
@@ -948,6 +987,8 @@ class CLMEngine(_EngineBase):
                 max_spans=self._tool_limits.max_aux_spans,
                 max_rewrite_bytes=self._tool_limits.max_rewrite_bytes,
                 max_instruction_bytes=self._tool_limits.max_instruction_bytes,
+                max_span_chunks=self._tool_limits.max_span_chunks,
+                max_aux_calls=self._tool_limits.max_aux_calls,
             ),
             enabled=self.config.aux_enabled,
         )
@@ -1286,6 +1327,9 @@ class CLMEngine(_EngineBase):
         self._last_estimate = 0
         self._last_projection = None
         self._last_receipts.clear()
+        self._last_request = None
+        self._last_history = None
+        self._compaction_cache = None
         self._reset_pending = True
         self._release_binding()
         self._close_store()
@@ -1294,6 +1338,7 @@ class CLMEngine(_EngineBase):
         store, self._store = self._store, None
         self._store_session = None
         self._store_home = None
+        self._compaction_cache = None
         if store is not None:
             try:
                 store.close()
@@ -1414,6 +1459,104 @@ class CLMEngine(_EngineBase):
         if len(self._last_receipts) > RECEIPT_LIMIT:
             del self._last_receipts[: len(self._last_receipts) - RECEIPT_LIMIT]
 
+    # ------------------------------------------------------------------ compaction visibility
+
+    def compaction_summary(self, revision: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Store-derived summary of the newest compaction, or ``None``.
+
+        ``revision`` is the head the caller already knows (a snapshot revision
+        costs nothing to pass); ``None`` reads the live head. The answer is
+        memoised per head revision: compaction state can only change when a new
+        revision lands, so the per-turn notice check costs one query per
+        revision, not one per turn.
+
+        A store without ``last_compaction()`` (a contract-minimal fake, an older
+        delivery) yields ``None`` rather than a raised exception: absent
+        visibility must not break ``select_context``.
+        """
+
+        store = self._store
+        if store is None:
+            return None
+        head = int(revision) if revision is not None else ToolService._live_revision(store)
+        cache = self._compaction_cache
+        if cache is not None and cache[0] == head:
+            return cache[1]
+        summary: Optional[Dict[str, Any]] = None
+        reader = getattr(store, "last_compaction", None)
+        if callable(reader):
+            try:
+                raw = reader()
+            except Exception as exc:  # degradation, not a request failure
+                self._record_error(exc)
+                raw = None
+            if isinstance(raw, Mapping):
+                candidate = dict(raw)
+                revision_value = candidate.get("revision")
+                if isinstance(revision_value, int) and not isinstance(revision_value, bool):
+                    summary = candidate
+        self._compaction_cache = (head, summary)
+        return summary
+
+    def _remember_request(
+        self,
+        request: Sequence[Mapping[str, Any]],
+        history: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Keep the last projected request (by reference) for a stage preview."""
+        self._last_request = [row for row in request if isinstance(row, Mapping)]
+        self._last_history = [row for row in history if isinstance(row, Mapping)]
+
+    def preview(self, operations: Sequence[Any]) -> Dict[str, Any]:
+        """Price a not-yet-committed batch against the last projected request.
+
+        Pure: it reads the store snapshot, appends ``operations`` to a *local*
+        view and projects. No stage, no commit, no revision bump. A batch the
+        projector would refuse reports ``ok: False`` with its conflicts and
+        ``saved: 0`` — the preview is advice, never a decision.
+
+        ``before``/``after``/``saved`` are raw ``chars/4`` estimates (labelled
+        ``estimator``); the same three numbers after calibration are under
+        ``calibrated`` so a caller does not size an edit against a figure the
+        budget would disagree with.
+        """
+
+        request = self._last_request
+        if not request:
+            return {
+                "available": False,
+                "reason": "no_request_observed",
+                "hint": "the preview prices a batch against the last request this session projected",
+            }
+        snapshot = self._snapshot()
+        if snapshot is None:
+            return {"available": False, "reason": "store_unavailable"}
+        if bool(getattr(snapshot, "operations_truncated", False)):
+            return {"available": False, "reason": "operations_truncated"}
+        view = self._local_view(snapshot, list(operations), "preview")
+        result = self._project(request, self._last_history or request, snapshot=view)
+        before = int(result.before_tokens)
+        after = int(result.after_tokens) if result.ok else before
+        payload: Dict[str, Any] = {
+            "available": True,
+            "ok": bool(result.ok),
+            "before": before,
+            "after": after,
+            "saved": max(0, before - after),
+            "applied": len(result.applied),
+            "inert": len(result.inert),
+            "conflicts": [dict(item) for item in result.conflicts],
+            "estimator": "chars/4",
+        }
+        calibrated_before = self.calibration.adjust(before)
+        calibrated_after = self.calibration.adjust(after)
+        payload["calibrated"] = {
+            "before": calibrated_before,
+            "after": calibrated_after,
+            "saved": max(0, calibrated_before - calibrated_after),
+        }
+        return payload
+
     # ------------------------------------------------------------------ projection
 
     def select_context(
@@ -1428,6 +1571,13 @@ class CLMEngine(_EngineBase):
 
         Returns ``None`` (request untouched, byte-identical, cache-safe) when
         nothing is committed, nothing applies, or the projection refuses.
+
+        One exception, and it is revision-keyed rather than per-turn: after a
+        compaction the request carries a single notice row naming the revision
+        that archived the agent's earlier tool results. Its bytes are a pure
+        function of that revision, so it is byte-identical on every turn until
+        the next compaction - the prefix cache survives, and a mid-task agent
+        can tell "my tool output was offloaded" from "I never ran that tool".
         """
         try:
             if not request_messages or not all(
@@ -1440,6 +1590,11 @@ class CLMEngine(_EngineBase):
             if not history:
                 # No durable identity => nothing is editable; do not even open the store.
                 return None
+            # A host that echoes a previous projection back as the request must
+            # not accumulate one notice per turn: strip our own rows first.
+            request = _notice.split_notice_rows(request_messages)
+            if not request:
+                return None
             if not self._ingest(history):
                 return None
             snapshot = self._snapshot()
@@ -1450,13 +1605,13 @@ class CLMEngine(_EngineBase):
                 # Fail closed: leave the request byte-identical.
                 self._last_error = "operations_truncated"
                 return None
-            if int(getattr(snapshot, "revision", 0) or 0) <= 0 and not tuple(
-                getattr(snapshot, "operations", ()) or ()
-            ):
-                self._last_estimate = _budget.estimate_messages_tokens(request_messages)
+            revision = int(getattr(snapshot, "revision", 0) or 0)
+            if revision <= 0 and not tuple(getattr(snapshot, "operations", ()) or ()):
+                self._last_estimate = _budget.estimate_messages_tokens(request)
+                self._remember_request(request, history)
                 return None
             result = self._project(
-                request_messages, history, snapshot=snapshot, incoming_message=incoming_message
+                request, history, snapshot=snapshot, incoming_message=incoming_message
             )
             self._last_projection = result
             self._last_estimate = result.after_tokens or result.before_tokens
@@ -1464,9 +1619,20 @@ class CLMEngine(_EngineBase):
             if not result.ok:
                 self._last_error = "projection_refused"
                 return None
-            if not result.changed:
+            self._remember_request(request, history)
+            notice = _notice.compaction_notice(self.compaction_summary(revision))
+            if result.changed:
+                messages = [dict(message) for message in result.messages]
+            elif notice is not None:
+                # Nothing to project, but the agent still has to learn that its
+                # earlier tool output now lives in the archive.
+                messages = self._identity_copy(request)
+            else:
                 return None
-            return [dict(message) for message in result.messages]
+            if notice is not None:
+                messages = _notice.with_notice(messages, notice)
+                self._last_estimate = _budget.estimate_messages_tokens(messages)
+            return messages
         except Exception as exc:
             self._record_error(exc)
             return None
@@ -2006,6 +2172,8 @@ class CLMEngine(_EngineBase):
     def get_status(self) -> Dict[str, Any]:
         """Host status plus CLM revision, budget, receipts and last error."""
         status = dict(super().get_status())
+        budget = self.budget_state()
+        cached_compaction = self._compaction_cache
         status.update(
             {
                 "engine": self.name,
@@ -2022,13 +2190,24 @@ class CLMEngine(_EngineBase):
                 "store_root_session": getattr(self._store, "session_id", None),
                 # A label, never the path: status crosses into host messages.
                 "store_home_source": self._home_source,
+                # The three token numbers, each under its own label. ``budget`` keeps
+                # the figures edit validation uses; this vocabulary makes them
+                # comparable instead of leaving one ambiguous "tokens" figure.
+                "tokens": token_vocabulary(
+                    spans=int(budget.get("raw_estimated_tokens", 0) or 0),
+                    calibration=self.calibration,
+                    actual=self.last_prompt_tokens,
+                ),
+                # Store-derived; ``ToolService.status`` refreshes it, this read is
+                # the cached view so host status calls stay free of store IO.
+                "last_compaction": cached_compaction[1] if cached_compaction else None,
                 # Why the last /compact produced no reduction (or committed without one).
                 "last_compress_aborted": bool(self._last_compress_aborted),
                 "last_compress_error": self._last_summary_error,
                 # Set when the durable child→parent lineage could not be written: the
                 # live engine is fine, a cold child would start empty.
                 "last_lineage_error": self._last_lineage_error,
-                "budget": self.budget_state(),
+                "budget": budget,
                 "calibration": self.calibration.to_dict(),
                 "cache_read_tokens": self.last_cache_read_tokens,
                 "cache_write_tokens": self.last_cache_write_tokens,
