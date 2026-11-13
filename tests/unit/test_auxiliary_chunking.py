@@ -22,6 +22,9 @@ from hermes_clm.auxiliary import (
     MAX_SPAN_CHUNKS,
     AuxCompressor,
     AuxLimits,
+    PromptBudgetError,
+    _plan_units,
+    _render_span_block,
     _split_chunks,
 )
 
@@ -278,3 +281,166 @@ def test_chunked_run_reports_metrics_for_every_call(service):
     assert metrics["calls"] == len(client.calls) > 1
     assert metrics["failures"] == 0
     assert json.loads(json.dumps(metrics))  # metrics stay serialisable
+
+
+# --------------------------------------------------------------------------- #
+# Total-budget packing: no span may be left out of the prompt
+# --------------------------------------------------------------------------- #
+
+
+def medium_span(index: int, *, lines: int = 270) -> str:
+    """~5.1k chars: under the 8k chunk ceiling, over a fifth of the 24k total."""
+
+    return "\n".join(f"output line {index:04d} ok" for _ in range(lines))
+
+
+def _ids_in(prompt: str) -> list[str]:
+    return re.findall(r"^SPAN (\S+)", prompt, re.MULTILINE)
+
+
+def test_stock_budget_packs_medium_spans_into_budget_bounded_requests(service):
+    """Blocker: five 5k spans under stock limits used to return 4 rewrites.
+
+    The old planner packed *every* small span into one request and the message
+    builder silently broke at ``prompt_total_chars``, so the fifth span was never
+    sent while the batch still reported success. Packing must spend as many
+    requests as the total budget needs, not drop text.
+    """
+
+    ids = [f"m-04{index:02d}" for index in range(5)]
+    texts = {span_id: medium_span(index) for index, span_id in enumerate(ids)}
+    for span_id, text in texts.items():
+        assert 4_000 < len(text) <= MAX_PROMPT_SPAN_CHARS, (
+            "these are *small* spans (packing, not chunking) that together exceed the total"
+        )
+        service.add_span(span_id, text)
+
+    def plan(prompt: str, index: int):
+        # A faithful model rewrites exactly the spans it was shown.
+        return aux_json(
+            {
+                "rewrites": [
+                    {"span_id": span_id, "text": f"short {span_id}"} for span_id in _ids_in(prompt)
+                ]
+            }
+        )
+
+    client = PlanClient(plan)
+    result = AuxCompressor(client).propose(service, span_ids=ids)
+
+    assert result["ok"] is True, result
+    assert len(client.calls) > 1, "24k of span text cannot ride in one 24k prompt"
+    assert all(len(prompt) <= 24_000 for prompt in client.prompts()), (
+        "a request exceeded the budget"
+    )
+    assert [op["span_ids"][0] for op in result["proposal"]["operations"]] == ids, (
+        "every requested span must come back, not just the ones that fit one prompt"
+    )
+    sent = "".join(client.prompts())
+    for span_id, text in texts.items():
+        assert sent.count(text) == 1, f"{span_id} text reached the model {sent.count(text)} times"
+
+
+def test_a_max_length_instruction_cannot_push_span_text_out_of_the_request(service):
+    """Header overhead is part of the budget; ignoring it is how text got dropped."""
+
+    ids = [f"m-05{index:02d}" for index in range(4)]
+    texts = {span_id: medium_span(index) + "z" * 800 for index, span_id in enumerate(ids)}
+    for span_id, text in texts.items():
+        service.add_span(span_id, text)
+    instruction = "keep every failing assertion " * 40
+
+    def plan(prompt: str, index: int):
+        return aux_json(
+            {
+                "rewrites": [
+                    {"span_id": span_id, "text": f"s{span_id}"} for span_id in _ids_in(prompt)
+                ]
+            }
+        )
+
+    client = PlanClient(plan)
+    result = AuxCompressor(client).propose(service, span_ids=ids, instruction=instruction[:600])
+
+    assert result["ok"] is True, result
+    assert all(len(prompt) <= 24_000 for prompt in client.prompts())
+    assert [op["span_ids"][0] for op in result["proposal"]["operations"]] == ids
+    sent = "".join(client.prompts())
+    for text in texts.values():
+        assert sent.count(text) == 1
+
+
+def test_a_small_total_budget_still_sends_every_span(service):
+    ids = [f"m-06{index}" for index in range(4)]
+    for index, span_id in enumerate(ids):
+        service.add_span(span_id, ("short output %d\n" % index) * 12)
+
+    def plan(prompt: str, index: int):
+        return aux_json(
+            {
+                "rewrites": [
+                    {"span_id": span_id, "text": f"s{span_id}"} for span_id in _ids_in(prompt)
+                ]
+            }
+        )
+
+    client = PlanClient(plan)
+    compressor = AuxCompressor(
+        client, limits=AuxLimits(prompt_span_chars=300, prompt_total_chars=600, max_aux_calls=8)
+    )
+    result = compressor.propose(service, span_ids=ids)
+
+    assert result["ok"] is True, result
+    assert len(client.calls) >= 2, "four 180-char spans plus framing do not fit a 600-char prompt"
+    assert all(len(prompt) <= 600 for prompt in client.prompts())
+    assert [op["span_ids"][0] for op in result["proposal"]["operations"]] == ids
+
+
+def test_span_that_cannot_fit_the_total_budget_is_refused_before_any_call(service):
+    service.add_span("m-0700", "q" * 400)
+    client = SequenceClient([rewritten("m-0700", "short")])
+    compressor = AuxCompressor(
+        client, limits=AuxLimits(prompt_span_chars=8_000, prompt_total_chars=200)
+    )
+
+    result = compressor.propose(service, span_ids=["m-0700"])
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "span_too_large"
+    assert "m-0700" in result["errors"][0]["message"]
+    assert client.calls == [], "an unrenderable request must fail before the network"
+    assert compressor.metrics()["calls"] == 0
+
+
+def test_build_messages_raises_rather_than_dropping_a_span(service):
+    """The last line of defence: never a shorter prompt reported as complete."""
+
+    compressor = AuxCompressor(limits=AuxLimits(prompt_total_chars=120))
+    spans = [
+        {"span_id": "m-1", "role": "tool", "origin": "host", "text": "x" * 40},
+        {"span_id": "m-2", "role": "tool", "origin": "host", "text": "y" * 40},
+    ]
+
+    with pytest.raises(PromptBudgetError):
+        compressor._build_messages(spans, None)
+
+
+def test_plan_units_packs_into_multiple_budget_bounded_units():
+    spans = [
+        {"span_id": f"s{index}", "role": "tool", "origin": "host", "text": "x" * 100}
+        for index in range(5)
+    ]
+    # One block renders to ~150 chars, so a 400-char budget fits two per request.
+    units = _plan_units(spans, chunk=1_000, budget=400, overhead=0)
+
+    assert [len(unit.spans) for unit in units] == [2, 2, 1]
+    assert [span_id for unit in units for span_id in unit.span_ids] == [
+        "s0",
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+    ]
+    for unit in units:
+        rendered = "".join(_render_span_block(span) for span in unit.spans)
+        assert len(rendered) <= 400

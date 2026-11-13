@@ -941,6 +941,11 @@ class CLMEngine(_EngineBase):
         #: Code of the last failed durable-lineage write, so a child that cannot
         #: resolve its parent's archive is diagnosable instead of merely empty.
         self._last_lineage_error: Optional[str] = None
+        #: Why the last compression rotation was refused instead of adopted. A
+        #: child id that already owns a store must keep that store: adopting the
+        #: parent archive anyway would leave two archives for one conversation,
+        #: each of which looks authoritative depending on which process reads it.
+        self._last_rotation_error: Optional[str] = None
         self._logger = logger if logger is not None else _LOG
         self.calibration = TokenCalibration()
         self._tool_limits = ToolLimits.from_config(self._raw_config)
@@ -1212,6 +1217,7 @@ class CLMEngine(_EngineBase):
         adopted = self._adopts_rotation(new_session_id, previous, boundary)
         if adopted:
             child_id = str(new_session_id)
+            self._last_rotation_error = None
             self._release_binding(self._session_id)
             self._session_id = child_id
             self._store_session = child_id
@@ -1272,7 +1278,49 @@ class CLMEngine(_EngineBase):
             self._ensure_store()
         if self._store is not None and self._store_session not in (None, self._session_id):
             return False
+        if self._child_owns_store(str(new_session_id)):
+            # The child id already has an archive of its own. Adopting the
+            # parent's would shadow it in memory while it stays on disk, and the
+            # two would diverge with no way to tell which one is the
+            # conversation. Refuse, keep the child's own store, and say so.
+            reason = "rotation_conflict:child_store_present"
+            self._last_rotation_error = reason
+            self._receipt(
+                {
+                    "stage": "session_rotation_refused",
+                    "boundary": boundary,
+                    "from": str(previous),
+                    "to": str(new_session_id),
+                    "reason": reason,
+                }
+            )
+            return False
         return True
+
+    def _child_owns_store(self, child_session_id: str) -> bool:
+        """Whether ``child_session_id`` already has a store on disk.
+
+        Fail-closed for the case that matters: if the *check* fails (an invalid
+        id, an unreadable path layout) the answer is ``True``, so a rotation is
+        refused rather than guessed at. ``False`` means "no store of its own",
+        the only state in which adopting the parent archive is safe; it is also
+        the answer when no home resolves at all, because then there is no archive
+        anywhere to shadow.
+        """
+
+        home = self._store_home or self._resolve_home()
+        if not home:
+            return False
+        try:
+            module = importlib.import_module(".store", __package__)  # lazy, like the factory
+            checker = getattr(module, "session_owns_store", None)
+            if not callable(checker):  # pragma: no cover - older sibling delivery
+                return False
+            return bool(checker(home, child_session_id))
+        except Exception as exc:
+            self._last_rotation_error = f"rotation_conflict:unverifiable:{str(getattr(exc, 'code', '') or type(exc).__name__)}"
+            self._record_error(exc)
+            return True
 
     def _record_lineage(self, child_session_id: str, parent_session_id: str) -> str:
         """Persist ``child → archive owner`` durably; returns a short outcome label.
@@ -1701,8 +1749,15 @@ class CLMEngine(_EngineBase):
                 codes = ",".join(sorted({str(item.get("code")) for item in result.conflicts}))
                 return self._abort_compress(f"projection_refused:{codes}", messages)
             if bypass_cooldown:
-                return self._overflow(messages, snapshot, result)
-            return self._manual(messages, snapshot, result)
+                output = self._overflow(messages, snapshot, result)
+            else:
+                output = self._manual(messages, snapshot, result)
+            # A later ``clm_stage`` must price against the projection this
+            # /compact just produced, not the pre-compaction request that
+            # ``select_context`` saw: that one still contains the text the
+            # compaction replaced.
+            self._remember_request(output, messages)
+            return output
         except Exception as exc:
             self._record_error(exc)
             return self._abort_compress(f"compress_failed:{type(exc).__name__}", messages)
@@ -1794,6 +1849,10 @@ class CLMEngine(_EngineBase):
                 "offloaded": [candidate.group_id for candidate in plan],
                 "needed": need_tokens,
                 "predicted_saving": predicted,
+                # ``needed``/``predicted_saving`` are calibrated tokens (the
+                # planner's vocabulary); ``before_tokens``/``after_tokens`` are the
+                # raw chars/4 projection figures. The ratio reconciles the two.
+                "calibration_ratio": round(float(self.calibration.ratio), 6),
                 "before_tokens": result.before_tokens,
                 "after_tokens": replayed.after_tokens,
             }
@@ -1860,7 +1919,11 @@ class CLMEngine(_EngineBase):
         ratio = float(self.config.manual_target_ratio or 0)
         if ratio <= 0:
             return 0
-        return max(1, int(round(int(tokens) * ratio)))
+        # Same vocabulary as ``_offload_candidates``: the projection figure is a
+        # raw ``chars/4`` estimate, the planner prices calibrated tokens, so the
+        # target is calibrated before the fraction is taken.
+        calibrated = self.calibration.adjust(int(tokens))
+        return max(1, int(round(calibrated * ratio)))
 
     def _abort_compress(
         self, reason: str, messages: Sequence[Mapping[str, Any]]
@@ -1988,7 +2051,19 @@ class CLMEngine(_EngineBase):
     def _offload_candidates(
         self, messages: Sequence[Mapping[str, Any]], snapshot: Any
     ) -> List[_budget.OffloadCandidate]:
-        """Tool-group costs in history order, with protection already applied."""
+        """Tool-group costs in **history row order**, with protection applied.
+
+        Two properties this must not lose:
+
+        * ``order`` is the position of the group's first row in the transcript,
+          not the lexical order of its id. Group ids embed an assistant UID, so
+          sorting them ranks by id and offloads a newer group before an older one
+          — the opposite of the documented oldest-first policy.
+        * ``tokens`` is priced in the same vocabulary ``need_tokens`` uses
+          (calibrated), so a learned ratio cannot make the planner offload extra
+          groups (or too few) for a deficit it has already mis-scaled.
+        """
+
         from .identity import (
             is_editable_content,
             is_protected_message,
@@ -2011,17 +2086,26 @@ class CLMEngine(_EngineBase):
         groups = tool_groups(messages)
         rows = list(messages)
         uid_rows: Dict[str, Mapping[str, Any]] = {}
-        for row in rows:
+        row_positions: Dict[str, int] = {}
+        for position, row in enumerate(rows):
             uid = row.get("message_uid") if isinstance(row, Mapping) else None
             if isinstance(uid, str) and uid:
                 uid_rows.setdefault(uid, row)
+                row_positions.setdefault(uid, position)
         newest_tool_uid = None
         for row in reversed(rows):
             if role_of(row) == "tool" and isinstance(row.get("message_uid"), str):
                 newest_tool_uid = row.get("message_uid")
                 break
         candidates: List[_budget.OffloadCandidate] = []
-        for order, (group_id, members) in enumerate(sorted(groups.members.items())):
+        for order, (group_id, members) in enumerate(
+            sorted(
+                groups.members.items(),
+                key=lambda item: min(
+                    (row_positions.get(uid, len(rows)) for uid in item[1]), default=len(rows)
+                ),
+            )
+        ):
             span_list = [by_uid.get(uid) for uid in members]
             protected = any(
                 span is None
@@ -2047,7 +2131,9 @@ class CLMEngine(_EngineBase):
                 or getattr(by_uid.get(uid), "uid", None) in pin_ids
                 for uid in members
             )
-            tokens = sum(_budget.estimate_message_tokens(uid_rows.get(uid, {})) for uid in members)
+            tokens = self.calibration.adjust(
+                sum(_budget.estimate_message_tokens(uid_rows.get(uid, {})) for uid in members)
+            )
             candidates.append(
                 _budget.OffloadCandidate(
                     order=order,
@@ -2207,6 +2293,9 @@ class CLMEngine(_EngineBase):
                 # Set when the durable child→parent lineage could not be written: the
                 # live engine is fine, a cold child would start empty.
                 "last_lineage_error": self._last_lineage_error,
+                # Set when a compression rotation was refused because the child id
+                # already owns a store (two archives must not silently diverge).
+                "last_rotation_error": self._last_rotation_error,
                 "budget": budget,
                 "calibration": self.calibration.to_dict(),
                 "cache_read_tokens": self.last_cache_read_tokens,

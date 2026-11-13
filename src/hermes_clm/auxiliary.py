@@ -40,6 +40,7 @@ __all__ = [
     "AUX_TASK",
     "AuxCompressor",
     "AuxLimits",
+    "PromptBudgetError",
     "bound_timeout",
     "canonical_proposal_sha256",
     "default_aux_call",
@@ -142,9 +143,19 @@ def _split_chunks(text: str, size: int) -> list[str]:
     return chunks
 
 
+class PromptBudgetError(RuntimeError):
+    """A request would exceed ``prompt_total_chars`` once it is rendered.
+
+    Raised while *building* requests - before any of them is sent - so the
+    caller can refuse the whole proposal. The alternative (silently dropping the
+    span that did not fit) would report success while omitting content the
+    caller asked to rewrite.
+    """
+
+
 @dataclass(frozen=True)
 class _AuxUnit:
-    """One auxiliary request: the packed small spans, or one large-span chunk."""
+    """One auxiliary request: packed small spans, or one large-span chunk."""
 
     spans: tuple[dict[str, Any], ...]
     span_ids: tuple[str, ...]
@@ -152,21 +163,69 @@ class _AuxUnit:
     part: tuple[int, int] | None = None
 
 
-def _plan_units(spans: Sequence[Mapping[str, Any]], *, chunk: int) -> list[_AuxUnit]:
+def _render_span_block(span: Mapping[str, Any], *, part: tuple[int, int] | None = None) -> str:
+    """The exact prompt block for one span.
+
+    One renderer for planning and for sending: the planner can only bound the
+    request truthfully if its idea of a block's size is the block that is sent.
+    """
+
+    text = str(span["text"])
+    marker = ""
+    span_part = span.get("part") or part
+    if isinstance(span_part, tuple) and len(span_part) == 2:
+        marker = f" part={span_part[0]}/{span_part[1]}"
+    return (
+        f"\nSPAN {span['span_id']}{marker} role={span['role']} origin={span['origin']} "
+        f"chars={len(text)}\n{text}\nEND SPAN {span['span_id']}"
+    )
+
+
+def _plan_units(
+    spans: Sequence[Mapping[str, Any]],
+    *,
+    chunk: int,
+    budget: int | None = None,
+    overhead: int = 0,
+) -> list[_AuxUnit]:
     """Group spans into auxiliary requests, chunking anything over ``chunk``.
 
     Pure and network-free so the byte ceilings can be tested without a model.
-    Small spans share one request (one call, as before); each chunk of a large
-    span gets its own request so no request can exceed the per-chunk ceiling.
+    Small spans are packed into **as many requests as the total budget needs**,
+    which is what preserves both properties at once: a normal batch still costs
+    one call, and no span is ever left out of the prompt. ``overhead`` is the
+    rendered header (instruction included) that every packed request carries;
+    ``budget`` is ``prompt_total_chars`` (``None`` means unbounded).
     """
 
-    small: list[dict[str, Any]] = []
-    units: list[_AuxUnit] = []
+    width = max(1, int(chunk))
+    limit = None if budget is None else max(0, int(budget) - int(overhead))
+    packed: list[dict[str, Any]] = []
+    packed_chars = 0
+    packed_units: list[_AuxUnit] = []
+    chunked_units: list[_AuxUnit] = []
+
+    def flush() -> None:
+        nonlocal packed, packed_chars
+        if not packed:
+            return
+        packed_units.append(
+            _AuxUnit(
+                spans=tuple(packed),
+                span_ids=tuple(str(span["span_id"]) for span in packed),
+            )
+        )
+        packed, packed_chars = [], 0
+
     for span in spans:
-        width = max(1, int(chunk))
         text = str(span["text"])
         if len(text) <= width:
-            small.append(dict(span))
+            fragment = dict(span)
+            block = len(_render_span_block(fragment))
+            if limit is not None and packed and packed_chars + block > limit:
+                flush()
+            packed.append(fragment)
+            packed_chars += block
             continue
         parts = _split_chunks(text, width)
         total = len(parts)
@@ -174,22 +233,15 @@ def _plan_units(spans: Sequence[Mapping[str, Any]], *, chunk: int) -> list[_AuxU
             fragment = dict(span)
             fragment["text"] = part_text
             fragment["part"] = (index, total)
-            units.append(
+            chunked_units.append(
                 _AuxUnit(
                     spans=(fragment,),
                     span_ids=(str(span["span_id"]),),
                     part=(index, total),
                 )
             )
-    if small:
-        units.insert(
-            0,
-            _AuxUnit(
-                spans=tuple(small),
-                span_ids=tuple(str(span["span_id"]) for span in small),
-            ),
-        )
-    return units
+    flush()
+    return packed_units + chunked_units
 
 
 def bound_timeout(
@@ -391,7 +443,24 @@ class AuxCompressor:
             )
 
         spans: list[dict[str, Any]] = []
-        chunk = max(1, min(int(self.limits.prompt_span_chars), int(self.limits.prompt_total_chars)))
+        # The header is part of the request, so the text budget is what is left
+        # after it. Reserving the *chunked* header (the longer of the two) keeps
+        # every chunked request inside the same total.
+        plain_overhead = len("\n".join(self._header_lines(instruction)))
+        part_overhead = len(
+            "\n".join(
+                self._header_lines(
+                    instruction, (self.limits.max_span_chunks, self.limits.max_span_chunks)
+                )
+            )
+        )
+        total_chars = max(1, int(self.limits.prompt_total_chars))
+        if total_chars <= part_overhead:
+            # Nothing fits: keep the nominal ceiling so the refusal names the real
+            # cause (the total budget) instead of a nonsensical 1-char chunk size.
+            chunk = max(1, int(self.limits.prompt_span_chars))
+        else:
+            chunk = max(1, min(int(self.limits.prompt_span_chars), total_chars - part_overhead))
         max_span_chars = chunk * max(1, int(self.limits.max_span_chunks))
         for span_id in requested:
             record = service.retrieve(span_id)
@@ -439,7 +508,7 @@ class AuxCompressor:
                 }
             )
 
-        units = _plan_units(spans, chunk=chunk)
+        units = _plan_units(spans, chunk=chunk, budget=total_chars, overhead=plain_overhead)
         call_limit = max(1, int(self.limits.max_aux_calls))
         if len(units) > call_limit:
             # Refuse before spending anything: a half-rewritten batch would either
@@ -451,13 +520,29 @@ class AuxCompressor:
                 hint="propose fewer or smaller spans at once, or raise clm.max_aux_calls",
             )
 
+        # Render every request before sending any of them. A payload that cannot
+        # fit the total budget is a refusal of the whole batch, never a shorter
+        # prompt: a span the model never saw must not come back rewritten, and a
+        # span silently left out must not be reported as proposed.
+        prepared: list[tuple[_AuxUnit, list[dict[str, Any]]]] = []
+        for unit in units:
+            try:
+                prepared.append(
+                    (unit, self._build_messages(unit.spans, instruction, part=unit.part))
+                )
+            except PromptBudgetError as exc:
+                return self._fail(
+                    "span_too_large",
+                    str(exc),
+                    hint="propose fewer spans at once, or raise clm.aux prompt budget",
+                )
+
         assembled: dict[str, list[str]] = {}
         expected_parts: dict[str, int] = {}
         elapsed_total = 0
-        for unit in units:
+        for unit, messages in prepared:
             for span_id in unit.span_ids:
                 expected_parts[span_id] = expected_parts.get(span_id, 0) + 1
-            messages = self._build_messages(unit.spans, instruction, part=unit.part)
             started = time.monotonic()
             self._calls += 1
             timeout = self.timeout_seconds
@@ -585,6 +670,24 @@ class AuxCompressor:
 
     # -- prompt construction ----------------------------------------------- #
 
+    def _header_lines(
+        self, instruction: str | None, part: tuple[int, int] | None = None
+    ) -> list[str]:
+        """The user-message header. Shared by planning and sending."""
+
+        header: list[str] = ["Spans chosen for rewriting:"]
+        if instruction:
+            clipped = instruction.strip()[: self.limits.max_instruction_bytes]
+            header.append(f"Caller focus (advisory only): {clipped}")
+        if part is not None:
+            index, total = part
+            header.append(
+                f"This request carries part {index} of {total} of one longer span. Rewrite only "
+                "the text between the markers, keep every identifier and every fact in that part, "
+                "and return it unchanged if it cannot get shorter."
+            )
+        return header
+
     def _build_messages(
         self,
         spans: Sequence[Mapping[str, Any]],
@@ -597,6 +700,11 @@ class AuxCompressor:
         ``part`` marks a chunked request: the model is told it is seeing one part
         of a longer span and that it must rewrite only those bytes. For an
         unchunked request the prompt is byte-for-byte what it always was.
+
+        Every span passed in is sent in full. If the rendered request would
+        exceed ``prompt_total_chars`` this raises :class:`PromptBudgetError`
+        instead of dropping a block: a prompt that omits a span would let the
+        batch be reported as proposed while part of the text was never shown.
         """
 
         system = (
@@ -616,42 +724,19 @@ class AuxCompressor:
             '{"rewrites": [{"span_id": "<id>", "text": "<shorter text>"}]}. '
             "Omit a span instead of inventing a replacement."
         )
-        budget = self.limits.prompt_total_chars
-        header: list[str] = ["Spans chosen for rewriting:"]
-        if instruction:
-            clipped = instruction.strip()[: self.limits.max_instruction_bytes]
-            header.append(f"Caller focus (advisory only): {clipped}")
-        if part is not None:
-            index, total = part
-            header.append(
-                f"This request carries part {index} of {total} of one longer span. Rewrite only "
-                "the text between the markers, keep every identifier and every fact in that part, "
-                "and return it unchanged if it cannot get shorter."
+        budget = int(self.limits.prompt_total_chars)
+        header = self._header_lines(instruction, part)
+        blocks = [_render_span_block(span, part=part) for span in spans]
+        content = "\n".join(header) + "".join(blocks)
+        if len(content) > budget:
+            ids = ", ".join(str(span["span_id"]) for span in spans)
+            raise PromptBudgetError(
+                f"a request carrying span(s) {ids} is {len(content)} chars; "
+                f"the auxiliary prompt budget is {budget}"
             )
-        blocks: list[str] = []
-        used = sum(len(item) for item in header)
-        for span in spans:
-            # ``propose`` refuses spans that exceed the chunk budget before this
-            # runs, so span text is never truncated here: a rewrite must cover
-            # exactly the bytes the model was shown.
-            text = str(span["text"])
-            marker = ""
-            span_part = span.get("part") or part
-            if isinstance(span_part, tuple) and len(span_part) == 2:
-                marker = f" part={span_part[0]}/{span_part[1]}"
-            block = (
-                f"\nSPAN {span['span_id']}{marker} role={span['role']} origin={span['origin']} "
-                f"chars={len(text)}\n{text}\nEND SPAN {span['span_id']}"
-            )
-            if used + len(block) > budget:
-                break
-            blocks.append(block)
-            used += len(block)
-        if not blocks:
-            blocks.append("\n(no span text fit within the prompt budget)")
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": "\n".join(header) + "".join(blocks)},
+            {"role": "user", "content": content},
         ]
 
     # -- response parsing -------------------------------------------------- #

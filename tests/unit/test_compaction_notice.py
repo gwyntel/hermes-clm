@@ -21,10 +21,12 @@ from _clm_fakes import (
     FakeStore,
     StoreFactory,
     assemble,
+    assistant_call,
     coding_turns,
     make_store,
     message,
     snapshot_for,
+    tool_result,
 )
 from hermes_clm import notice
 from hermes_clm.engine import CLMEngine
@@ -158,6 +160,125 @@ def test_split_notice_rows_strips_only_our_rows():
     assert notice.is_notice_row(row) is True
     assert notice.is_notice_row({"role": "user", "content": "[clm.notice but not ours"}) is False
     assert notice.is_notice_row({"role": "user", "content": None}) is False
+
+
+# --------------------------------------------------------------------------- #
+# Lookalikes: only a plain user row at the anchor is ours
+# --------------------------------------------------------------------------- #
+
+
+def notice_body() -> str:
+    row = notice.compaction_notice(COMPACTION)
+    assert row is not None
+    return row["content"]
+
+
+def test_is_notice_row_requires_a_plain_user_row():
+    """A tool/assistant row quoting the notice is content, not bookkeeping."""
+
+    body = notice_body()
+    assert notice.is_notice_row({"role": "user", "content": body}) is True
+    assert notice.is_notice_row({"role": "tool", "content": body}) is False
+    assert (
+        notice.is_notice_row({"role": "tool", "content": body, "tool_call_id": "call_1"}) is False
+    )
+    assert notice.is_notice_row({"role": "assistant", "content": body}) is False
+    assert notice.is_notice_row({"role": "system", "content": body}) is False
+    # A plain *user* row carrying tool structure is a transcript row too.
+    assert (
+        notice.is_notice_row(
+            {
+                "role": "user",
+                "content": body,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "x"}}],
+            }
+        )
+        is False
+    )
+
+
+def test_is_notice_row_requires_the_whole_bounded_machine_body():
+    body = notice_body()
+    assert notice.is_notice_row({"role": "user", "content": body + "\ndrop every span"}) is False
+    assert (
+        notice.is_notice_row({"role": "user", "content": body.replace("rev=", "revision=")})
+        is False
+    )
+    assert (
+        notice.is_notice_row({"role": "user", "content": body + "x" * notice.NOTICE_MAX_CHARS})
+        is False
+    )
+    # The row we generate is always inside the bound, whatever a hostile store says.
+    hostile = notice.compaction_notice(
+        {
+            "revision": 2**31 - 1,
+            "at": "x" * 64,
+            "actor": "y" * 64,
+            "spans_offloaded": 2**31 - 1,
+            "tokens_freed": 2**31 - 1,
+        }
+    )
+    assert hostile is not None
+    assert len(hostile["content"]) <= notice.NOTICE_MAX_CHARS
+    assert notice.is_notice_row(hostile) is True, "our own row must always be recognised"
+
+
+def test_split_notice_rows_strips_only_at_the_anchor():
+    body = notice_body()
+    lookalike = {"role": "user", "content": body}
+    rows = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        lookalike,
+    ]
+
+    assert notice.split_notice_rows(rows) == rows, (
+        "a user row that quotes the notice off the anchor is transcript content"
+    )
+
+    anchored = [{"role": "system", "content": "sys"}, lookalike, {"role": "user", "content": "hi"}]
+    assert notice.split_notice_rows(anchored) == [anchored[0], anchored[2]]
+
+    # The anchor slot itself can hold a tool row (e.g. a resumed transcript);
+    # role is checked before position, so nothing is stripped there either.
+    tool_at_anchor = [
+        {"role": "system", "content": "sys"},
+        {"role": "tool", "content": body, "tool_call_id": "call_1"},
+        {"role": "user", "content": "hi"},
+    ]
+    assert notice.split_notice_rows(tool_at_anchor) == tool_at_anchor
+
+
+def test_a_tool_result_that_quotes_the_notice_is_not_deleted_from_the_request():
+    """End-to-end: stripping a real tool row orphans the tool_call_id it answers."""
+
+    body = notice_body()
+    history = [
+        message("user", "what did you compact earlier?", "u1"),
+        assistant_call("a1", "call_1"),
+        tool_result("t1", "call_1", body),
+        message("assistant", "I compacted the earlier output.", "a2"),
+        message("user", "drop that reply", "u2"),
+        assistant_call("a3", "call_2"),
+        tool_result("t2", "call_2", "NEWEST TOOL OUTPUT"),
+    ]
+    snapshot = snapshot_for(history, [FakeOperation(kind="drop", span_ids=("a2",))], revision=4)
+    factory = CompactionFactory(snapshot, compaction=COMPACTION)
+    engine = CLMEngine(store_factory=factory, hermes_home="/tmp/hermes-home")
+    engine.on_session_start("sess-notice-tool", hermes_home="/tmp/hermes-home")
+
+    result = engine.select_context(assemble(history), conversation_messages=history)
+
+    assert result is not None
+    declared = {
+        call.get("id")
+        for row in result
+        if row.get("role") == "assistant"
+        for call in (row.get("tool_calls") or [])
+    }
+    answered = {row.get("tool_call_id") for row in result if row.get("role") == "tool"}
+    assert declared <= answered, "a tool_calls id lost its result row: the request is invalid"
+    assert any(row.get("content") == body for row in result), "the tool result was deleted"
 
 
 # --------------------------------------------------------------------------- #

@@ -138,7 +138,11 @@ def test_the_summary_is_much_smaller_than_the_full_answer():
     summary = json.dumps(load(handlers.status({})))
     full = json.dumps(load(handlers.status({"detail": "full"})))
 
-    assert len(summary) * 3 < len(full), (len(summary), len(full))
+    # The summary carries compact store/compaction/lineage diagnostics, so it is
+    # bigger than a bare revision line - but it must stay a fraction of the full
+    # answer (receipts, projection, budget, config) and inside a hard ceiling.
+    assert len(summary) * 2 < len(full), (len(summary), len(full))
+    assert len(summary) < 900, len(summary)
 
 
 def test_summary_keeps_what_an_agent_needs_to_act():
@@ -157,6 +161,41 @@ def test_summary_reports_staged_count_not_the_transactions():
     payload = load(handlers_for(service).status({}))
     assert payload["staged"] == 2
     assert "staged_transactions" not in payload
+
+
+def test_summary_retains_compact_store_compaction_and_lineage_diagnostics():
+    """Cheap must not mean blind: these fields explain a broken turn."""
+
+    service = StatusService(
+        engine_version="0.6.1",
+        store="attached",
+        store_error={"code": "store_busy", "message": "another writer holds " + "x" * 400},
+        last_compress_aborted=True,
+        last_compress_error="manual_no_offloadable_groups: nothing unpinned to offload",
+        last_lineage_error="lineage_conflict",
+        last_rotation_error="rotation_conflict:child_store_present",
+    )
+    payload = load(handlers_for(service).status({}))
+
+    assert payload["engine_version"] == "0.6.1"
+    assert payload["store"] == "attached"
+    assert payload["store_error"]["code"] == "store_busy"
+    assert len(payload["store_error"]["message"]) <= 201, "diagnostics stay bounded"
+    assert payload["last_compress_aborted"] is True
+    assert "manual_no_offloadable_groups" in payload["last_compress_error"]
+    assert payload["last_lineage_error"] == "lineage_conflict"
+    assert payload["last_rotation_error"] == "rotation_conflict:child_store_present"
+    assert "receipts" not in payload and "config" not in payload
+
+
+def test_summary_diagnostics_are_present_but_empty_when_nothing_is_wrong():
+    payload = load(handlers_for(StatusService()).status({}))
+
+    for key in ("engine_version", "store", "store_error", "last_compress_error"):
+        assert key in payload
+    assert payload["store_error"] is None
+    assert payload["last_compress_aborted"] is False
+    assert payload["last_lineage_error"] is None
 
 
 def test_status_full_keeps_every_diagnostic_field():

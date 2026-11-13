@@ -715,6 +715,32 @@ def test_real_store_stage_returns_a_pure_preview_without_committing(tmp_path):
     assert engine.tool_service().status()["revision"] == revision + 1
 
 
+def test_real_store_preview_after_compact_prices_the_compacted_projection(tmp_path):
+    """`/compact` replaces the request, so a later stage must price the replacement.
+
+    Regression: the remembered request was the one from before the compaction, so
+    the preview counted the tool output the compaction had just offloaded and
+    reported a saving against a transcript the agent no longer sends.
+    """
+
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()  # a turn ran before the compaction
+
+    compacted = engine.compress(list(history), force=True)
+    assert any("[clm.offloaded" in str(row.get("content")) for row in compacted)
+    revision = engine.tool_service().status()["revision"]
+    spans = inspect_spans(engine, history)
+
+    priced = engine.tool_service().preview([{"kind": "drop", "span_ids": [spans["a2"]["span_id"]]}])
+
+    assert priced["available"] is True
+    assert priced["before"] == engine.budget_state(compacted)["raw_estimated_tokens"]
+    pre_compaction = json.loads(json.dumps(host.assemble_request()))
+    assert priced["before"] < engine.budget_state(pre_compaction)["raw_estimated_tokens"]
+    assert engine.tool_service().status()["revision"] == revision, "a preview is pure"
+
+
 def test_real_store_compaction_notice_reaches_the_next_request(tmp_path):
     """`/compact` is operator work; the agent has to be told its output moved."""
 

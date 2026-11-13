@@ -412,9 +412,10 @@ whole-span rewrite. Safety does not rest on the 4k figure — the auxiliary outp
 and the store pins the proposal by hash either way.
 
 * the largest single request payload is `prompt_span_chars` (8000) characters of span text;
-  the total prompt is bounded by `prompt_total_chars` (24000). Spans that do not fit the
-  batch prompt are left out of the request entirely rather than clipped, never truncated
-  mid-span.
+  the total prompt is bounded by `prompt_total_chars` (24000). Small spans are packed into
+  **as many requests as that total needs**: a batch that does not fit one prompt is split, never
+  clipped and never reported as proposed with a span left out. Span text is sent whole or the
+  batch is refused before the first call — there is no "did not fit, so it was skipped" path.
 * one span may be split into at most `max_span_chunks` (8) chunks, and one proposal may spend
   at most `max_aux_calls` (8) auxiliary calls. A span or batch that would need more is refused
   *before* the first call with `span_too_large` (message names the span, its size and the

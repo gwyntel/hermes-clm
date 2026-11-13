@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 import store_testkit as kit
@@ -326,6 +327,80 @@ class OperationSemanticsTests(StageCommitBase):
             self.commit(
                 store, [EditOperation(kind=EditKind.OFFLOAD, span_ids=(span_id,))], "txn-mm"
             )
+
+
+class OperationPersistenceTests(StageCommitBase):
+    """One ``operations`` row per staged operation, not one per affected span."""
+
+    def operations_for(self, revision: int) -> list[dict]:
+        raw = self.raw_connect()
+        return [
+            dict(row)
+            for row in raw.execute(
+                "SELECT * FROM operations WHERE revision = ? ORDER BY ord", (revision,)
+            )
+        ]
+
+    def op_count_for(self, revision: int) -> int:
+        raw = self.raw_connect()
+        row = raw.execute(
+            "SELECT op_count FROM revisions WHERE revision = ?", (revision,)
+        ).fetchone()
+        return int(row["op_count"])
+
+    def test_multi_span_operation_is_persisted_once_and_applies_to_every_span(self) -> None:
+        """Regression: a group offload wrote one identical row per span."""
+
+        result = self.commit(
+            self.store,
+            [
+                EditOperation(
+                    kind=EditKind.OFFLOAD,
+                    span_ids=(self.ids["u-a1"], self.ids["u-t1"]),
+                )
+            ],
+            "txn-group",
+        )
+
+        self.assertEqual(len(result.applied), 2, "both spans changed state")
+        rows = self.operations_for(result.revision)
+        self.assertEqual(len(rows), 1, f"one operation, one row: {rows}")
+        self.assertEqual(
+            json.loads(rows[0]["span_ids_json"]),
+            [self.ids["u-a1"], self.ids["u-t1"]],
+            "the single row still names every span the operation targeted",
+        )
+        self.assertEqual(self.op_count_for(result.revision), 1)
+        snapshot = self.store.snapshot()
+        for uid in ("u-a1", "u-t1"):
+            span = snapshot.span(self.ids[uid])
+            assert span is not None
+            self.assertIs(span.state, kit.SpanState.OFFLOADED)
+        verdict = self.store.verify()
+        self.assertTrue(verdict["ok"], verdict["problems"])
+
+    def test_two_separately_staged_identical_operations_stay_two_rows(self) -> None:
+        """Identity, not payload: the caller asked for two operations.
+
+        Two boundary markers with the same label are byte-identical operation
+        payloads (one span cannot legitimately appear in two operations), so a
+        payload-based dedupe would wrongly collapse them into one row.
+        """
+
+        ops = [
+            EditOperation(
+                kind=EditKind.BOUNDARY, actor_origin="agent", provenance={"label": "checkpoint"}
+            )
+            for _ in range(2)
+        ]
+        result = self.commit(self.store, ops, "txn-boundary-twice")
+
+        rows = self.operations_for(result.revision)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["kind"], rows[1]["kind"])
+        self.assertEqual(rows[0]["provenance_json"], rows[1]["provenance_json"])
+        self.assertEqual(self.op_count_for(result.revision), 2)
+        self.assertTrue(self.store.verify()["ok"])
 
 
 class AuthorityTests(StageCommitBase):

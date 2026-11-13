@@ -459,3 +459,48 @@ def test_the_engine_publishes_the_session_it_serves_for_session_only_surfaces(ho
 
     engine.on_session_end("sess-command-child", [])
     assert engine_module.engine_for_session("sess-command-child") is None
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle conflict: a child id that already owns a store
+# --------------------------------------------------------------------------- #
+
+
+def test_a_rotation_never_adopts_a_parent_archive_over_the_childs_own_store(home):
+    """Two archives for one conversation would silently diverge.
+
+    The child id already exists on disk (its own session ran and compacted). A
+    compression notification naming it must not point the engine at the parent's
+    archive: the child's store wins, and the refusal is visible in status rather
+    than discovered later as a session that lost its history.
+    """
+
+    child = _engine(home, "sess-taken")
+    child_compacted = _compact(child, _transcript())
+    assert _stub_count(child_compacted) > 0
+    child_db = child.store.db_id
+    child_revision = child.store.status()["revision"]
+    child.on_session_end("sess-taken", [])
+
+    parent = _engine(home, "sess-parent")
+    _compact(parent, _transcript())
+    parent_db = parent.store.db_id
+    assert parent_db != child_db
+
+    parent.on_session_start(
+        "sess-taken", boundary_reason="compression", old_session_id="sess-parent"
+    )
+
+    assert parent.session_id == "sess-taken"
+    assert parent.store is not None
+    assert parent.store.db_id == child_db, "the child's own archive must win"
+    assert parent.store.status()["revision"] == child_revision
+    assert resolve_session_lineage(home, "sess-taken") is None, "no alias over an owned store"
+
+    status = parent.get_status()
+    assert "rotation_conflict" in (status["last_rotation_error"] or "")
+    refused = [r for r in status["receipts"] if r.get("stage") == "session_rotation_refused"]
+    assert refused, "a refused adoption must be receipted"
+    assert refused[-1]["reason"] == "rotation_conflict:child_store_present"
+    assert refused[-1]["from"] == "sess-parent"
+    assert refused[-1]["to"] == "sess-taken"

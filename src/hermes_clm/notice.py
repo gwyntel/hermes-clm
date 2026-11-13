@@ -54,13 +54,26 @@ NOTICE_MAX_CHARS = 320
 #: Values interpolated into the row are reduced to this token class.
 _SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9._:@+-]+")
 
-#: A row counts as ours only when it has the full machine header. A loose
-#: ``startswith`` test would let a tool result that merely echoes the marker be
-#: stripped out of the request - i.e. silently dropped content.
+#: The declarative tail every notice row ends with. Recognising the whole body
+#: (header *and* tail) is what keeps a transcript row that merely starts with the
+#: marker from being mistaken for ours and deleted.
+_NOTICE_TAIL = "Machine-generated status line, not a request."
+
+#: A row counts as ours only when it is a plain user row carrying the **whole**
+#: machine body. A role-agnostic prefix test would let a tool result that echoes
+#: the notice be stripped out of the request - deleting a real row and orphaning
+#: the ``tool_call_id`` its assistant row declared.
 _NOTICE_ROW_RE = re.compile(
     r"^\[clm\.notice rev=\d+ compaction at=\S+ actor=\S+ spans_offloaded=\d+"
+    r"(?: tokens_freed=\d+)?\] "
+    r"Earlier tool results may render as clm\.offloaded stubs; their originals are "
+    r"retrievable with clm_retrieve\. " + re.escape(_NOTICE_TAIL) + r"$"
 )
 _MAX_TOKEN_CHARS = 32
+
+#: Keys that make a row something other than a plain user message. A row that
+#: carries any of them is transcript content, never our notice.
+_TOOL_KEYS = ("tool_calls", "tool_call_id", "function_call", "tool_use_id")
 
 
 def _token(value: Any, default: str = "unknown") -> str:
@@ -113,23 +126,48 @@ def compaction_notice(compaction: Optional[Mapping[str, Any]]) -> Optional[Dict[
 def is_notice_row(row: Any) -> bool:
     """True when ``row`` is one of our notice rows (never a real transcript row).
 
-    Matches the full machine header, not just the prefix: a tool result that
-    happens to contain the marker is data, and stripping it would drop content.
+    Three conditions, all required: a **plain user row** (no tool-call keys), a
+    body no longer than :data:`NOTICE_MAX_CHARS`, and the complete machine body
+    from marker to tail. A tool result, an assistant row, or a user message that
+    merely quotes the marker is transcript content: stripping it would delete a
+    real row and leave an assistant ``tool_calls`` id unanswered.
     """
+
     if not isinstance(row, Mapping):
         return False
+    if row.get("role") != "user":
+        return False
+    if any(row.get(key) for key in _TOOL_KEYS):
+        return False
     content = row.get("content")
-    return isinstance(content, str) and _NOTICE_ROW_RE.match(content) is not None
+    if not isinstance(content, str) or len(content) > NOTICE_MAX_CHARS:
+        return False
+    return _NOTICE_ROW_RE.match(content) is not None
 
 
 def split_notice_rows(rows: Sequence[Any]) -> List[Any]:
-    """``rows`` without any notice row, preserving order and object identity.
+    """``rows`` without the notice row **at the anchor**, order and identity intact.
 
-    Stripping first makes insertion idempotent: a host that echoes a previous
-    projection back as the request cannot accumulate one notice per turn.
+    Only the anchor is stripped. A row elsewhere is transcript content, even if
+    its text happens to look like ours, and removing it there would change what
+    the model reads. Stripping the anchor first makes insertion idempotent: a
+    host that echoes a previous projection back as the request cannot accumulate
+    one notice per turn.
     """
 
-    return [row for row in rows if not is_notice_row(row)]
+    index = _notice_index(rows)
+    if index is None:
+        return list(rows)
+    return [row for position, row in enumerate(rows) if position != index]
+
+
+def _notice_index(rows: Sequence[Any]) -> Optional[int]:
+    """Index of the notice row this sequence already carries, if any."""
+
+    anchor = notice_anchor(rows)
+    if anchor < len(rows) and is_notice_row(rows[anchor]):
+        return anchor
+    return None
 
 
 def notice_anchor(rows: Sequence[Any]) -> int:

@@ -103,6 +103,7 @@ __all__ = [
     "session_key",
     "sessions_root",
     "session_dir",
+    "session_owns_store",
 ]
 
 STORE_DIRNAME = "clm"
@@ -363,6 +364,20 @@ def _store_present(directory: Path) -> bool:
     except (FileNotFoundError, NotADirectoryError):
         return False
     return stat.S_ISREG(st.st_mode) and st.st_size > 0
+
+
+def session_owns_store(hermes_home: str | os.PathLike[str], session_id: str) -> bool:
+    """Whether *session_id* already has an archive of its own on disk.
+
+    Read-only and path-checked: the engine asks this **before** adopting a
+    compression rotation, because an id that already owns a store must keep it.
+    A store that is merely aliased to a parent (a lineage record, no database)
+    does not count as owning one.
+    """
+
+    home = _resolve_home(hermes_home)
+    _validate_session_id(session_id)
+    return _store_present(home / STORE_DIRNAME / SESSIONS_DIRNAME / session_key(session_id))
 
 
 def resolve_session_lineage(hermes_home: str | os.PathLike[str], session_id: str) -> str | None:
@@ -798,6 +813,31 @@ def _hash_op_payloads(ops: Iterable[EditOperation], txn_id: str | None) -> list[
             payload["txn_id"] = txn_id
         payloads.append(payload)
     return payloads
+
+
+def _distinct_operations(planned: Sequence[_Planned]) -> list[_Planned]:
+    """One entry per staged operation, in first-appearance order.
+
+    ``_plan`` yields one entry per *(operation, span)* pair so a multi-span
+    operation can change each span's state. Persisting that shape verbatim wrote
+    one identical ``operations`` row per span and inflated ``op_count``, which
+    made a group offload of three spans look like three operations.
+
+    Deduplication is by **object identity**, not payload: two deliberately
+    separate identical operations must stay two rows. Every planned entry's
+    ``op`` is the caller's own operation object, so identity is the same fact
+    the staging path uses to decide what was asked for.
+    """
+
+    seen: set[int] = set()
+    records: list[_Planned] = []
+    for item in planned:
+        marker = id(item.op)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        records.append(item)
+    return records
 
 
 def _coerce_aux_proposal(
@@ -2268,6 +2308,10 @@ class ContextStore:
 
         applied = self._receipts(planned, "applied")
         inert = self._receipts(planned, "inert")
+        # One persisted row per *operation*, while the loop below still applies
+        # every (operation, span) effect: a group offload is one operation that
+        # changes several spans, not several identical operations.
+        records = _distinct_operations(planned)
         for item in planned:
             span = item.span
             if span is None or item.effect != "applied":
@@ -2300,7 +2344,7 @@ class ContextStore:
                     (span.span_id, actor_origin.value, revision, now),
                 )
 
-        op_payloads = _hash_op_payloads((item.op for item in planned), txn_id)
+        op_payloads = _hash_op_payloads((item.op for item in records), txn_id)
         head_hash = revision_hash(
             prev_hash=str(head_row["head_hash"]),
             revision=revision,
@@ -2325,7 +2369,7 @@ class ContextStore:
                 head_hash,
                 txn_id,
                 actor_origin.value,
-                len(planned),
+                len(records),
                 len(applied),
                 len(inert),
                 before_tokens,
@@ -2333,7 +2377,7 @@ class ContextStore:
                 now,
             ),
         )
-        for index, item in enumerate(planned):
+        for index, item in enumerate(records):
             cur.execute(
                 "INSERT INTO operations (revision, ord, kind, span_ids_json, replacement, actor_origin, "
                 "provenance_json, txn_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

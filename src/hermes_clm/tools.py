@@ -484,12 +484,27 @@ def _status_detail(args: Mapping[str, Any]) -> str:
     return value
 
 
+def _short(value: Any, limit: int = 200) -> str | None:
+    """One bounded line for a diagnostic string; ``None`` when there is none."""
+
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 def _status_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     """The small answer: is context pressure fine, and what changed last.
 
     Deliberately excludes ``projection``, ``budget``, ``receipts``, ``config``,
     ``limits``, ``index``, ``health`` and ``aux`` metrics - the fields that made
     ``clm_status`` cost thousands of tokens. ``detail="full"`` still returns them.
+
+    It keeps the *compact* diagnostics that explain a broken turn: which store is
+    attached, why an attach failed, why the last ``/compact`` was refused or
+    could not be shown to save, whether the lineage record was written, the
+    engine build, and whether a rotation was refused. Dropping those made the
+    cheap answer unable to say what an agent most needs to know.
     """
 
     budget = payload.get("budget")
@@ -519,6 +534,22 @@ def _status_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         summary["staged"] = len(staged)
     summary["last_compaction"] = payload.get("last_compaction")
     summary["last_error"] = payload.get("last_error")
+    # Store, compression and lineage diagnostics: short strings, not payloads.
+    summary["engine_version"] = payload.get("engine_version")
+    summary["store"] = payload.get("store")
+    store_error = payload.get("store_error")
+    if isinstance(store_error, Mapping):
+        summary["store_error"] = {
+            "code": store_error.get("code"),
+            "message": _short(store_error.get("message")),
+        }
+    else:
+        summary["store_error"] = None
+    summary["last_compress_aborted"] = bool(payload.get("last_compress_aborted"))
+    summary["last_compress_error"] = _short(payload.get("last_compress_error"))
+    summary["last_lineage_error"] = _short(payload.get("last_lineage_error"))
+    if payload.get("last_rotation_error"):
+        summary["last_rotation_error"] = _short(payload.get("last_rotation_error"))
     summary["hint"] = (
         'call clm_status with detail="full" for budget, projection, receipts, config and limits'
     )

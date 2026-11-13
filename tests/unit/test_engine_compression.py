@@ -10,6 +10,7 @@ import pytest
 from _clm_fakes import (
     FakeStoreResult,
     StoreFactory,
+    assemble,
     assistant_call,
     message,
     snapshot_for,
@@ -434,3 +435,145 @@ def test_compression_paths_never_import_hermes_or_call_a_model():
 
     config = json.loads(json.dumps(engine.get_status()["config"]))
     assert not any(key in config for key in ("model", "provider", "base_url", "api_key"))
+
+
+# ------------------------------------------------- calibration and offload order
+
+
+def calibration_history():
+    """Four equal tool groups; the fourth is the newest, protected result."""
+
+    rows = []
+    for index in range(4):
+        rows.append(message("user", f"step {index}", f"u{index}"))
+        rows.append(assistant_call(f"a{index}", f"call_{index}"))
+        rows.append(tool_result(f"t{index}", f"call_{index}", "OUTPUT LINE\n" * 300))
+    return rows
+
+
+def test_overflow_planning_prices_candidates_in_the_calibrated_vocabulary():
+    """Over-offload counterexample: a real-vs-estimate ratio of 2.
+
+    ``need_tokens`` is calibrated, so candidates must be too. Priced raw, each
+    group looks half its real cost and the planner offloads a third group it
+    does not need (and, at a ratio below 1, too few to restore the reserve).
+    """
+
+    history = calibration_history()
+    raw_total = estimate_messages_tokens(history)
+    reserve = 200
+    # ratio 2.0 => calibrated total 7488, each group 1860; a 2500-token deficit
+    # is covered by two groups in calibrated tokens, by three in raw ones.
+    engine, factory = build_engine(
+        snapshot_for(history, [], revision=1),
+        context_length=raw_total * 2 - 2500 + reserve,
+        reserve_tokens=reserve,
+    )
+    engine.calibration = _budget.TokenCalibration(2.0)
+
+    result = engine.compress(history, bypass_cooldown=True)
+
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "overflow"][-1]
+    assert receipt["needed"] == 2500
+    assert len(receipt["offloaded"]) == 2, receipt["offloaded"]
+    assert factory.store.commits, "the two-group plan was committed"
+    assert estimate_messages_tokens(result) < raw_total
+    assert engine.budget_state()["fits"] is True, "the committed offload restores the reserve"
+
+
+def order_history():
+    """Group ids that sort in the *opposite* order to the transcript rows."""
+
+    rows = []
+    for uid, tag in (("z-old", "OLD"), ("m-mid", "MID"), ("a-new", "NEW")):
+        rows.append(message("user", f"step {uid}", f"u-{uid}"))
+        rows.append(assistant_call(uid, f"call_{uid}"))
+        rows.append(tool_result(f"t-{uid}", f"call_{uid}", f"{tag} OUTPUT\n" * 300))
+    return rows
+
+
+def test_offload_plans_the_oldest_group_first_even_when_ids_sort_backwards():
+    """``sorted(group_id)`` offloads ``group:a-new`` before ``group:z-old``."""
+
+    history = order_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    candidates = engine._offload_candidates(history, factory.store.snapshot())
+    assert [candidate.group_id for candidate in candidates] == [
+        "group:z-old",
+        "group:m-mid",
+        "group:a-new",
+    ], "plan order must be history row order, not lexicographic group id order"
+
+    result = engine.compress([dict(row) for row in history], force=True)
+
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "manual"][-1]
+    assert receipt["offloaded"] == ["group:z-old"]
+    joined = "\n".join(str(row.get("content") or "") for row in result)
+    assert "OLD OUTPUT" not in joined, "the oldest group is the one that was offloaded"
+    assert "MID OUTPUT" in joined and "NEW OUTPUT" in joined
+
+
+def test_manual_plan_is_priced_in_the_same_vocabulary_as_the_target():
+    history = calibration_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+    engine.calibration = _budget.TokenCalibration(2.0)
+
+    result = engine.compress(history, force=True)
+
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "manual"][-1]
+    assert receipt["calibration_ratio"] == 2.0
+    assert receipt["needed"] > 0
+    assert receipt["predicted_saving"] >= receipt["needed"], (
+        "the plan must cover the calibrated target it was asked for"
+    )
+    assert estimate_messages_tokens(result) < estimate_messages_tokens(history)
+
+
+def test_default_status_summary_reports_the_compaction_diagnostic():
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1), manual_target_ratio=0)
+
+    engine.compress(history, force=True)
+    payload = json.loads(engine.handle_tool_call("clm_status", {}))
+
+    assert payload["detail"] == "summary"
+    assert payload["last_compress_aborted"] is True
+    assert "manual_no_offloadable_groups" in (payload["last_compress_error"] or "")
+    assert payload["store"] == "attached"
+    assert isinstance(payload["engine_version"], str) and payload["engine_version"]
+    assert payload["store_error"] is None
+    assert payload["last_lineage_error"] is None
+    for expensive in ("receipts", "projection", "budget", "config"):
+        assert expensive not in payload
+
+
+def test_stage_preview_after_compact_prices_the_compacted_projection():
+    """The pre-compaction request is stale: pricing against it counts archived text."""
+
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+    request = assemble(history)
+    assert engine.select_context(request, conversation_messages=history) is None
+
+    compacted = engine.compress([dict(row) for row in history], force=True)
+    assert any("[clm.offloaded" in str(row.get("content")) for row in compacted)
+
+    priced = engine.tool_service().preview([{"kind": "drop", "span_ids": ["a2"]}])
+
+    assert priced["available"] is True
+    assert priced["before"] == engine.budget_state(compacted)["raw_estimated_tokens"]
+    assert priced["before"] < engine.budget_state(request)["raw_estimated_tokens"], (
+        "a stale request would price the text the compaction already offloaded"
+    )
+
+
+def test_stage_preview_after_compact_needs_no_prior_turn():
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    compacted = engine.compress(history, force=True)
+    priced = engine.tool_service().preview([{"kind": "drop", "span_ids": ["a2"]}])
+
+    assert priced["available"] is True, priced
+    assert priced["before"] == engine.budget_state(compacted)["raw_estimated_tokens"]
