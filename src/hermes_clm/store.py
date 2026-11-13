@@ -37,6 +37,7 @@ import re
 import sqlite3
 import stat
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -92,9 +93,13 @@ __all__ = [
     "StoreConfig",
     "STORE_DIRNAME",
     "SESSIONS_DIRNAME",
+    "LINEAGE_DIRNAME",
     "DB_FILENAME",
     "LOCK_FILENAME",
     "INDEX_FILENAME",
+    "lineage_path",
+    "record_session_lineage",
+    "resolve_session_lineage",
     "session_key",
     "sessions_root",
     "session_dir",
@@ -102,6 +107,13 @@ __all__ = [
 
 STORE_DIRNAME = "clm"
 SESSIONS_DIRNAME = "sessions"
+#: Where durable child→root session lineage lives (see :func:`record_session_lineage`).
+LINEAGE_DIRNAME = "lineage"
+LINEAGE_FORMAT_VERSION = 1
+#: A rotation chain longer than this is refused rather than walked forever.
+LINEAGE_MAX_DEPTH = 8
+#: A lineage record is a handful of short id strings; anything bigger is hostile.
+LINEAGE_MAX_BYTES = 8_192
 DB_FILENAME = "session.db"
 LOCK_FILENAME = "store.lock"
 INDEX_FILENAME = "active.json"
@@ -194,15 +206,362 @@ def session_key(session_id: str) -> str:
     return f"{slug}-{digest}"
 
 
-def sessions_root(hermes_home: str | os.PathLike[str]) -> Path:
-    home = Path(hermes_home).expanduser()
-    if not str(home):
+def _resolve_home(hermes_home: str | os.PathLike[str] | None) -> Path:
+    """The absolute Hermes home that owns this store, or ``invalid_home``.
+
+    An empty or missing home is a *caller* bug, not a licence to write beside the
+    process: ``Path("")`` stringifies to ``"."``, so the old ``if not str(home)``
+    guard never fired and an unattached home silently created
+    ``./clm/sessions/<key>/`` under whatever directory the gateway happened to be
+    running in.  A store outside ``HERMES_HOME`` is invisible to the next process
+    (which reports ``no store for this session``) and shares one directory across
+    profiles, so this refuses instead of guessing.
+    """
+
+    if hermes_home is None:
         raise ValidationError("hermes_home is required", code="invalid_home")
-    return home / STORE_DIRNAME / SESSIONS_DIRNAME
+    raw = os.fspath(hermes_home)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValidationError("hermes_home is required", code="invalid_home")
+    home = Path(raw).expanduser()
+    if os.fspath(home) in {"", ".", ".."} or not home.is_absolute():
+        raise ValidationError(
+            "hermes_home must be an absolute path",
+            code="invalid_home",
+            details={"home": os.fspath(home)[:200]},
+        )
+    return home
+
+
+def sessions_root(hermes_home: str | os.PathLike[str]) -> Path:
+    return _resolve_home(hermes_home) / STORE_DIRNAME / SESSIONS_DIRNAME
 
 
 def session_dir(hermes_home: str | os.PathLike[str], session_id: str) -> Path:
     return sessions_root(hermes_home) / session_key(session_id)
+
+
+# ---------------------------------------------------------------------------
+# durable session lineage (child → root after a compression rotation)
+# ---------------------------------------------------------------------------
+
+
+def lineage_root(hermes_home: str | os.PathLike[str]) -> Path:
+    """``<home>/clm/lineage/`` — the directory holding rotation records."""
+
+    home = _resolve_home(hermes_home)
+    return home / STORE_DIRNAME / LINEAGE_DIRNAME
+
+
+def lineage_path(hermes_home: str | os.PathLike[str], session_id: str) -> Path:
+    """The record path for *session_id* (derived exactly like a store directory)."""
+
+    return lineage_root(hermes_home) / f"{session_key(session_id)}.json"
+
+
+def _read_lineage_record(path: Path) -> dict[str, Any] | None:
+    """One parsed lineage record, ``None`` when absent, or a typed refusal.
+
+    Everything about the file is treated as untrusted: a symlink, another user's
+    file, a group-readable file, a hard link, an implausible size, invalid JSON or
+    a key that does not match the path is refused rather than followed. A record
+    decides *which archive a session id resolves to*, so a silently ignored bad
+    one would attach the wrong conversation.
+    """
+
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        # Absent record — or a home whose ``clm`` component is not a directory.
+        # Both mean "this session has no recorded lineage", not a refusal.
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        raise PathSafetyError(
+            "lineage record is a symlink", code="symlink_refused", details={"path": path.name}
+        )
+    if not stat.S_ISREG(st.st_mode):
+        raise PathSafetyError(
+            "lineage record is not a regular file", code="not_a_file", details={"path": path.name}
+        )
+    if st.st_nlink > 1:
+        raise PathSafetyError(
+            "lineage record has multiple hard links",
+            code="hardlink_refused",
+            details={"path": path.name},
+        )
+    if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+        raise PathSafetyError(
+            "lineage record is owned by another user",
+            code="foreign_owner",
+            details={"path": path.name},
+        )
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        raise PathSafetyError(
+            "lineage record is readable outside its owner",
+            code="insecure_permissions",
+            details={"path": path.name, "mode": oct(mode)},
+        )
+    if st.st_size > LINEAGE_MAX_BYTES:
+        raise CorruptStoreError(
+            "lineage record is implausibly large",
+            code="corrupt_lineage",
+            details={"path": path.name},
+        )
+    try:
+        raw = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        raise CorruptStoreError(
+            "lineage record is not valid JSON", code="corrupt_lineage", details={"path": path.name}
+        ) from None
+    if not isinstance(raw, Mapping):
+        raise CorruptStoreError(
+            "lineage record is not an object", code="corrupt_lineage", details={"path": path.name}
+        )
+    if raw.get("format") != LINEAGE_FORMAT_VERSION:
+        raise CorruptStoreError(
+            "lineage record has an unsupported format",
+            code="corrupt_lineage",
+            details={"path": path.name},
+        )
+    parent = raw.get("parent_session_id")
+    if not isinstance(parent, str) or not parent:
+        raise CorruptStoreError(
+            "lineage record names no parent", code="corrupt_lineage", details={"path": path.name}
+        )
+    try:
+        _validate_session_id(parent)
+    except ValidationError:
+        raise CorruptStoreError(
+            "lineage record names an invalid parent",
+            code="corrupt_lineage",
+            details={"path": path.name},
+        ) from None
+    # The derived keys are re-derived, not trusted: a record can only ever resolve
+    # to a directory this module would itself have named.
+    if raw.get("parent_key") != session_key(parent):
+        raise CorruptStoreError(
+            "lineage record's parent key does not match its parent id",
+            code="corrupt_lineage",
+            details={"path": path.name},
+        )
+    child_key = raw.get("child_key")
+    if child_key != path.stem:
+        raise CorruptStoreError(
+            "lineage record is filed under the wrong key",
+            code="corrupt_lineage",
+            details={"path": path.name},
+        )
+    return dict(raw)
+
+
+def _store_present(directory: Path) -> bool:
+    """Whether *directory* already holds a store of its own (a collision)."""
+
+    try:
+        st = os.lstat(directory / DB_FILENAME)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
+
+
+def resolve_session_lineage(hermes_home: str | os.PathLike[str], session_id: str) -> str | None:
+    """The session id that physically owns *session_id*'s archive, or ``None``.
+
+    A compression rotation hands the conversation a new session id while keeping
+    the store it already committed into; that relation is recorded on disk (see
+    :func:`record_session_lineage`) so a *cold* process — the gateway builds a
+    one-off engine for ``session.mutate(compress)`` and closes it again — resolves
+    the child id back to the archive that holds its spans, pins and revisions.
+
+    ``None`` means "this session owns its own store" (no alias). Anything
+    unverifiable — a planted symlink, a chain that loops, a chain deeper than
+    :data:`LINEAGE_MAX_DEPTH` — raises instead of guessing.
+    """
+
+    home = _resolve_home(hermes_home)
+    current = _validate_session_id(session_id)
+    seen = {current}
+    root = home / STORE_DIRNAME / LINEAGE_DIRNAME
+    for _ in range(LINEAGE_MAX_DEPTH):
+        record = _read_lineage_record(root / f"{session_key(current)}.json")
+        if record is None:
+            return None if current == session_id else current
+        parent = str(record["parent_session_id"])
+        if parent == current:
+            raise PathSafetyError(
+                "lineage record points at itself",
+                code="lineage_cycle",
+                details={"session_key": session_key(current)},
+            )
+        if parent in seen:
+            raise PathSafetyError(
+                "lineage records form a cycle",
+                code="lineage_cycle",
+                details={"session_key": session_key(current)},
+            )
+        if _store_present(root.parent / SESSIONS_DIRNAME / session_key(parent)):
+            return parent
+        seen.add(parent)
+        current = parent
+    raise PathSafetyError(
+        "lineage chain is too deep", code="lineage_depth", details={"depth": LINEAGE_MAX_DEPTH}
+    )
+
+
+def record_session_lineage(
+    hermes_home: str | os.PathLike[str],
+    child_session_id: str,
+    parent_session_id: str,
+    *,
+    boundary: str = "compression",
+    engine_version: str | None = None,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Durably alias *child_session_id* to *parent_session_id*'s archive.
+
+    Called only for a **verified compression rotation**: the engine holds the
+    parent's store open, the host said ``boundary_reason == "compression"``, and
+    the child id is new. ``boundary`` is re-checked here so no other caller can
+    mint an alias for ``/new``, ``/resume`` or ``/branch``.
+
+    Guarantees:
+
+    * the record is created ``0600`` inside a ``0700`` directory and installed with
+      ``os.replace`` (atomic: a crash leaves either the old state or the new one);
+    * the parent is flattened to the archive that physically owns the store, so a
+      chain never grows past one hop through this API;
+    * a session that already owns a store with data is never aliased
+      (``lineage_conflict``), and an existing record is never repointed;
+    * ``child == parent`` is refused (``lineage_self``) — nothing to record.
+
+    Returns ``{"ok": True, "written": bool, "child_key", "parent_key"}``; the
+    ``written`` flag is ``False`` for an idempotent repeat.
+    """
+
+    home = _resolve_home(hermes_home)
+    child = _validate_session_id(child_session_id)
+    parent = _validate_session_id(parent_session_id)
+    if boundary != "compression":
+        raise ValidationError(
+            "lineage is only recorded for a verified compression rotation",
+            code="lineage_boundary",
+            details={"boundary": str(boundary)[:64]},
+        )
+    if child == parent:
+        raise ValidationError("a lineage record cannot point at itself", code="lineage_self")
+    owner = resolve_session_lineage(home, parent) or parent
+    if owner == child:
+        raise ConflictError("a session cannot become its own ancestor", code="lineage_cycle")
+
+    child_key, _parent_key = session_key(child), session_key(parent)
+    owner_key = session_key(owner)
+    sessions = home / STORE_DIRNAME / SESSIONS_DIRNAME
+    if _store_present(sessions / child_key):
+        raise ConflictError(
+            "session already owns a store; refusing to alias it",
+            code="lineage_conflict",
+            details={"child_key": child_key},
+        )
+    if not _store_present(sessions / owner_key):
+        # Pointing at an archive that does not exist would resolve a child id to
+        # an empty store and present that as the compacted conversation.
+        raise NotFoundError(
+            "the parent session has no store to inherit",
+            code="lineage_parent_missing",
+            details={"parent_key": owner_key},
+        )
+
+    root = home / STORE_DIRNAME / LINEAGE_DIRNAME
+    final = root / f"{child_key}.json"
+    existing = _read_lineage_record(final)
+    if existing is not None:
+        if existing.get("parent_session_id") != owner:
+            raise ConflictError(
+                "session lineage already points at another archive",
+                code="lineage_conflict",
+                details={"child_key": child_key},
+            )
+        return {
+            "ok": True,
+            "written": False,
+            "child_key": child_key,
+            "parent_key": owner_key,
+        }
+
+    _ensure_private_dir(home / STORE_DIRNAME, root=home)
+    _ensure_private_dir(root, root=home / STORE_DIRNAME)
+    _assert_contained(home / STORE_DIRNAME, root)
+    payload = canonical_json(
+        {
+            "format": LINEAGE_FORMAT_VERSION,
+            "child_key": child_key,
+            "parent_key": owner_key,
+            "parent_session_id": owner,
+            "boundary": "compression",
+            "created_at": now or _utc_now(),
+            "engine_version": engine_version or "",
+        }
+    ).encode("utf-8")
+    if len(payload) > LINEAGE_MAX_BYTES:  # pragma: no cover - defensive
+        raise ValidationError("lineage record would be too large", code="invalid_lineage")
+
+    tmp = root / f".{child_key}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    installed = False
+    try:
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _assert_plain(tmp, kind="file")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, final)
+        installed = True
+        # Durability of the rename itself: without this a crash can leave the
+        # child id unaliased after the caller was told the rotation was safe.
+        dir_fd = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if not installed:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return {"ok": True, "written": True, "child_key": child_key, "parent_key": owner_key}
+
+
+def _purge_lineage_records(home: Path, session_id: str) -> int:
+    """Drop records that name *session_id*, best effort (operator purge only)."""
+
+    root = home / STORE_DIRNAME / LINEAGE_DIRNAME
+    try:
+        entries = list(root.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
+    removed = 0
+    key = session_key(session_id)
+    for entry in entries:
+        try:
+            record = _read_lineage_record(entry) if entry.suffix == ".json" else None
+        except CLMError:
+            record = None
+        named = entry.stem == key or bool(record and record.get("parent_session_id") == session_id)
+        if not named:
+            continue
+        try:
+            if entry.is_symlink():
+                continue
+            entry.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def _assert_contained(root: Path, path: Path) -> None:
@@ -643,13 +1002,20 @@ class ContextStore:
 
         ``config`` is an additive keyword beyond the integration contract so
         tests and the engine can inject limits without touching Hermes config.
+
+        A rotated session id resolves through the durable lineage records to the
+        archive that physically owns the conversation (:func:`resolve_session_lineage`):
+        the child of a compression rotation gets the parent's spans, pins and
+        revisions even in a process that never saw the parent. ``store.session_id``
+        is then the *owner*; the requested id is an alias of it.
         """
 
         cfg = _coerce_config(config)
         sid = _validate_session_id(session_id)
-        home = Path(hermes_home).expanduser()
+        home = _resolve_home(hermes_home)
+        owner = resolve_session_lineage(home, sid) or sid
         root = sessions_root(home)
-        directory = session_dir(home, sid)
+        directory = session_dir(home, owner)
         if not read_only:
             _ensure_private_dir(home / STORE_DIRNAME, root=home)
             _ensure_private_dir(root, root=home / STORE_DIRNAME)
@@ -680,7 +1046,7 @@ class ContextStore:
                     details={"reason": str(exc)[:200]},
                 ) from exc
             store = cls(
-                session_id=sid,
+                session_id=owner,
                 db_id="",
                 directory=directory,
                 conn=conn,
@@ -3637,8 +4003,15 @@ class ContextStore:
         if isinstance(max_purge, bool) or not isinstance(max_purge, int) or max_purge < 1:
             raise ValidationError("max_purge must be a positive int", code="invalid_retention")
         max_purge = min(max_purge, 1000)
+        protected_current: set[str] = set()
         if current_session_id is not None:
             current_session_id = _validate_session_id(current_session_id)
+            protected_current.add(current_session_id)
+            # A live session may be the *child* of a compression rotation whose
+            # archive is filed under the parent id: that store is the current one.
+            owner = resolve_session_lineage(hermes_home, current_session_id)
+            if owner:
+                protected_current.add(owner)
 
         sessions = cls.list_sessions(hermes_home)
         ordered = sorted(sessions, key=lambda item: (-int(item["modified"]), item["store_key"]))
@@ -3653,7 +4026,7 @@ class ContextStore:
                     {"store_key": item["store_key"], "session_id": None, "reason": "unreadable"}
                 )
                 continue
-            if current_session_id is not None and session_id == current_session_id:
+            if current_session_id is not None and session_id in protected_current:
                 if not include_current:
                     skipped.append(
                         {
@@ -3716,14 +4089,28 @@ class ContextStore:
 
     @classmethod
     def purge_session(cls, hermes_home: str | os.PathLike[str], session_id: str) -> dict[str, Any]:
-        """Operator purge: remove one session store directory entirely."""
+        """Operator purge: remove the store directory that owns *session_id*.
+
+        *session_id* may be an alias of a compression rotation: the archive it
+        points at is the one removed, and every lineage record naming it goes with
+        it (a record left behind would resolve a child id to a fresh empty store
+        and present that as the purged conversation).
+        """
 
         import shutil
 
+        home = _resolve_home(hermes_home)
         sid = _validate_session_id(session_id)
-        directory = session_dir(hermes_home, sid)
+        owner = resolve_session_lineage(home, sid) or sid
+        directory = session_dir(home, owner)
         if not directory.exists():
-            return {"ok": True, "removed": False, "store_key": session_key(sid)}
+            _purge_lineage_records(home, owner)
+            return {
+                "ok": True,
+                "removed": False,
+                "store_key": session_key(owner),
+                "aliased_from": None if owner == sid else session_key(sid),
+            }
         lock_path = directory / LOCK_FILENAME
         fd = _acquire_writer_lock(lock_path)
         try:
@@ -3733,7 +4120,13 @@ class ContextStore:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
-        return {"ok": True, "removed": True, "store_key": session_key(sid)}
+        _purge_lineage_records(home, owner)
+        return {
+            "ok": True,
+            "removed": True,
+            "store_key": session_key(owner),
+            "aliased_from": None if owner == sid else session_key(sid),
+        }
 
 
 def _message_text(message_json: str) -> str:

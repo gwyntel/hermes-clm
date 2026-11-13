@@ -69,7 +69,10 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - Overflow (`bypass_cooldown=True`): archive first, then commit projection; if needed, deterministically offload oldest unpinned tool groups until reserve fits. Never delete system/user/pinned content.
 - Lazy initialization from host `session_id`; no reliance on `bind_session_state` or `on_session_end`.
 - `clone_for_agent()` returns a fresh engine with reopened store, never deep-copies SQLite/locks.
-- Compression boundaries carry state only through explicit `old_session_id` lifecycle; new session gets isolated copy. No lineage guessing from `conversation_id`.
+- Compression boundaries carry state through the explicit `old_session_id` lifecycle: the store is
+  adopted in place **and** the relation is recorded in `clm/lineage/`, so a cold process resolves
+  the rotated child to the same archive. Every other id change gets an isolated store. No lineage
+  guessing from `conversation_id`.
 
 ## Model guidance (system-prompt section)
 
@@ -107,7 +110,8 @@ oversized section is skipped, not truncated).
 
 ## Security limits
 
-Plugin cannot defend against arbitrary same-UID shell access. It can enforce tool authority, file permissions, redaction, origin preservation, CAS, idempotency and corruption detection. It cannot make self-authored instructions unpersuasive, guarantee host post-sanitizer bytes, or support child→parent retrieval until Hermes supplies lineage. These limits belong in README and benchmark reporting.
+Plugin cannot defend against arbitrary same-UID shell access. It can enforce tool authority, file permissions, redaction, origin preservation, CAS, idempotency and corruption detection. It cannot make self-authored instructions unpersuasive, guarantee host post-sanitizer bytes, or read a subagent's parent archive (lineage is only the
+  compression rotation the host reports, never a tool argument). These limits belong in README and benchmark reporting.
 
 ## Reference host facts
 

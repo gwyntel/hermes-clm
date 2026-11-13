@@ -24,6 +24,9 @@ REPLY = {"rewrites": [{"span_id": "m-0001", "text": "tests pass: 12 passed"}]}
 def build(revision: int = 2):
     ctx = FakeCtx()
     engine = FakeEngine()
+    # The fake stands in for the engine the host owns for this session; ``/clm``
+    # resolves the engine bound to the calling session, not the handler's closure.
+    engine.session_id = "sess-1"
     service = FakeService(revision=revision)
     service.add_span("m-0001", "verbose pytest output " * 40)
     engine.sessions["sess-1"] = service

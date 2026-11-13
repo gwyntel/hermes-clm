@@ -27,7 +27,42 @@ enumerate these directories with `ContextStore.list_sessions(hermes_home)`.
   is enabled; the process-wide umask is never changed — and re-applied on open, so a loose umask or a
   pre-existing directory cannot widen access).
 * `session.db` is the only source of truth. Deleting `active.json` loses nothing.
-* Nothing is written outside the session directory; there is no cross-session file.
+* Nothing is written inside another session's directory. The one file outside them is the
+  lineage record described in *Session lineage* below: it holds a relation, never payload.
+
+### Session lineage
+
+```text
+<hermes_home>/clm/lineage/<session key>.json
+```
+
+A `/compact` rotation renames the session while the archive stays put. The engine records
+`child → parent` there so a **cold** process resolves the child id to the parent's store
+directory instead of opening an empty one:
+
+```json
+{"format": 1, "child_key": "...", "parent_key": "...",
+ "parent_session_id": "...", "boundary": "compression",
+ "created_at": "...", "engine_version": "..."}
+```
+
+* Written only for a rotation the host reported as `boundary_reason="compression"` **and**
+  only when `old_session_id` is the session the engine already served. `/new`, `/resume`,
+  `/branch` and a self-rotation write nothing.
+* Written only after the parent store exists, and only if the child directory does not
+  already exist: an id with its own archive is never aliased (`lineage_conflict`).
+* Created `0600` by a sibling-temp + `os.replace`, so a reader never sees a partial file;
+  rewriting an existing record with a *different* parent is refused rather than repointed.
+* Resolution is transitive (bounded), cycle-detecting, and refuses a symlink, hard link,
+  foreign-owned or group-readable record, an oversized record, invalid JSON, a `child_key`
+  that does not match its own filename, or a `parent_session_id` that would traverse
+  (`lineage_cycle`, `lineage_depth`, `corrupt_lineage`, `symlink_refused`,
+  `insecure_permissions`, `hardlink_refused`). An unreadable record is an error: treating it
+  as "no lineage" would silently address a fresh archive.
+* `ContextStore.for_session(home, child)` opens the *owner's* directory and reports
+  `store.session_id == parent`; the child id is an alias, not a second store. Purge and
+  retention expand the alias, so `purge_session(child)` removes the owner's directory and its
+  records, and retention never purges the archive of a live child.
 
 ### Session key derivation
 

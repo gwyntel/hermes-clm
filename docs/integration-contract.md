@@ -31,6 +31,16 @@ Delegates may refine internals, not these public semantics. Python type annotati
 
 Engine calls only `for_session`, `ingest`, `snapshot`, `status`, lifecycle/close. Projection logic stays in `projection.py`; store never aligns request rows. Store owns operation conflict validation; engine independently refuses protected/ambiguous/invalid projections.
 
+### Session attach and rotation
+
+- A store always lives under `<hermes_home>/clm/sessions/<session-key>/`. A blank, relative or non-absolute home is `ValidationError(code="invalid_home")`; there is no working-directory fallback, because a store beside the gateway's cwd is invisible to the next process and shared between profiles.
+- `hermes_home` is resolved lazily at store-open time: `on_session_start(hermes_home=…)`, then `clm.hermes_home`, then the host's `get_hermes_home()`. Never at import: one process serves several profiles.
+- The attached handle is keyed by `(session_id, hermes_home)`. Either changing closes the old store and attaches the new one.
+- `on_session_start(new_id, boundary_reason="compression", old_session_id=old_id)` is the host's **post-compaction rotation**, with no reset in between (`agent/conversation_compression.py`). When `old_id` is the session this engine already serves, the store is *adopted*: same handle, same revision lineage, pins and archive intact, new id — **and the relation is written to `clm/lineage/`**, so a later process that only has the child id resolves it to the same archive ([store-format](store-format.md#session-lineage)). A rotation that is not `compression`, that names another session, or that follows a reset is a new conversation with its own store; `old_id == new_id` records nothing. A failed lineage write does not undo the live adoption and is reported as `last_lineage_error` in `status`.
+- `bind_session_state(session_db, session_id)` adopts an id only while unbound, and never reads or writes the host database.
+- A compaction that cannot be performed is not reported as one. `compress()` returns identity with `_last_compress_aborted = True` and a typed `_last_summary_error`: `store_unavailable:<code>: …`, `store_read_only: …`, `manual_no_offloadable_groups`, `manual_commit_refused:<code>`, `manual_no_saving`, `projection_refused:<codes>`.
+
+
 ## Tools ↔ engine/store
 
 Engine exposes `store` only through its own scoped tool-service methods. Tool handlers never accept `session_id`, paths, provider, model, base URL or API keys. All return JSON strings. Tool schemas contain no provider configuration.

@@ -20,11 +20,16 @@ import copy
 import functools
 import importlib
 import json
+import logging
+import os
+import threading
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import budget as _budget
+from ._version import __version__ as _ENGINE_VERSION
 from .auxiliary import (
     AuxCompressor,
     AuxLimits,
@@ -36,6 +41,10 @@ from .models import MAX_REWRITE_BYTES
 from .projection import ProjectionResult, project
 from .tools import ToolHandlers, ToolLimits, build_tool_specs
 
+#: Fallback logger: an aborted compaction must leave a trace even when the host
+#: constructs the engine without one (a silent refusal is undiagnosable).
+_LOG = logging.getLogger(__name__)
+
 #: Default reserve kept free for the next completion.
 DEFAULT_RESERVE_TOKENS = _budget.DEFAULT_RESERVE_TOKENS
 #: Default pressure thresholds (fractions of the raw context length).
@@ -45,6 +54,51 @@ _PROPOSAL_OPERATION_FIELDS = ("kind", "span_ids", "replacement")
 
 #: How many recent projection/usage receipts the engine keeps in memory for status.
 RECEIPT_LIMIT = 20
+
+#: Default fraction of the projection a manual ``/compact`` tries to shed when the
+#: window is not under pressure. Deterministic, archive-backed, and capped by the
+#: offloadable tool groups that actually exist.
+DEFAULT_MANUAL_TARGET_RATIO = 0.2
+
+#: Store error codes that mean "this engine has no usable store right now" rather
+#: than "the store refused this edit".
+_STORE_ATTACH_CODES = frozenset(
+    {
+        "invalid_home",
+        "no_session",
+        "store_not_found",
+        "store_busy",
+        "store_closed",
+        "unsafe_path",
+        "symlink_refused",
+        "sqlite_open_failed",
+        "schema_missing",
+        "schema_incomplete",
+    }
+)
+
+#: Live engines by the session they serve. A surface that can only name a session —
+#: the host's slash-command dispatcher passes ``session_id``/``session_key`` and
+#: never the agent — resolves its engine here. Weak values: an engine the host has
+#: dropped must never be resurrected by a late command.
+_ENGINE_BINDINGS: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+_ENGINE_BINDINGS_LOCK = threading.Lock()
+
+
+def engine_for_session(session_id: Optional[str]) -> Optional["CLMEngine"]:
+    """The live engine bound to *session_id*, or ``None`` when none is bound.
+
+    Only an engine that adopted the session registers here, so this never returns
+    the plugin system's shared prototype (which is deep-copied per agent) or an
+    instance an earlier agent left behind: the engine that owns the store answers.
+    A ``None``/blank ``session_id`` is never resolved to "whichever engine is
+    bound" — that would hand one session's archive to a caller who named none.
+    """
+
+    if not session_id:
+        return None
+    with _ENGINE_BINDINGS_LOCK:
+        return _ENGINE_BINDINGS.get(str(session_id))
 
 
 class _StandaloneEngineBase:
@@ -188,6 +242,7 @@ class EngineConfig:
     max_retrieve_bytes: int = 32_768
     max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_aux_spans: int = 8
+    manual_target_ratio: float = DEFAULT_MANUAL_TARGET_RATIO
     hermes_home: Optional[str] = None
 
     @classmethod
@@ -219,6 +274,9 @@ class EngineConfig:
             max_retrieve_bytes=int(_config_value(source, "max_retrieve_bytes", 32_768)),
             max_rewrite_bytes=int(_config_value(source, "max_rewrite_bytes", MAX_REWRITE_BYTES)),
             max_aux_spans=int(_config_value(source, "max_aux_spans", 8)),
+            manual_target_ratio=float(
+                _config_value(source, "manual_target_ratio", DEFAULT_MANUAL_TARGET_RATIO)
+            ),
             hermes_home=_config_value(source, "hermes_home", None),
         )
 
@@ -262,6 +320,7 @@ class EngineConfig:
             "max_retrieve_bytes": self.max_retrieve_bytes,
             "max_rewrite_bytes": self.max_rewrite_bytes,
             "max_aux_spans": self.max_aux_spans,
+            "manual_target_ratio": self.manual_target_ratio,
         }
 
 
@@ -356,6 +415,24 @@ def _store_config(module: Any, config: Any | None) -> Any:
     )
 
 
+def _result_error_code(result: Any) -> Optional[str]:
+    """The store's own error code from a stage/commit result, when it reports one."""
+
+    if not isinstance(result, Mapping):
+        code = getattr(result, "code", None)
+        return str(code) if code else None
+    errors = result.get("errors") or result.get("conflicts") or ()
+    if isinstance(errors, Mapping):
+        errors = [errors]
+    for item in errors:
+        if isinstance(item, Mapping):
+            code = item.get("code")
+            if code:
+                return str(code)
+    code = result.get("code") or result.get("error_code")
+    return str(code) if code else None
+
+
 def _result_ok(result: Any, default: bool = True) -> bool:
     """Read ``ok`` from a store result mapping or object."""
     if result is None:
@@ -363,6 +440,48 @@ def _result_ok(result: Any, default: bool = True) -> bool:
     if isinstance(result, Mapping):
         return bool(result.get("ok", default))
     return bool(getattr(result, "ok", default))
+
+
+def _span_state(span: Any) -> str:
+    """A snapshot span's state as a lowercase string (``"active"`` when unstated)."""
+
+    state = getattr(span, "state", None)
+    if state is None:
+        return "active"
+    value = getattr(state, "value", state)
+    text = str(value or "").strip().lower()
+    return text or "active"
+
+
+def _settled_control_spans(snapshot: Any) -> set:
+    """Span ids whose last committed content operation is ``offload``/``drop``.
+
+    A store reports each span's state, but the operation log is the authority the
+    engine can replay for itself — and the only thing that works when a store (or a
+    test double) reports spans without state. Re-targeting an already-offloaded
+    group would be inert in the store while still costing a revision, so the manual
+    and overflow planners skip those groups instead.
+    """
+
+    settle: Dict[str, str] = {}
+    for operation in getattr(snapshot, "operations", ()) or ():
+        kind = (
+            operation.get("kind")
+            if isinstance(operation, Mapping)
+            else getattr(operation, "kind", None)
+        )
+        kind = str(getattr(kind, "value", kind) or "").strip().lower()
+        span_ids = (
+            operation.get("span_ids")
+            if isinstance(operation, Mapping)
+            else getattr(operation, "span_ids", ())
+        ) or ()
+        if not isinstance(span_ids, (list, tuple)):
+            span_ids = (span_ids,)
+        for span_id in span_ids:
+            if isinstance(span_id, str) and span_id:
+                settle[span_id] = kind
+    return {span_id for span_id, kind in settle.items() if kind in {"offload", "drop"}}
 
 
 def _pin_identifiers(pins: Any) -> set:
@@ -456,7 +575,13 @@ class ToolService:
     def _require_store(self) -> Any:
         store = self._engine.store
         if store is None:
-            raise RuntimeError("clm store is not attached for this session")
+            # Keep the store's own code (``invalid_home``, ``store_busy``,
+            # ``no_session``) so a tool refusal names the cause, not just "no store".
+            error = getattr(self._engine, "_store_error", None)
+            code = error.get("code") if isinstance(error, Mapping) else None
+            message = error.get("message") if isinstance(error, Mapping) else None
+            detail = f"{code}: {message}" if code and message else "clm store is not attached"
+            raise RuntimeError(detail)
         return store
 
     def _call_store(self, name: str, /, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -763,7 +888,31 @@ class CLMEngine(_EngineBase):
         self._hermes_home = hermes_home or self.config.hermes_home
         self._session_id = session_id
         self._store: Any = None
-        self._logger = logger
+        #: Which session/home the attached store belongs to. A host that rotates or
+        #: resumes a session id must never keep serving the previous store.
+        self._store_session: Optional[str] = None
+        self._store_home: Optional[str] = None
+        #: Set by ``on_session_reset`` (``/new``, ``/resume``): the host asked for a
+        #: fresh conversation, so the next session start must not adopt a rotation
+        #: even when its ``old_session_id`` still matches the id this engine served.
+        self._reset_pending = False
+        #: ``{"code": ..., "message": ...}`` for the last failed attach, so a
+        #: caller sees ``invalid_home`` / ``store_busy`` instead of "no store".
+        self._store_error: Optional[Dict[str, Any]] = None
+        #: Where the attached store's home came from: ``on_session_start``, ``config``
+        #: or ``hermes_constants``. ``None`` until a home resolved.
+        self._home_source: Optional[str] = None
+        #: Memo for a home resolved from a *stable* source, keyed by its inputs.
+        #: ``hermes_constants`` is deliberately not memoised: a multiplexed host
+        #: rebinds the ambient profile, and a cached home would follow the wrong one.
+        self._home_cache: Optional[Tuple[Tuple[Any, Any], Optional[str], str]] = None
+        #: Code of the last refused stage/commit (``stale_revision``, ``store_busy``,
+        #: ``read_only``…), so an aborted compaction names what refused it.
+        self._last_commit_error: Optional[str] = None
+        #: Code of the last failed durable-lineage write, so a child that cannot
+        #: resolve its parent's archive is diagnosable instead of merely empty.
+        self._last_lineage_error: Optional[str] = None
+        self._logger = logger if logger is not None else _LOG
         self.calibration = TokenCalibration()
         self._tool_limits = ToolLimits.from_config(self._raw_config)
         # One auxiliary compressor per engine; clones share it so metric state is
@@ -779,6 +928,10 @@ class CLMEngine(_EngineBase):
         self._base_threshold_percent = self._config_threshold_percent
         self._last_error: Optional[str] = None
         self._last_projection: Optional[ProjectionResult] = None
+        #: Last compression outcome: cleared at the start of every ``compress()`` and
+        #: readable from ``get_status()`` before the first one.
+        self._last_compress_aborted = False
+        self._last_summary_error: Optional[str] = None
         self._last_receipts: List[Dict[str, Any]] = []
         self._last_estimate = 0
         self._usage_receipts: List[Dict[str, Any]] = []
@@ -820,25 +973,106 @@ class CLMEngine(_EngineBase):
 
     def _record_error(self, exc: BaseException) -> None:
         self._last_error = f"{type(exc).__name__}: {exc}"
-        logger = self._logger
-        if logger is not None:  # pragma: no cover - host logging only
+        sink = self._logger
+        if sink is not None:
             try:
-                logger.warning("hermes-clm: %s", self._last_error)
-            except Exception:
+                sink.warning("hermes-clm: %s", self._last_error)
+            except Exception:  # pragma: no cover - a broken host logger
                 pass
 
-    def _ensure_store(self) -> Any:
-        """Open this session's store once; failures degrade to detached mode."""
-        if self._store is not None:
-            return self._store
-        if not self._session_id:
+    def _record_store_error(self, code: str, message: str) -> None:
+        """Remember why the store could not be attached, with its typed code."""
+
+        self._store_error = {"code": str(code), "message": " ".join(str(message).split())[:200]}
+
+    def _resolve_home(self) -> Optional[str]:
+        """The Hermes home this engine's store belongs to, or ``None``.
+
+        Resolution order: an explicit attach (``on_session_start(hermes_home=…)``),
+        then ``clm.hermes_home``, then the host's own ``get_hermes_home()`` — read
+        lazily at open time, because a multiplexed process serves several profiles
+        and the ambient home at import time is not necessarily this session's.
+        The source is kept so a misattributed home stays diagnosable (status
+        ``store_home_source``) instead of silently writing into another profile.
+
+        A home that came from an explicit source is memoised on its inputs so the
+        per-call ``(session, home)`` key check stays a tuple comparison; the
+        ambient source is re-read every time, because that is exactly the value
+        that changes when the host routes another profile through this process.
+        """
+
+        explicit = (self._hermes_home, self.config.hermes_home)
+        cached = self._home_cache
+        if cached is not None and cached[0] == explicit:
+            self._home_source = cached[2]
+            return cached[1]
+
+        for source, candidate in (
+            ("on_session_start", self._hermes_home),
+            ("config", self.config.hermes_home),
+        ):
+            if isinstance(candidate, (str, os.PathLike)) and str(candidate).strip():
+                self._home_source = source
+                self._home_cache = (explicit, str(candidate), source)
+                return str(candidate)
+        try:  # pragma: no cover - exercised only inside a Hermes runtime
+            from hermes_constants import get_hermes_home
+
+            resolved = get_hermes_home()
+        except Exception:
+            self._home_source = None
             return None
+        if not resolved:
+            self._home_source = None
+            return None
+        self._home_source = "hermes_constants"
+        return str(resolved)
+
+    def _ensure_store(self) -> Any:
+        """Open this session's store once; failures degrade to detached mode.
+
+        The handle is keyed by ``(session_id, home)``: a host that rotates the
+        session id after in-place compaction, or rebinds the same id under another
+        profile's home, gets the store that key names instead of silently writing
+        the new transcript into the previous archive. A failure to attach is
+        recorded with the store's own error code, never flattened into "no store".
+        """
+
+        if not self._session_id:
+            self._record_store_error("no_session", "no host session id has been attached yet")
+            return None
+        # Resolve exactly once per call: this runs on every ``select_context``, and
+        # the ambient source (a multiplexed gateway) has to be re-read each time.
+        home = self._resolve_home()
+        if self._store is not None:
+            if (self._store_session, self._store_home) == (self._session_id, home):
+                return self._store
+            # The host named a different session or home: this handle belongs to
+            # another store, and SQLite's sibling flock allows one writer.
+            self._close_store()
+        self._store_error = None
+        if not home:
+            # The real store refuses a blank home (``invalid_home``); an injected
+            # factory may not need one, so it still gets the call. Recording the
+            # cause first keeps the failure typed either way.
+            self._record_store_error(
+                "invalid_home",
+                "no Hermes home could be resolved for this session; refusing to open a "
+                "store beside the process working directory",
+            )
         try:
-            self._store = self._store_factory(self._hermes_home, self._session_id)
+            store = self._store_factory(home, self._session_id)
         except Exception as exc:
+            code = str(getattr(exc, "code", "") or type(exc).__name__)
+            message = str(getattr(exc, "message", "") or exc) or type(exc).__name__
+            self._record_store_error(code, message)
             self._record_error(exc)
             return None
-        return self._store
+        self._store = store
+        self._store_session = self._session_id
+        self._store_home = home
+        self._store_error = None
+        return store
 
     def service_for_session(self, session_id: str | None = None) -> ToolService | None:
         """The scoped tool service for this engine's session, or ``None``.
@@ -856,23 +1090,179 @@ class CLMEngine(_EngineBase):
                 if self._store is not None:  # pragma: no cover - defensive
                     return None
                 self._session_id = session_id
+                self._register_binding()
             elif session_id != self._session_id:
                 return None
         if self._ensure_store() is None:
             return None
         return ToolService(self)
 
+    # -- session → engine index --------------------------------------------- #
+
+    def _register_binding(self) -> None:
+        """Publish ``session_id → this engine`` for session-only surfaces."""
+
+        session_id = self._session_id
+        if not session_id:
+            return
+        with _ENGINE_BINDINGS_LOCK:
+            _ENGINE_BINDINGS[str(session_id)] = self
+
+    def _release_binding(self, session_id: str | None = None) -> None:
+        """Drop this engine's binding (only when it is still the owner of the key)."""
+
+        key = session_id or self._session_id
+        if not key:
+            return
+        with _ENGINE_BINDINGS_LOCK:
+            if _ENGINE_BINDINGS.get(str(key)) is self:
+                del _ENGINE_BINDINGS[str(key)]
+
+    def bind_session_state(
+        self, session_db: Any = None, session_id: str | None = None, **kwargs: Any
+    ) -> None:
+        """Host seam: adopt the session id a cold/managed engine was built for.
+
+        The gateway builds a one-off plugin engine for ``session.mutate(compress)``
+        on a cold session and binds it with ``(session_db, session_id)`` before the
+        forced ``compress()``; without this the engine has no session and refuses
+        with ``no_session``. The host's ``session_db`` is deliberately not stored:
+        this package reads and writes its own store only, never the host database.
+        An engine already bound to a different session keeps its own binding — a
+        bind can never steal another session's store.
+        """
+
+        if not session_id:
+            return
+        session_id = str(session_id)
+        if self._session_id in (None, session_id):
+            self._session_id = session_id
+            self._register_binding()
+        self._ensure_store()
+
     def on_session_start(self, session_id: str, **kwargs: Any) -> None:
-        """Lazily attach the store for ``session_id`` (host calls this once per session)."""
-        self._session_id = session_id or self._session_id
+        """Attach the store for ``session_id``, surviving a compaction rotation.
+
+        The host rotates the session id after an in-place compaction and tells the
+        engine through this hook — ``on_session_start(new_id,
+        boundary_reason="compression", old_session_id=old_id)`` — *without* an
+        ``on_session_end``/``on_session_reset`` in between. Treating that as a new
+        conversation would open an empty store for the child id and silently drop
+        every committed edit, pin and archived span of the conversation it just
+        compacted.
+
+        A rotation is adopted only when **all** of these hold: the boundary is
+        exactly ``"compression"``, the previous id is the session this engine is
+        currently serving, and the open handle belongs to that same session. The
+        store is kept, the new id is bound to it, and the relation is written to
+        disk (``record_session_lineage``) so a *cold* engine for the child resolves
+        the same archive after this process is gone. Any other id change — ``/new``,
+        ``/resume``, ``/branch``, a stale notification naming someone else — is a
+        genuinely different conversation and gets its own store, never an alias.
+        """
+
+        new_session_id = str(session_id) if session_id else self._session_id
+        previous = kwargs.get("old_session_id") or kwargs.get("previous_session_id")
+        boundary = kwargs.get("boundary_reason")
         hermes_home = kwargs.get("hermes_home")
         if hermes_home:
             self._hermes_home = str(hermes_home)
+
+        adopted = self._adopts_rotation(new_session_id, previous, boundary)
+        if adopted:
+            child_id = str(new_session_id)
+            self._release_binding(self._session_id)
+            self._session_id = child_id
+            self._store_session = child_id
+            lineage = self._record_lineage(child_id, str(previous))
+            self._receipt(
+                {
+                    "stage": "session_rotation",
+                    "boundary": boundary,
+                    "from": str(previous),
+                    "to": child_id,
+                    "store": "adopted",
+                    "lineage": lineage,
+                }
+            )
+        else:
+            self._release_binding(self._session_id)
+            self._session_id = new_session_id
+        self._reset_pending = False
+        self._register_binding()
+
         context_length = kwargs.get("context_length")
         if context_length:
             self.context_length = int(context_length)
             self.threshold_tokens = int(self.context_length * self.threshold_percent)
         self._ensure_store()
+
+    def _adopts_rotation(self, new_session_id: Optional[str], previous: Any, boundary: Any) -> bool:
+        """Whether a session-start notification is the host's post-compaction rotation.
+
+        The gate is deliberately narrow, because adopting the wrong notification
+        hands one conversation another conversation's archive. ``boundary_reason``
+        must be exactly ``"compression"`` (the only value
+        ``_notify_context_engine_compression_complete`` sends); the previous id must
+        be the session this engine serves; and ``from == to`` adopts nothing.
+
+        The open handle is *not* required: a competing process can adopt the
+        continuation of a session it has not touched yet this turn, and an attach
+        that failed (another writer holds the sibling lock) must still record the
+        lineage rather than start a second archive under the child id. So an
+        unopened store is attached first, and a failed attach leaves the ids to be
+        rotated with a typed ``store_error``.
+        """
+
+        if not new_session_id or not previous:
+            return False
+        if str(boundary or "") != "compression":
+            return False
+        if str(previous) == str(new_session_id):
+            return False
+        if self._reset_pending:
+            # The host reset this conversation; ids starting over is not a rename.
+            return False
+        if str(previous) != str(self._session_id):
+            # A stale notification naming another session: not ours to adopt.
+            return False
+        if self._store is None:
+            # Serving the parent but nothing attached yet: open it, then decide.
+            self._ensure_store()
+        if self._store is not None and self._store_session not in (None, self._session_id):
+            return False
+        return True
+
+    def _record_lineage(self, child_session_id: str, parent_session_id: str) -> str:
+        """Persist ``child → archive owner`` durably; returns a short outcome label.
+
+        Called only from the adopted-rotation path. A failed write must not undo
+        the in-memory adoption (this engine still serves the right store), so the
+        failure is recorded and logged instead of raised — but it stays visible in
+        ``/clm status`` as ``last_lineage_error``, because the *cold* child will
+        then start with an empty archive.
+        """
+
+        home = self._store_home or self._resolve_home()
+        if not home:
+            self._last_lineage_error = "invalid_home"
+            return "skipped:invalid_home"
+        try:
+            module = importlib.import_module(".store", __package__)  # lazy, like the factory
+            result = module.record_session_lineage(
+                home,
+                child_session_id,
+                parent_session_id,
+                boundary="compression",
+                engine_version=_ENGINE_VERSION,
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", "") or type(exc).__name__)
+            self._last_lineage_error = code
+            self._record_error(exc)
+            return f"failed:{code}"
+        self._last_lineage_error = None
+        return "written" if result.get("written") else "present"
 
     def on_session_end(self, session_id: str, messages: Sequence[Mapping[str, Any]]) -> None:
         """Flush the final transcript, then release the store handle."""
@@ -881,18 +1271,29 @@ class CLMEngine(_EngineBase):
                 self._ingest(messages)
         except Exception as exc:  # pragma: no cover - best effort at a boundary
             self._record_error(exc)
+        self._release_binding()
         self._close_store()
 
     def on_session_reset(self) -> None:
-        """Reset counters and reopen the store lazily for the same session id."""
+        """Reset counters and reopen the store lazily for the same session id.
+
+        The host calls this for ``/new`` and ``/resume``. The id stays — the store
+        reopens lazily for it — but the rotation state does not: a compression
+        notification that arrives after a reset is a new conversation, not a rename.
+        """
+
         super().on_session_reset()
         self._last_estimate = 0
         self._last_projection = None
         self._last_receipts.clear()
+        self._reset_pending = True
+        self._release_binding()
         self._close_store()
 
     def _close_store(self) -> None:
         store, self._store = self._store, None
+        self._store_session = None
+        self._store_home = None
         if store is not None:
             try:
                 store.close()
@@ -907,7 +1308,7 @@ class CLMEngine(_EngineBase):
         no store handle at all. The store is reopened for the clone's own session
         on first use, so two agents never share SQLite objects or locks.
         """
-        clone = type(self)(
+        clone = CLMEngine(
             config=self.config,
             store_factory=self._store_factory,
             hermes_home=self._hermes_home,
@@ -1096,16 +1497,31 @@ class CLMEngine(_EngineBase):
     ) -> List[Dict[str, Any]]:
         """Identity unless a manual ``force`` or provider-proven ``bypass_cooldown``.
 
-        Manual: return the current committed projection (report no change when it
-        saves nothing). Overflow: archive, then commit an archive-backed offload
-        of the oldest unpinned tool groups until the reserve fits - never a
+        Manual (``force``, i.e. ``/compact``): apply the committed projection, and
+        when that saves nothing, commit a **deterministic archive-backed offload**
+        of the oldest unpinned tool groups until the manual target is met. No model
+        call, no summary, no replacement of CLM state with prose. A manual
+        compaction that cannot reduce anything says so (``aborted`` plus a typed
+        reason) instead of returning "success" on a no-op.
+
+        Overflow (``bypass_cooldown``): archive, then commit an archive-backed
+        offload of the oldest unpinned tool groups until the reserve fits - never a
         user/system/pinned row.
         """
+
         self._last_compress_aborted = False
+        self._last_summary_error = None
+        self._last_commit_error = None
         if not force and not bypass_cooldown:
             return self._identity_copy(messages)
         if not messages:
             return []
+        if bool(getattr(self._store, "read_only", False)):
+            # An inspection/recovery attach has no writer: /compact here is a
+            # policy refusal, and saying so is better than a generic commit error.
+            return self._abort_compress(
+                "store_read_only: this store is attached read-only", messages
+            )
 
         try:
             self._ingest(messages)
@@ -1120,20 +1536,188 @@ class CLMEngine(_EngineBase):
                 return self._abort_compress(f"projection_refused:{codes}", messages)
             if bypass_cooldown:
                 return self._overflow(messages, snapshot, result)
-            if result.after_tokens < result.before_tokens:
-                self.compression_count += 1
-                return [dict(message) for message in result.messages]
-            return self._identity_copy(messages)
+            return self._manual(messages, snapshot, result)
         except Exception as exc:
             self._record_error(exc)
-            return self._identity_copy(messages)
+            return self._abort_compress(f"compress_failed:{type(exc).__name__}", messages)
+
+    def _manual(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        snapshot: Any,
+        result: ProjectionResult,
+    ) -> List[Dict[str, Any]]:
+        """Manual compaction: the projection first, then a real offload if needed.
+
+        The host shows this result's ``before``/``after`` token counts, so every
+        path here must either prove a saving or report why there is none:
+
+        * committed edits already shrink the projection -> replay them;
+        * otherwise plan whole unpinned tool groups (oldest first) to the manual
+          target, commit one transaction, and replay the committed head;
+        * nothing eligible -> identity plus ``manual_no_offloadable_groups``;
+        * the store cannot commit -> identity: a local-only stub would be undone by
+          the next ``select_context`` ingest, which is worse than honesty.
+        """
+
+        if result.after_tokens < result.before_tokens:
+            self.compression_count += 1
+            return [dict(message) for message in result.messages]
+
+        need_tokens = self._manual_target_tokens(result.after_tokens)
+        candidates = self._offload_candidates(messages, snapshot)
+        plan = _budget.plan_offload(candidates, need_tokens=need_tokens)
+        if not plan:
+            return self._abort_compress("manual_no_offloadable_groups", messages)
+        # Commit only against a plan that predicts a saving. Once committed the
+        # archive *has* changed, so "nothing happened" is no longer true; the
+        # planner's own invariant (every candidate frees tokens) is what makes the
+        # prediction safe, and a zero-token plan is refused before the write.
+        predicted = sum(int(getattr(candidate, "tokens", 0) or 0) for candidate in plan)
+        if predicted <= 0:
+            return self._abort_compress("manual_no_predicted_saving", messages)
+
+        txn_id = "manual-" + uuid.uuid4().hex
+        expected_revision = int(getattr(snapshot, "revision", 0) or 0)
+        operations = [
+            self._make_operation(
+                kind="offload",
+                span_ids=tuple(candidate.edit_span_ids),
+                expected_revision=expected_revision,
+                txn_id=txn_id,
+                # The human typed /compact; the operator is the actor.
+                actor_origin="operator",
+            )
+            for candidate in plan
+        ]
+        durable = self._commit_operations(
+            snapshot, operations, txn_id=txn_id, actor_origin="operator"
+        )
+        if not durable:
+            code = self._last_commit_error or "refused"
+            return self._abort_compress(f"manual_commit_refused:{code}", messages)
+
+        committed = self._snapshot()
+        if committed is None:
+            # The commit is in; only the reload failed. Replay what we can and say so.
+            return self._committed_without_saving(
+                plan, None, None, messages, "manual_reload_failed"
+            )
+        replayed = self._project(messages, messages, snapshot=committed)
+        if not replayed.ok:
+            codes = ",".join(sorted({str(item.get("code")) for item in replayed.conflicts}))
+            return self._committed_without_saving(
+                plan, committed, replayed, messages, f"manual_projection_refused:{codes}"
+            )
+        if replayed.after_tokens >= result.before_tokens:
+            # The store accepted the transaction but the transcript did not shrink.
+            # Never report a compaction that did not happen — and never report a
+            # refusal either, because the archive now differs from what the operator
+            # was told before /compact.
+            return self._committed_without_saving(
+                plan, committed, replayed, messages, "manual_committed_without_saving"
+            )
+
+        self._last_projection = replayed
+        self.compression_count += 1
+        self._receipt(
+            {
+                "stage": "manual",
+                "durable": True,
+                "revision": int(getattr(committed, "revision", 0) or 0),
+                "offloaded": [candidate.group_id for candidate in plan],
+                "needed": need_tokens,
+                "predicted_saving": predicted,
+                "before_tokens": result.before_tokens,
+                "after_tokens": replayed.after_tokens,
+            }
+        )
+        return [dict(message) for message in replayed.messages]
+
+    def _committed_without_saving(
+        self,
+        plan: Sequence[Any],
+        committed: Any,
+        replayed: Any,
+        messages: Sequence[Mapping[str, Any]],
+        reason: str,
+    ) -> List[Dict[str, Any]]:
+        """A manual compaction that committed but could not be shown to save.
+
+        The transaction is durable, so this is neither success nor a no-op: the
+        archive was offloaded and the next projection will apply it, while this
+        turn's transcript is unchanged. It is reported as a warning with the
+        revision and group ids (``/clm status`` shows the same), never as
+        ``compression_count`` growth and never as a silent "no changes".
+        """
+
+        self._last_summary_error = (
+            f"{reason}: store revision {int(getattr(committed, 'revision', 0) or 0)} accepted "
+            f"the offload of {len(plan)} group(s) but the projection did not shrink"
+        )
+        self._record_error(RuntimeError(self._last_summary_error))
+        self._receipt(
+            {
+                "stage": "manual",
+                "durable": True,
+                "anomaly": reason,
+                "revision": int(getattr(committed, "revision", 0) or 0),
+                "offloaded": [getattr(candidate, "group_id", "") for candidate in plan],
+                "after_tokens": int(getattr(replayed, "after_tokens", 0) or 0),
+            }
+        )
+        if replayed is not None and getattr(replayed, "ok", False):
+            self._last_projection = replayed
+            return [dict(message) for message in replayed.messages]
+        return self._identity_copy(messages)
+
+    def _manual_target_tokens(self, tokens: int) -> int:
+        """Tokens a manual compaction should free.
+
+        Under pressure: exactly the overflow (restore the reserve, do not gut the
+        window). Otherwise: a deterministic fraction of the projection, so
+        ``/compact`` on a healthy session still does something measurable instead of
+        reporting a no-op.
+        """
+
+        state = _budget.pressure_state(
+            estimated_tokens=int(tokens),
+            context_length=self.context_length,
+            reserve_tokens=self.config.reserve_tokens,
+            threshold_percent=self.threshold_percent,
+            thresholds=self.config.pressure_thresholds,
+            calibration=self.calibration,
+            last_prompt_tokens=self.last_prompt_tokens,
+        )
+        if state.overflow_tokens > 0:
+            return state.overflow_tokens
+        ratio = float(self.config.manual_target_ratio or 0)
+        if ratio <= 0:
+            return 0
+        return max(1, int(round(int(tokens) * ratio)))
 
     def _abort_compress(
         self, reason: str, messages: Sequence[Mapping[str, Any]]
     ) -> List[Dict[str, Any]]:
+        """Refuse the compaction in one line, keeping the store's own error code.
+
+        ``reason`` is a stable CLM-side cause; when the store could not be attached
+        the typed code and message are appended, so the operator reads
+        ``store_unavailable:invalid_home: no Hermes home …`` instead of a bare
+        "no store".
+        """
+
         self._last_compress_aborted = True
-        self._last_summary_error = reason
-        self._record_error(RuntimeError(reason))
+        detail = reason
+        store_error = self._store_error
+        if isinstance(store_error, Mapping) and store_error.get("code"):
+            code = str(store_error["code"])
+            # "the engine has no usable store" reads differently from "the store
+            # refused this edit"; keep them apart so the fix is obvious.
+            prefix = "store_unavailable" if code in _STORE_ATTACH_CODES else "store_error"
+            detail = f"{prefix}:{code}: {store_error.get('message', '')}".rstrip(": ")
+        self._last_summary_error = detail
+        self._record_error(RuntimeError(detail))
         return self._identity_copy(messages)
 
     def _overflow(
@@ -1248,6 +1832,7 @@ class CLMEngine(_EngineBase):
 
         spans = getattr(snapshot, "spans", {}) or {}
         pin_ids = _pin_identifiers(getattr(snapshot, "pins", None))
+        settled = _settled_control_spans(snapshot)
         by_uid: Dict[str, Any] = {}
         by_span_id: dict[str, Any] = {}
         for key, span in (spans or {}).items():
@@ -1275,6 +1860,8 @@ class CLMEngine(_EngineBase):
             protected = any(
                 span is None
                 or bool(getattr(span, "protected", False))
+                or _span_state(span) != "active"
+                or str(getattr(span, "span_id", "") or getattr(span, "uid", "") or "") in settled
                 or role_of(getattr(span, "message", {}) or {}) in ("system", "developer", "user")
                 or not is_editable_content((getattr(span, "message", {}) or {}).get("content"))
                 for span in span_list
@@ -1353,10 +1940,16 @@ class CLMEngine(_EngineBase):
                 actor_origin=actor_origin,
             )
             if not _result_ok(staged, default=False):
+                self._last_commit_error = _result_error_code(staged) or "stage_refused"
                 return False
             committed = commit(txn_id=txn_id, expected_revision=revision)
-            return _result_ok(committed, default=False)
+            if not _result_ok(committed, default=False):
+                self._last_commit_error = _result_error_code(committed) or "commit_refused"
+                return False
+            self._last_commit_error = None
+            return True
         except Exception as exc:
+            self._last_commit_error = str(getattr(exc, "code", "") or type(exc).__name__)
             self._record_error(exc)
             return False
 
@@ -1416,9 +2009,25 @@ class CLMEngine(_EngineBase):
         status.update(
             {
                 "engine": self.name,
+                # Which build is live in this process: a long-lived gateway keeps the
+                # modules it imported, so a fix is only observable after a restart.
+                "engine_version": _ENGINE_VERSION,
                 "session_id": self._session_id,
                 "revision": int(getattr(self._last_projection, "revision", 0) or 0),
                 "store": "attached" if self._store is not None else "detached",
+                "store_error": dict(self._store_error) if self._store_error else None,
+                "store_session": self._store_session,
+                # The session id the attached archive is physically filed under; differs
+                # from ``session_id`` only for the child of a compression rotation.
+                "store_root_session": getattr(self._store, "session_id", None),
+                # A label, never the path: status crosses into host messages.
+                "store_home_source": self._home_source,
+                # Why the last /compact produced no reduction (or committed without one).
+                "last_compress_aborted": bool(self._last_compress_aborted),
+                "last_compress_error": self._last_summary_error,
+                # Set when the durable child→parent lineage could not be written: the
+                # live engine is fine, a cold child would start empty.
+                "last_lineage_error": self._last_lineage_error,
                 "budget": self.budget_state(),
                 "calibration": self.calibration.to_dict(),
                 "cache_read_tokens": self.last_cache_read_tokens,

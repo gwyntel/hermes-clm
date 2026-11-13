@@ -46,6 +46,8 @@ class FakeEngine:
     """Minimal engine stand-in: one store per session, keyed like the real engine."""
 
     name = ENGINE_NAME
+    #: Set by tests that stand this fake in for the engine bound to a session.
+    session_id: str | None = None
 
     def __init__(self) -> None:
         self.sessions: dict[str | None, FakeService] = {}
@@ -453,19 +455,33 @@ def test_runtime_accepts_a_per_engine_tool_service():
 
 def test_command_handler_reports_status_text():
     ctx, _, engine = registered_ctx()
+    # The engine the host owns for this session is the one the command resolves.
+    engine.session_id = "sess-a"
     engine.sessions["sess-a"] = FakeService(revision=5)
     command = ctx.commands[0]["handler"]
     text = command("status", session_id="sess-a")
     assert "CLM" in text and "revision 5" in text
 
 
-def test_command_handler_works_without_a_session():
-    ctx, _, _ = registered_ctx()
+def test_command_without_a_session_refuses_instead_of_using_a_bound_engine():
+    """No session id means no engine: never "whichever engine this handler holds".
+
+    The handler is one process-wide registry entry, and the runtime it closed over
+    may serve an entirely different session (or be the host's unbound prototype).
+    Answering from it would show — and edit — another conversation's archive.
+    """
+
+    ctx, runtime, engine = registered_ctx()
+    engine.sessions["sess-bound"] = FakeService(revision=9)
+
     text = ctx.commands[0]["handler"]("status", session_id=None)
-    assert "no CLM store" in text
+
+    assert "no session id" in text
+    assert "9" not in text
+    assert engine.requested == [], "the bound engine must not be consulted without an id"
 
 
-def test_command_help_lists_operator_actions():
+def test_command_help_needs_no_session():
     ctx, _, _ = registered_ctx()
     text = ctx.commands[0]["handler"]("", session_id=None)
     assert "/clm unpin" in text and "/clm edit" in text

@@ -219,8 +219,9 @@ cost-gated procedure that any future live run must follow.
 - Injected text can still persuade a model. The guarantee is that injected text never gains
   operator or system authority, not that injection never happens.
 - Hermes currently offers no supported mid-loop transcript commit; the engine projects
-  request copies instead. Child-to-parent archive retrieval is disabled until the host
-  supplies lineage.
+  request copies instead. A `/compact` rotation is durable — the child id resolves to the
+  same archive through a recorded lineage entry — but a rotation made before this build
+  has no such entry, and a subagent cannot read another session's archive.
 - Benchmark gains are not evidence of real task accuracy, and CLM-style benefits are
   model-conditional.
 

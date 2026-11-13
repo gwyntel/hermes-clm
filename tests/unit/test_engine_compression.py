@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import sys
 
+import pytest
+
 from _clm_fakes import (
+    FakeStoreResult,
     StoreFactory,
     assistant_call,
     message,
     snapshot_for,
     tool_result,
 )
+from hermes_clm import budget as _budget
 from hermes_clm.budget import estimate_messages_tokens
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
 
@@ -56,14 +60,112 @@ def test_routine_compress_never_touches_the_store_or_the_transcript():
 # ----------------------------------------------------------------------- manual
 
 
-def test_manual_compress_reports_no_change_when_the_projection_saves_nothing():
+def test_manual_compress_offloads_the_oldest_group_when_the_projection_saves_nothing():
+    """``/compact`` must reduce something, not report a no-op success.
+
+    Regression: ``compress(force=True)`` used to replay the committed projection
+    only, so a session with a huge stale tool result answered the manual command
+    with "No changes from compression" while the store held nothing to replay.
+    """
+
     history = big_history()
     engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
     result = engine.compress(history, force=True)
+
+    assert estimate_messages_tokens(result) < estimate_messages_tokens(history)
+    assert "[clm.offloaded" in result[2]["content"]  # oldest group stubbed
+    assert result[6]["content"] == "NEWEST OUTPUT"  # newest tool result protected
+    assert result[0]["content"] == "list everything"  # user row untouched
+    assert engine.compression_count == 1
+    assert engine._last_compress_aborted is False
+    assert getattr(engine, "_last_summary_error", None) is None
+    assert len(factory.store.commits) == 1
+    staged_ops, expected_revision, txn_id, actor_origin = factory.store.staged[0]
+    assert expected_revision == 1
+    assert txn_id.startswith("manual-")
+    # The human typed /compact: the operator is the actor, not the model.
+    assert actor_origin == "operator"
+    assert [op.kind for op in staged_ops] == ["offload"]
+    assert set(staged_ops[0].span_ids) == {"a1", "t1"}
+
+
+def test_manual_compress_progresses_across_calls_and_then_reports_exhaustion():
+    """Each ``/compact`` sheds the next oldest group; an exhausted one is honest."""
+
+    history = [
+        message("user", "list everything", "u1"),
+        assistant_call("a1", "call_1"),
+        tool_result("t1", "call_1", "HUGE OUTPUT LINE\n" * 400),
+        message("assistant", "done listing", "a2"),
+        message("user", "now the tests", "u2"),
+        assistant_call("a3", "call_2"),
+        tool_result("t2", "call_2", "MEDIUM OUTPUT LINE\n" * 100),
+        message("assistant", "tests pass", "a4"),
+        message("user", "and the build", "u3"),
+        assistant_call("a5", "call_3"),
+        tool_result("t3", "call_3", "NEWEST OUTPUT"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    first = engine.compress(history, force=True)
+    assert "[clm.offloaded" in first[2]["content"]
+    assert first[6]["content"].startswith("MEDIUM")
+    second = engine.compress(list(first), force=True)
+    assert "[clm.offloaded" in second[6]["content"]  # the next oldest group went
+    assert estimate_messages_tokens(second) < estimate_messages_tokens(first)
+    assert engine.compression_count == 2, "both calls did real work"
+
+    # Nothing eligible remains (the newest tool result is protected): identity, an
+    # explicit reason, and no new revision.
+    commits_before = len(factory.store.commits)
+    revision_before = factory.store._snapshot.revision
+    third = engine.compress(list(second), force=True)
+    assert third == list(second)
+    assert engine.compression_count == 2
+    assert engine._last_compress_aborted is True
+    assert "manual_no_offloadable_groups" in (engine._last_summary_error or "")
+    assert len(factory.store.commits) == commits_before
+    assert factory.store._snapshot.revision == revision_before
+
+
+def test_manual_compress_is_honest_when_nothing_is_offloadable():
+    """No tool groups, no committed edits: say so instead of "no changes" success."""
+
+    history = [
+        message("user", "hello", "u1"),
+        message("assistant", "hi", "a1"),
+        message("user", "still there?", "u2"),
+        message("assistant", "yes", "a2"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    result = engine.compress(history, force=True)
+
     assert result == history
     assert engine.compression_count == 0
-    assert getattr(engine, "_last_compress_aborted", False) is False
+    assert engine._last_compress_aborted is True
+    assert "manual_no_offloadable_groups" in (engine._last_summary_error or "")
     assert factory.store.commits == []
+
+
+def test_manual_compress_never_reports_a_local_only_offload_as_saved():
+    """A store without a commit surface cannot persist the stubs: refuse instead.
+
+    The next ``select_context`` would ingest the stubbed rows and re-project from a
+    store that never recorded the offload, restoring the full content — so a
+    local-only "reduction" would be undone behind the user's back.
+    """
+
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1), supports_commit=False)
+
+    result = engine.compress(history, force=True)
+
+    assert result == history
+    assert engine.compression_count == 0
+    assert engine._last_compress_aborted is True
+    assert "manual_commit_refused" in (engine._last_summary_error or "")
 
 
 def test_manual_compress_applies_the_committed_projection_only():
@@ -92,11 +194,75 @@ def test_manual_compress_aborts_honestly_on_a_refused_projection():
     assert engine.compression_count == 0
 
 
-def test_manual_compress_reports_no_change_when_no_operations_exist():
+def test_manual_compress_does_not_commit_a_plan_that_predicts_no_saving(monkeypatch):
+    """Commit-before-saving: a zero-saving plan must be refused *before* the write.
+
+    The order matters. The engine plans, checks the prediction, then commits once;
+    committing first and explaining afterwards would leave the archive changed while
+    the operator was told nothing happened. ``plan_offload``'s candidates are what
+    the prediction sums, so a candidate that frees nothing must not reach the store.
+    """
+
     history = big_history()
-    engine, _ = build_engine(snapshot_for(history, [], revision=1))
-    assert engine.compress(history, force=True) == history
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    zero = _budget.OffloadCandidate(
+        order=0, group_id="g1", uids=("a1", "t1"), tokens=0, span_ids=("a1", "t1")
+    )
+    monkeypatch.setattr(_budget, "plan_offload", lambda candidates, need_tokens=0: [zero])
+
+    result = engine.compress(history, force=True)
+
+    assert result == history
+    assert engine._last_compress_aborted is True
+    assert "manual_no_predicted_saving" in (engine._last_summary_error or "")
+    assert factory.store.commits == [], "a zero-saving plan must not be committed"
+    assert factory.store.staged == []
     assert engine.compression_count == 0
+
+
+def test_manual_compress_is_honest_when_the_store_accepted_but_nothing_shrank():
+    """A commit that the projection cannot show is an anomaly, not a success.
+
+    Once the transaction is durable the archive *has* changed, so reporting
+    "nothing happened" would be a lie, and reporting a compaction would be a
+    different one. The engine returns the transcript unchanged, keeps the success
+    counter still, and says which revision accepted what — visibly, in the error
+    slot and the receipt, not only in a debug log.
+    """
+
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+    if not hasattr(factory.store, "commit") or factory.store.commit is None:
+        pytest.skip("this fake has no commit surface")
+
+    def commit_but_forget(*, txn_id, expected_revision):
+        # The store accepts the transaction (and bumps its head) but the operation
+        # never becomes part of the projection: exactly the mismatch a real store
+        # exhibits when a span id no longer resolves.
+        factory.store.commits.append(
+            {"txn_id": txn_id, "expected_revision": expected_revision, "lost": True}
+        )
+        return FakeStoreResult(ok=True, revision=int(expected_revision) + 1)
+
+    factory.store.commit = commit_but_forget
+
+    result = engine.compress(history, force=True)
+
+    assert result == history, "no saving to report, so the transcript is unchanged"
+    assert engine.compression_count == 0, "a non-shrinking projection is not a compaction"
+    assert factory.store.commits, "the engine did commit what it planned"
+    assert "manual_committed_without_saving" in (engine._last_summary_error or "")
+    assert engine._last_compress_aborted is False, "the archive changed: not a refusal"
+    status = engine.get_status()
+    assert (
+        status["last_compress_error"]
+        and "manual_committed_without_saving" in status["last_compress_error"]
+    )
+    anomaly = [r for r in status["receipts"] if r.get("anomaly")]
+    assert anomaly and anomaly[-1]["anomaly"] == "manual_committed_without_saving"
+    assert anomaly[-1]["durable"] is True
+    assert anomaly[-1]["offloaded"], "the receipt names the groups that were committed"
 
 
 # --------------------------------------------------------------------- overflow
