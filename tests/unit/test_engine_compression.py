@@ -5,13 +5,18 @@ from __future__ import annotations
 import json
 import sys
 
+import pytest
+
 from _clm_fakes import (
+    FakeStoreResult,
     StoreFactory,
+    assemble,
     assistant_call,
     message,
     snapshot_for,
     tool_result,
 )
+from hermes_clm import budget as _budget
 from hermes_clm.budget import estimate_messages_tokens
 from hermes_clm.engine import CLMEngine, EngineConfig, OperationSpec
 
@@ -56,14 +61,112 @@ def test_routine_compress_never_touches_the_store_or_the_transcript():
 # ----------------------------------------------------------------------- manual
 
 
-def test_manual_compress_reports_no_change_when_the_projection_saves_nothing():
+def test_manual_compress_offloads_the_oldest_group_when_the_projection_saves_nothing():
+    """``/compact`` must reduce something, not report a no-op success.
+
+    Regression: ``compress(force=True)`` used to replay the committed projection
+    only, so a session with a huge stale tool result answered the manual command
+    with "No changes from compression" while the store held nothing to replay.
+    """
+
     history = big_history()
     engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
     result = engine.compress(history, force=True)
+
+    assert estimate_messages_tokens(result) < estimate_messages_tokens(history)
+    assert "[clm.offloaded" in result[2]["content"]  # oldest group stubbed
+    assert result[6]["content"] == "NEWEST OUTPUT"  # newest tool result protected
+    assert result[0]["content"] == "list everything"  # user row untouched
+    assert engine.compression_count == 1
+    assert engine._last_compress_aborted is False
+    assert getattr(engine, "_last_summary_error", None) is None
+    assert len(factory.store.commits) == 1
+    staged_ops, expected_revision, txn_id, actor_origin = factory.store.staged[0]
+    assert expected_revision == 1
+    assert txn_id.startswith("manual-")
+    # The human typed /compact: the operator is the actor, not the model.
+    assert actor_origin == "operator"
+    assert [op.kind for op in staged_ops] == ["offload"]
+    assert set(staged_ops[0].span_ids) == {"a1", "t1"}
+
+
+def test_manual_compress_progresses_across_calls_and_then_reports_exhaustion():
+    """Each ``/compact`` sheds the next oldest group; an exhausted one is honest."""
+
+    history = [
+        message("user", "list everything", "u1"),
+        assistant_call("a1", "call_1"),
+        tool_result("t1", "call_1", "HUGE OUTPUT LINE\n" * 400),
+        message("assistant", "done listing", "a2"),
+        message("user", "now the tests", "u2"),
+        assistant_call("a3", "call_2"),
+        tool_result("t2", "call_2", "MEDIUM OUTPUT LINE\n" * 100),
+        message("assistant", "tests pass", "a4"),
+        message("user", "and the build", "u3"),
+        assistant_call("a5", "call_3"),
+        tool_result("t3", "call_3", "NEWEST OUTPUT"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    first = engine.compress(history, force=True)
+    assert "[clm.offloaded" in first[2]["content"]
+    assert first[6]["content"].startswith("MEDIUM")
+    second = engine.compress(list(first), force=True)
+    assert "[clm.offloaded" in second[6]["content"]  # the next oldest group went
+    assert estimate_messages_tokens(second) < estimate_messages_tokens(first)
+    assert engine.compression_count == 2, "both calls did real work"
+
+    # Nothing eligible remains (the newest tool result is protected): identity, an
+    # explicit reason, and no new revision.
+    commits_before = len(factory.store.commits)
+    revision_before = factory.store._snapshot.revision
+    third = engine.compress(list(second), force=True)
+    assert third == list(second)
+    assert engine.compression_count == 2
+    assert engine._last_compress_aborted is True
+    assert "manual_no_offloadable_groups" in (engine._last_summary_error or "")
+    assert len(factory.store.commits) == commits_before
+    assert factory.store._snapshot.revision == revision_before
+
+
+def test_manual_compress_is_honest_when_nothing_is_offloadable():
+    """No tool groups, no committed edits: say so instead of "no changes" success."""
+
+    history = [
+        message("user", "hello", "u1"),
+        message("assistant", "hi", "a1"),
+        message("user", "still there?", "u2"),
+        message("assistant", "yes", "a2"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    result = engine.compress(history, force=True)
+
     assert result == history
     assert engine.compression_count == 0
-    assert getattr(engine, "_last_compress_aborted", False) is False
+    assert engine._last_compress_aborted is True
+    assert "manual_no_offloadable_groups" in (engine._last_summary_error or "")
     assert factory.store.commits == []
+
+
+def test_manual_compress_never_reports_a_local_only_offload_as_saved():
+    """A store without a commit surface cannot persist the stubs: refuse instead.
+
+    The next ``select_context`` would ingest the stubbed rows and re-project from a
+    store that never recorded the offload, restoring the full content — so a
+    local-only "reduction" would be undone behind the user's back.
+    """
+
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1), supports_commit=False)
+
+    result = engine.compress(history, force=True)
+
+    assert result == history
+    assert engine.compression_count == 0
+    assert engine._last_compress_aborted is True
+    assert "manual_commit_refused" in (engine._last_summary_error or "")
 
 
 def test_manual_compress_applies_the_committed_projection_only():
@@ -92,11 +195,75 @@ def test_manual_compress_aborts_honestly_on_a_refused_projection():
     assert engine.compression_count == 0
 
 
-def test_manual_compress_reports_no_change_when_no_operations_exist():
+def test_manual_compress_does_not_commit_a_plan_that_predicts_no_saving(monkeypatch):
+    """Commit-before-saving: a zero-saving plan must be refused *before* the write.
+
+    The order matters. The engine plans, checks the prediction, then commits once;
+    committing first and explaining afterwards would leave the archive changed while
+    the operator was told nothing happened. ``plan_offload``'s candidates are what
+    the prediction sums, so a candidate that frees nothing must not reach the store.
+    """
+
     history = big_history()
-    engine, _ = build_engine(snapshot_for(history, [], revision=1))
-    assert engine.compress(history, force=True) == history
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    zero = _budget.OffloadCandidate(
+        order=0, group_id="g1", uids=("a1", "t1"), tokens=0, span_ids=("a1", "t1")
+    )
+    monkeypatch.setattr(_budget, "plan_offload", lambda candidates, need_tokens=0: [zero])
+
+    result = engine.compress(history, force=True)
+
+    assert result == history
+    assert engine._last_compress_aborted is True
+    assert "manual_no_predicted_saving" in (engine._last_summary_error or "")
+    assert factory.store.commits == [], "a zero-saving plan must not be committed"
+    assert factory.store.staged == []
     assert engine.compression_count == 0
+
+
+def test_manual_compress_is_honest_when_the_store_accepted_but_nothing_shrank():
+    """A commit that the projection cannot show is an anomaly, not a success.
+
+    Once the transaction is durable the archive *has* changed, so reporting
+    "nothing happened" would be a lie, and reporting a compaction would be a
+    different one. The engine returns the transcript unchanged, keeps the success
+    counter still, and says which revision accepted what — visibly, in the error
+    slot and the receipt, not only in a debug log.
+    """
+
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+    if not hasattr(factory.store, "commit") or factory.store.commit is None:
+        pytest.skip("this fake has no commit surface")
+
+    def commit_but_forget(*, txn_id, expected_revision):
+        # The store accepts the transaction (and bumps its head) but the operation
+        # never becomes part of the projection: exactly the mismatch a real store
+        # exhibits when a span id no longer resolves.
+        factory.store.commits.append(
+            {"txn_id": txn_id, "expected_revision": expected_revision, "lost": True}
+        )
+        return FakeStoreResult(ok=True, revision=int(expected_revision) + 1)
+
+    factory.store.commit = commit_but_forget
+
+    result = engine.compress(history, force=True)
+
+    assert result == history, "no saving to report, so the transcript is unchanged"
+    assert engine.compression_count == 0, "a non-shrinking projection is not a compaction"
+    assert factory.store.commits, "the engine did commit what it planned"
+    assert "manual_committed_without_saving" in (engine._last_summary_error or "")
+    assert engine._last_compress_aborted is False, "the archive changed: not a refusal"
+    status = engine.get_status()
+    assert (
+        status["last_compress_error"]
+        and "manual_committed_without_saving" in status["last_compress_error"]
+    )
+    anomaly = [r for r in status["receipts"] if r.get("anomaly")]
+    assert anomaly and anomaly[-1]["anomaly"] == "manual_committed_without_saving"
+    assert anomaly[-1]["durable"] is True
+    assert anomaly[-1]["offloaded"], "the receipt names the groups that were committed"
 
 
 # --------------------------------------------------------------------- overflow
@@ -268,3 +435,145 @@ def test_compression_paths_never_import_hermes_or_call_a_model():
 
     config = json.loads(json.dumps(engine.get_status()["config"]))
     assert not any(key in config for key in ("model", "provider", "base_url", "api_key"))
+
+
+# ------------------------------------------------- calibration and offload order
+
+
+def calibration_history():
+    """Four equal tool groups; the fourth is the newest, protected result."""
+
+    rows = []
+    for index in range(4):
+        rows.append(message("user", f"step {index}", f"u{index}"))
+        rows.append(assistant_call(f"a{index}", f"call_{index}"))
+        rows.append(tool_result(f"t{index}", f"call_{index}", "OUTPUT LINE\n" * 300))
+    return rows
+
+
+def test_overflow_planning_prices_candidates_in_the_calibrated_vocabulary():
+    """Over-offload counterexample: a real-vs-estimate ratio of 2.
+
+    ``need_tokens`` is calibrated, so candidates must be too. Priced raw, each
+    group looks half its real cost and the planner offloads a third group it
+    does not need (and, at a ratio below 1, too few to restore the reserve).
+    """
+
+    history = calibration_history()
+    raw_total = estimate_messages_tokens(history)
+    reserve = 200
+    # ratio 2.0 => calibrated total 7488, each group 1860; a 2500-token deficit
+    # is covered by two groups in calibrated tokens, by three in raw ones.
+    engine, factory = build_engine(
+        snapshot_for(history, [], revision=1),
+        context_length=raw_total * 2 - 2500 + reserve,
+        reserve_tokens=reserve,
+    )
+    engine.calibration = _budget.TokenCalibration(2.0)
+
+    result = engine.compress(history, bypass_cooldown=True)
+
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "overflow"][-1]
+    assert receipt["needed"] == 2500
+    assert len(receipt["offloaded"]) == 2, receipt["offloaded"]
+    assert factory.store.commits, "the two-group plan was committed"
+    assert estimate_messages_tokens(result) < raw_total
+    assert engine.budget_state()["fits"] is True, "the committed offload restores the reserve"
+
+
+def order_history():
+    """Group ids that sort in the *opposite* order to the transcript rows."""
+
+    rows = []
+    for uid, tag in (("z-old", "OLD"), ("m-mid", "MID"), ("a-new", "NEW")):
+        rows.append(message("user", f"step {uid}", f"u-{uid}"))
+        rows.append(assistant_call(uid, f"call_{uid}"))
+        rows.append(tool_result(f"t-{uid}", f"call_{uid}", f"{tag} OUTPUT\n" * 300))
+    return rows
+
+
+def test_offload_plans_the_oldest_group_first_even_when_ids_sort_backwards():
+    """``sorted(group_id)`` offloads ``group:a-new`` before ``group:z-old``."""
+
+    history = order_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    candidates = engine._offload_candidates(history, factory.store.snapshot())
+    assert [candidate.group_id for candidate in candidates] == [
+        "group:z-old",
+        "group:m-mid",
+        "group:a-new",
+    ], "plan order must be history row order, not lexicographic group id order"
+
+    result = engine.compress([dict(row) for row in history], force=True)
+
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "manual"][-1]
+    assert receipt["offloaded"] == ["group:z-old"]
+    joined = "\n".join(str(row.get("content") or "") for row in result)
+    assert "OLD OUTPUT" not in joined, "the oldest group is the one that was offloaded"
+    assert "MID OUTPUT" in joined and "NEW OUTPUT" in joined
+
+
+def test_manual_plan_is_priced_in_the_same_vocabulary_as_the_target():
+    history = calibration_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+    engine.calibration = _budget.TokenCalibration(2.0)
+
+    result = engine.compress(history, force=True)
+
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "manual"][-1]
+    assert receipt["calibration_ratio"] == 2.0
+    assert receipt["needed"] > 0
+    assert receipt["predicted_saving"] >= receipt["needed"], (
+        "the plan must cover the calibrated target it was asked for"
+    )
+    assert estimate_messages_tokens(result) < estimate_messages_tokens(history)
+
+
+def test_default_status_summary_reports_the_compaction_diagnostic():
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1), manual_target_ratio=0)
+
+    engine.compress(history, force=True)
+    payload = json.loads(engine.handle_tool_call("clm_status", {}))
+
+    assert payload["detail"] == "summary"
+    assert payload["last_compress_aborted"] is True
+    assert "manual_no_offloadable_groups" in (payload["last_compress_error"] or "")
+    assert payload["store"] == "attached"
+    assert isinstance(payload["engine_version"], str) and payload["engine_version"]
+    assert payload["store_error"] is None
+    assert payload["last_lineage_error"] is None
+    for expensive in ("receipts", "projection", "budget", "config"):
+        assert expensive not in payload
+
+
+def test_stage_preview_after_compact_prices_the_compacted_projection():
+    """The pre-compaction request is stale: pricing against it counts archived text."""
+
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+    request = assemble(history)
+    assert engine.select_context(request, conversation_messages=history) is None
+
+    compacted = engine.compress([dict(row) for row in history], force=True)
+    assert any("[clm.offloaded" in str(row.get("content")) for row in compacted)
+
+    priced = engine.tool_service().preview([{"kind": "drop", "span_ids": ["a2"]}])
+
+    assert priced["available"] is True
+    assert priced["before"] == engine.budget_state(compacted)["raw_estimated_tokens"]
+    assert priced["before"] < engine.budget_state(request)["raw_estimated_tokens"], (
+        "a stale request would price the text the compaction already offloaded"
+    )
+
+
+def test_stage_preview_after_compact_needs_no_prior_turn():
+    history = big_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    compacted = engine.compress(history, force=True)
+    priced = engine.tool_service().preview([{"kind": "drop", "span_ids": ["a2"]}])
+
+    assert priced["available"] is True, priced
+    assert priced["before"] == engine.budget_state(compacted)["raw_estimated_tokens"]

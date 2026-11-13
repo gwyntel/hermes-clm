@@ -59,7 +59,13 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - Reuse Hermes model/context-length state and rough estimators. Calibrate estimates against real `usage.prompt_tokens` with bounded ratio; record real cache read/write fields when supplied.
 - Default configurable reserve and pressure tiers; `context_status`/tool receipts expose the same estimate used for edit validation.
 - Existing Hermes pressure notices remain intact because newest tool output is protected.
-- Routine projection does not inject changing status rows (would destroy cache). Task-boundary tool creates explicit agent-chosen snapshots/audit markers.
+- Routine projection does not inject changing status rows (would destroy cache). The one
+  injected row is the **compaction notice**: after an operator `/compact` or an overflow
+  offload, a single `[clm.notice rev=N ...]` row anchored right after the system row tells
+  the model its earlier tool results moved to the archive. Its bytes are a pure function of
+  the compaction revision, so it is byte-identical on every turn until the next compaction
+  and the cached prefix survives; a host that echoes the projection back cannot accumulate
+  a second one. Task-boundary tool creates explicit agent-chosen snapshots/audit markers.
 - Record before/after estimated tokens for every edit, aux usage/latency when available, and revision snapshots sufficient for prefix-reuse analysis.
 
 ## Compression and lifecycle
@@ -69,14 +75,17 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - Overflow (`bypass_cooldown=True`): archive first, then commit projection; if needed, deterministically offload oldest unpinned tool groups until reserve fits. Never delete system/user/pinned content.
 - Lazy initialization from host `session_id`; no reliance on `bind_session_state` or `on_session_end`.
 - `clone_for_agent()` returns a fresh engine with reopened store, never deep-copies SQLite/locks.
-- Compression boundaries carry state only through explicit `old_session_id` lifecycle; new session gets isolated copy. No lineage guessing from `conversation_id`.
+- Compression boundaries carry state through the explicit `old_session_id` lifecycle: the store is
+  adopted in place **and** the relation is recorded in `clm/lineage/`, so a cold process resolves
+  the rotated child to the same archive. Every other id change gets an isolated store. No lineage
+  guessing from `conversation_id`.
 
 ## Model guidance (system-prompt section)
 
 The tool surface is useless if the model does not know the operating rules, so the plugin
 registers one static text block through the host's section API
 (`ctx.register_system_prompt_section`): id `hermes-clm.usage`, position `after_memory`,
-`max_chars` 4000 (the host ceiling; the text is ~3.0 KB with headroom because an
+`max_chars` 4000 (the host ceiling; the text is ~3.5 KB with headroom because an
 oversized section is skipped, not truncated).
 
 - **Static by construction.** The section is registered as a string, never a callable.
@@ -107,7 +116,8 @@ oversized section is skipped, not truncated).
 
 ## Security limits
 
-Plugin cannot defend against arbitrary same-UID shell access. It can enforce tool authority, file permissions, redaction, origin preservation, CAS, idempotency and corruption detection. It cannot make self-authored instructions unpersuasive, guarantee host post-sanitizer bytes, or support child→parent retrieval until Hermes supplies lineage. These limits belong in README and benchmark reporting.
+Plugin cannot defend against arbitrary same-UID shell access. It can enforce tool authority, file permissions, redaction, origin preservation, CAS, idempotency and corruption detection. It cannot make self-authored instructions unpersuasive, guarantee host post-sanitizer bytes, or read a subagent's parent archive (lineage is only the
+  compression rotation the host reports, never a tool argument). These limits belong in README and benchmark reporting.
 
 ## Reference host facts
 

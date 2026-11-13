@@ -142,7 +142,9 @@ def test_dual_lane_defers_the_plugin_tools_to_the_selected_engine(home):
     assert len(names) == 12 and len(set(names)) == 12, names
     assert "clm_status" in names and "clm_accept_proposal" in names
     _write_through_the_selected_engine(selected)
-    payload = json.loads(selected.handle_tool_call("clm_status", {}, session_id=SESSION))
+    payload = json.loads(
+        selected.handle_tool_call("clm_status", {"detail": "full"}, session_id=SESSION)
+    )
     assert payload["ok"] is True, payload
     assert payload["engine"] == ENGINE_NAME
     assert payload["store"] == "attached"
@@ -187,6 +189,6 @@ def test_plugins_only_fallback_still_registers_a_working_tool_surface(home):
     assert runtime.deferred_to_engine is False
 
     status = next(tool for tool in ctx.tools if tool["name"] == "clm_status")
-    payload = json.loads(status["handler"]({}, session_id=SESSION))
+    payload = json.loads(status["handler"]({"detail": "full"}, session_id=SESSION))
     assert payload["ok"] is True, payload
     assert payload["store"] == "attached"

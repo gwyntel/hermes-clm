@@ -50,6 +50,37 @@ def home(tmp_path):
     return h
 
 
+@pytest.fixture(autouse=True)
+def _isolate_engine_bindings():
+    """Clear the process-wide session→engine index around every test.
+
+    The index is module state by necessity (the host's ``/clm`` dispatcher knows
+    only a session id), so two tests that use the same session id would otherwise
+    see each other's engines. Empty before *and* after: a leftover binding would
+    make a "prototype cannot steal a live writer" assertion depend on GC timing.
+
+    The mutation harness runs the probes against a stub package with no engine
+    module; there is no index to isolate there.
+    """
+
+    if MUTATION_FIXTURE:
+        yield
+        return
+    try:
+        from hermes_clm import engine as engine_module
+    except Exception:  # pragma: no cover - a stub package without the engine
+        yield
+        return
+
+    with engine_module._ENGINE_BINDINGS_LOCK:
+        engine_module._ENGINE_BINDINGS.clear()
+    try:
+        yield
+    finally:
+        with engine_module._ENGINE_BINDINGS_LOCK:
+            engine_module._ENGINE_BINDINGS.clear()
+
+
 @pytest.fixture
 def other_home(tmp_path):
     h = tmp_path / "hermes-home-other"

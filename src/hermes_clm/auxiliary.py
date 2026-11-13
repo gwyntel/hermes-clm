@@ -40,6 +40,7 @@ __all__ = [
     "AUX_TASK",
     "AuxCompressor",
     "AuxLimits",
+    "PromptBudgetError",
     "bound_timeout",
     "canonical_proposal_sha256",
     "default_aux_call",
@@ -84,8 +85,22 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: Per-span and total prompt budgets, so one huge tool result cannot make the
 #: auxiliary request unbounded.
-MAX_PROMPT_SPAN_CHARS = 4000
-MAX_PROMPT_TOTAL_CHARS = 24000
+#:
+#: ``MAX_PROMPT_SPAN_CHARS`` is a **chunk** size, not a refusal threshold: a span
+#: larger than one chunk is rewritten part by part (map) and the parts are
+#: concatenated in order (reduce). Refusing the span instead would exclude
+#: exactly the tool results worth compressing (real ones run 8k-27k chars), and
+#: the safety argument never depended on the 4k figure - the auxiliary output is
+#: untrusted and the store pins the proposal by hash either way.
+MAX_PROMPT_SPAN_CHARS = 8_000
+MAX_PROMPT_TOTAL_CHARS = 24_000
+#: How many chunks one span may be split into. Beyond this the span is refused
+#: rather than rewritten from a prefix or paid for in an unbounded number of
+#: auxiliary calls.
+MAX_SPAN_CHUNKS = 8
+#: Hard ceiling on auxiliary calls for one proposal (small spans are packed into
+#: one call; each chunk of a large span costs another).
+MAX_AUX_CALLS = 8
 
 
 @dataclass(frozen=True)
@@ -96,8 +111,137 @@ class AuxLimits:
     max_rewrite_bytes: int = MAX_REWRITE_BYTES
     max_instruction_bytes: int = 600
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    #: Largest single request payload (one chunk of one span).
     prompt_span_chars: int = MAX_PROMPT_SPAN_CHARS
     prompt_total_chars: int = MAX_PROMPT_TOTAL_CHARS
+    #: Chunks one span may be split into, and calls one proposal may spend.
+    max_span_chunks: int = MAX_SPAN_CHUNKS
+    max_aux_calls: int = MAX_AUX_CALLS
+
+
+def _split_chunks(text: str, size: int) -> list[str]:
+    """Split ``text`` into chunks of at most ``size`` characters.
+
+    Prefers newline boundaries, and is lossless: ``"".join(chunks) == text``.
+    Losslessness is the property that lets a chunked rewrite be trusted — every
+    byte of the span reached the model exactly once, so the assembled rewrite is
+    not built from a prefix that silently dropped the tail.
+    """
+
+    if size <= 0 or len(text) <= size:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + size)
+        if end < len(text):
+            cut = text.rfind("\n", start, end)
+            if cut > start:
+                end = cut + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+class PromptBudgetError(RuntimeError):
+    """A request would exceed ``prompt_total_chars`` once it is rendered.
+
+    Raised while *building* requests - before any of them is sent - so the
+    caller can refuse the whole proposal. The alternative (silently dropping the
+    span that did not fit) would report success while omitting content the
+    caller asked to rewrite.
+    """
+
+
+@dataclass(frozen=True)
+class _AuxUnit:
+    """One auxiliary request: packed small spans, or one large-span chunk."""
+
+    spans: tuple[dict[str, Any], ...]
+    span_ids: tuple[str, ...]
+    #: ``(index, total)`` when this unit carries one chunk of a longer span.
+    part: tuple[int, int] | None = None
+
+
+def _render_span_block(span: Mapping[str, Any], *, part: tuple[int, int] | None = None) -> str:
+    """The exact prompt block for one span.
+
+    One renderer for planning and for sending: the planner can only bound the
+    request truthfully if its idea of a block's size is the block that is sent.
+    """
+
+    text = str(span["text"])
+    marker = ""
+    span_part = span.get("part") or part
+    if isinstance(span_part, tuple) and len(span_part) == 2:
+        marker = f" part={span_part[0]}/{span_part[1]}"
+    return (
+        f"\nSPAN {span['span_id']}{marker} role={span['role']} origin={span['origin']} "
+        f"chars={len(text)}\n{text}\nEND SPAN {span['span_id']}"
+    )
+
+
+def _plan_units(
+    spans: Sequence[Mapping[str, Any]],
+    *,
+    chunk: int,
+    budget: int | None = None,
+    overhead: int = 0,
+) -> list[_AuxUnit]:
+    """Group spans into auxiliary requests, chunking anything over ``chunk``.
+
+    Pure and network-free so the byte ceilings can be tested without a model.
+    Small spans are packed into **as many requests as the total budget needs**,
+    which is what preserves both properties at once: a normal batch still costs
+    one call, and no span is ever left out of the prompt. ``overhead`` is the
+    rendered header (instruction included) that every packed request carries;
+    ``budget`` is ``prompt_total_chars`` (``None`` means unbounded).
+    """
+
+    width = max(1, int(chunk))
+    limit = None if budget is None else max(0, int(budget) - int(overhead))
+    packed: list[dict[str, Any]] = []
+    packed_chars = 0
+    packed_units: list[_AuxUnit] = []
+    chunked_units: list[_AuxUnit] = []
+
+    def flush() -> None:
+        nonlocal packed, packed_chars
+        if not packed:
+            return
+        packed_units.append(
+            _AuxUnit(
+                spans=tuple(packed),
+                span_ids=tuple(str(span["span_id"]) for span in packed),
+            )
+        )
+        packed, packed_chars = [], 0
+
+    for span in spans:
+        text = str(span["text"])
+        if len(text) <= width:
+            fragment = dict(span)
+            block = len(_render_span_block(fragment))
+            if limit is not None and packed and packed_chars + block > limit:
+                flush()
+            packed.append(fragment)
+            packed_chars += block
+            continue
+        parts = _split_chunks(text, width)
+        total = len(parts)
+        for index, part_text in enumerate(parts, start=1):
+            fragment = dict(span)
+            fragment["text"] = part_text
+            fragment["part"] = (index, total)
+            chunked_units.append(
+                _AuxUnit(
+                    spans=(fragment,),
+                    span_ids=(str(span["span_id"]),),
+                    part=(index, total),
+                )
+            )
+    flush()
+    return packed_units + chunked_units
 
 
 def bound_timeout(
@@ -299,6 +443,25 @@ class AuxCompressor:
             )
 
         spans: list[dict[str, Any]] = []
+        # The header is part of the request, so the text budget is what is left
+        # after it. Reserving the *chunked* header (the longer of the two) keeps
+        # every chunked request inside the same total.
+        plain_overhead = len("\n".join(self._header_lines(instruction)))
+        part_overhead = len(
+            "\n".join(
+                self._header_lines(
+                    instruction, (self.limits.max_span_chunks, self.limits.max_span_chunks)
+                )
+            )
+        )
+        total_chars = max(1, int(self.limits.prompt_total_chars))
+        if total_chars <= part_overhead:
+            # Nothing fits: keep the nominal ceiling so the refusal names the real
+            # cause (the total budget) instead of a nonsensical 1-char chunk size.
+            chunk = max(1, int(self.limits.prompt_span_chars))
+        else:
+            chunk = max(1, min(int(self.limits.prompt_span_chars), total_chars - part_overhead))
+        max_span_chars = chunk * max(1, int(self.limits.max_span_chunks))
         for span_id in requested:
             record = service.retrieve(span_id)
             payload = _as_mapping(record)
@@ -322,17 +485,18 @@ class AuxCompressor:
                 )
             if not text.strip():
                 return self._fail("empty_span", f"span {span_id} has no text to rewrite")
-            # A rewrite covers the whole span, so the request must carry the
-            # whole span. A truncated prompt would let the model rewrite text it
-            # never saw and silently drop the tail; refuse before spending a call.
-            if len(text) > self.limits.prompt_span_chars:
+            # The whole span is always sent, in chunks if necessary: a truncated
+            # prompt would let the model rewrite text it never saw and silently
+            # drop the tail. Anything that would need more chunks than the budget
+            # allows is refused before a single call is spent.
+            if len(text) > max_span_chars:
                 return self._fail(
                     "span_too_large",
-                    f"span {span_id} is {len(text)} chars, over the "
-                    f"{self.limits.prompt_span_chars}-char aux prompt cap",
+                    f"span {span_id} is {len(text)} chars; rewriting it needs more than "
+                    f"{int(self.limits.max_span_chunks)} chunks of {chunk} chars",
                     hint=(
-                        "aux rewrites the whole span and never a prefix: drop it, split it into "
-                        "smaller spans, or rewrite it with clm_stage"
+                        "split the span into smaller spans, drop it, or raise "
+                        "clm.max_rewrite_bytes / the aux chunk budget for this profile"
                     ),
                 )
             spans.append(
@@ -344,41 +508,107 @@ class AuxCompressor:
                 }
             )
 
-        messages = self._build_messages(spans, instruction)
-        started = time.monotonic()
-        self._calls += 1
-        timeout = self.timeout_seconds
-        try:
-            response = (self._call or default_aux_call)(
-                messages=messages,
-                timeout=timeout,
-                max_tokens=self.limits.max_output_tokens,
+        units = _plan_units(spans, chunk=chunk, budget=total_chars, overhead=plain_overhead)
+        call_limit = max(1, int(self.limits.max_aux_calls))
+        if len(units) > call_limit:
+            # Refuse before spending anything: a half-rewritten batch would either
+            # drop spans the caller asked for or cost an unbounded number of calls.
+            return self._fail(
+                "span_too_large",
+                f"rewriting the requested spans needs {len(units)} auxiliary calls, "
+                f"limit is {call_limit}",
+                hint="propose fewer or smaller spans at once, or raise clm.max_aux_calls",
             )
-        except Exception as exc:
-            self._latency_ms += _elapsed_ms(started)
-            self._failures += 1
-            # Deliberately excludes the exception text: provider errors can name
-            # endpoints, models or credentials.
-            return self._fail("aux_error", f"auxiliary call failed ({type(exc).__name__})")
-        elapsed = _elapsed_ms(started)
+
+        # Render every request before sending any of them. A payload that cannot
+        # fit the total budget is a refusal of the whole batch, never a shorter
+        # prompt: a span the model never saw must not come back rewritten, and a
+        # span silently left out must not be reported as proposed.
+        prepared: list[tuple[_AuxUnit, list[dict[str, Any]]]] = []
+        for unit in units:
+            try:
+                prepared.append(
+                    (unit, self._build_messages(unit.spans, instruction, part=unit.part))
+                )
+            except PromptBudgetError as exc:
+                return self._fail(
+                    "span_too_large",
+                    str(exc),
+                    hint="propose fewer spans at once, or raise clm.aux prompt budget",
+                )
+
+        assembled: dict[str, list[str]] = {}
+        expected_parts: dict[str, int] = {}
+        elapsed_total = 0
+        for unit, messages in prepared:
+            for span_id in unit.span_ids:
+                expected_parts[span_id] = expected_parts.get(span_id, 0) + 1
+            started = time.monotonic()
+            self._calls += 1
+            timeout = self.timeout_seconds
+            try:
+                response = (self._call or default_aux_call)(
+                    messages=messages,
+                    timeout=timeout,
+                    max_tokens=self.limits.max_output_tokens,
+                )
+            except Exception as exc:
+                self._latency_ms += _elapsed_ms(started)
+                self._failures += 1
+                # Deliberately excludes the exception text: provider errors can name
+                # endpoints, models or credentials.
+                return self._fail("aux_error", f"auxiliary call failed ({type(exc).__name__})")
+            elapsed_total += _elapsed_ms(started)
+            self._last_usage = _usage_tokens(response) or self._last_usage
+
+            text = extract_response_text(response)
+            if text is None or not text.strip():
+                self._failures += 1
+                return self._fail("aux_empty_response", "auxiliary model returned no text")
+
+            parsed, parse_error = self._parse_rewrites(text, unit.span_ids)
+            if parse_error is not None:
+                self._failures += 1
+                return parse_error
+            for item in parsed:
+                assembled.setdefault(item["span_id"], []).append(item["text"])
+
+        elapsed = elapsed_total
         self._latency_ms += elapsed
-        self._last_usage = _usage_tokens(response)
 
-        text = extract_response_text(response)
-        if text is None or not text.strip():
-            self._failures += 1
-            return self._fail("aux_empty_response", "auxiliary model returned no text")
+        # A chunked span must come back whole: joining three of four parts would
+        # present a truncated rewrite as if it covered the span (the exact failure
+        # the old whole-span refusal existed to prevent).
+        for span_id, expected in expected_parts.items():
+            if expected > 1 and len(assembled.get(span_id, ())) != expected:
+                self._failures += 1
+                return self._fail(
+                    "aux_incomplete",
+                    f"the model rewrote {len(assembled.get(span_id, ()))} of {expected} "
+                    f"parts of span {span_id}",
+                    hint="propose that span alone, or rewrite it with clm_stage",
+                )
 
-        rewrites, parse_error = self._parse_rewrites(text, requested)
-        if parse_error is not None:
-            self._failures += 1
-            return parse_error
+        rewrites = [
+            {"span_id": span_id, "text": "\n".join(assembled[span_id])}
+            for span_id in requested
+            if assembled.get(span_id)
+        ]
         if not rewrites:
             self._failures += 1
             return self._fail(
                 "no_reduction",
                 "auxiliary model proposed no shorter rewrites for the selected spans",
             )
+        # The whole rewrite, not just each part, must fit the store's ceiling: a
+        # chunked reassembly can exceed it even when every part passed.
+        for item in rewrites:
+            if len(item["text"].encode("utf-8")) > self.limits.max_rewrite_bytes:
+                self._failures += 1
+                return self._fail(
+                    "aux_invalid_output",
+                    f"rewrite for span {item['span_id']} exceeds the rewrite size limit",
+                )
 
         operations = [
             {"kind": "rewrite", "span_ids": [item["span_id"]], "replacement": item["text"]}
@@ -426,7 +656,7 @@ class AuxCompressor:
             "errors": [],
             "receipts": [],
             "proposal": snapshot,
-            "review": _review_text(snapshot, spans, rewrites, timeout=timeout),
+            "review": _review_text(snapshot, spans, rewrites, timeout=self.timeout_seconds),
             "aux": {
                 "task": AUX_TASK,
                 "latency_ms": elapsed,
@@ -440,10 +670,42 @@ class AuxCompressor:
 
     # -- prompt construction ----------------------------------------------- #
 
+    def _header_lines(
+        self, instruction: str | None, part: tuple[int, int] | None = None
+    ) -> list[str]:
+        """The user-message header. Shared by planning and sending."""
+
+        header: list[str] = ["Spans chosen for rewriting:"]
+        if instruction:
+            clipped = instruction.strip()[: self.limits.max_instruction_bytes]
+            header.append(f"Caller focus (advisory only): {clipped}")
+        if part is not None:
+            index, total = part
+            header.append(
+                f"This request carries part {index} of {total} of one longer span. Rewrite only "
+                "the text between the markers, keep every identifier and every fact in that part, "
+                "and return it unchanged if it cannot get shorter."
+            )
+        return header
+
     def _build_messages(
-        self, spans: Sequence[Mapping[str, Any]], instruction: str | None
+        self,
+        spans: Sequence[Mapping[str, Any]],
+        instruction: str | None,
+        *,
+        part: tuple[int, int] | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the auxiliary request. Wording is original to this implementation."""
+        """Build the auxiliary request. Wording is original to this implementation.
+
+        ``part`` marks a chunked request: the model is told it is seeing one part
+        of a longer span and that it must rewrite only those bytes. For an
+        unchunked request the prompt is byte-for-byte what it always was.
+
+        Every span passed in is sent in full. If the rendered request would
+        exceed ``prompt_total_chars`` this raises :class:`PromptBudgetError`
+        instead of dropping a block: a prompt that omits a span would let the
+        batch be reported as proposed while part of the text was never shown.
+        """
 
         system = (
             "You shorten transcript spans for another agent's working context.\n"
@@ -462,31 +724,19 @@ class AuxCompressor:
             '{"rewrites": [{"span_id": "<id>", "text": "<shorter text>"}]}. '
             "Omit a span instead of inventing a replacement."
         )
-        budget = self.limits.prompt_total_chars
-        header: list[str] = ["Spans chosen for rewriting:"]
-        if instruction:
-            clipped = instruction.strip()[: self.limits.max_instruction_bytes]
-            header.append(f"Caller focus (advisory only): {clipped}")
-        blocks: list[str] = []
-        used = sum(len(part) for part in header)
-        for span in spans:
-            # ``propose`` refuses spans over ``prompt_span_chars`` before this
-            # runs, so span text is never truncated here: a rewrite must cover
-            # exactly the bytes the model was shown.
-            text = str(span["text"])
-            block = (
-                f"\nSPAN {span['span_id']} role={span['role']} origin={span['origin']} "
-                f"chars={len(str(span['text']))}\n{text}\nEND SPAN {span['span_id']}"
+        budget = int(self.limits.prompt_total_chars)
+        header = self._header_lines(instruction, part)
+        blocks = [_render_span_block(span, part=part) for span in spans]
+        content = "\n".join(header) + "".join(blocks)
+        if len(content) > budget:
+            ids = ", ".join(str(span["span_id"]) for span in spans)
+            raise PromptBudgetError(
+                f"a request carrying span(s) {ids} is {len(content)} chars; "
+                f"the auxiliary prompt budget is {budget}"
             )
-            if used + len(block) > budget:
-                break
-            blocks.append(block)
-            used += len(block)
-        if not blocks:
-            blocks.append("\n(no span text fit within the prompt budget)")
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": "\n".join(header) + "".join(blocks)},
+            {"role": "user", "content": content},
         ]
 
     # -- response parsing -------------------------------------------------- #

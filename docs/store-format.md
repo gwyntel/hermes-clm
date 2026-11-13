@@ -27,7 +27,42 @@ enumerate these directories with `ContextStore.list_sessions(hermes_home)`.
   is enabled; the process-wide umask is never changed — and re-applied on open, so a loose umask or a
   pre-existing directory cannot widen access).
 * `session.db` is the only source of truth. Deleting `active.json` loses nothing.
-* Nothing is written outside the session directory; there is no cross-session file.
+* Nothing is written inside another session's directory. The one file outside them is the
+  lineage record described in *Session lineage* below: it holds a relation, never payload.
+
+### Session lineage
+
+```text
+<hermes_home>/clm/lineage/<session key>.json
+```
+
+A `/compact` rotation renames the session while the archive stays put. The engine records
+`child → parent` there so a **cold** process resolves the child id to the parent's store
+directory instead of opening an empty one:
+
+```json
+{"format": 1, "child_key": "...", "parent_key": "...",
+ "parent_session_id": "...", "boundary": "compression",
+ "created_at": "...", "engine_version": "..."}
+```
+
+* Written only for a rotation the host reported as `boundary_reason="compression"` **and**
+  only when `old_session_id` is the session the engine already served. `/new`, `/resume`,
+  `/branch` and a self-rotation write nothing.
+* Written only after the parent store exists, and only if the child directory does not
+  already exist: an id with its own archive is never aliased (`lineage_conflict`).
+* Created `0600` by a sibling-temp + `os.replace`, so a reader never sees a partial file;
+  rewriting an existing record with a *different* parent is refused rather than repointed.
+* Resolution is transitive (bounded), cycle-detecting, and refuses a symlink, hard link,
+  foreign-owned or group-readable record, an oversized record, invalid JSON, a `child_key`
+  that does not match its own filename, or a `parent_session_id` that would traverse
+  (`lineage_cycle`, `lineage_depth`, `corrupt_lineage`, `symlink_refused`,
+  `insecure_permissions`, `hardlink_refused`). An unreadable record is an error: treating it
+  as "no lineage" would silently address a fresh archive.
+* `ContextStore.for_session(home, child)` opens the *owner's* directory and reports
+  `store.session_id == parent`; the child id is an alias, not a second store. Purge and
+  retention expand the alias, so `purge_session(child)` removes the owner's directory and its
+  records, and retention never purges the archive of a live child.
 
 ### Session key derivation
 
@@ -369,17 +404,27 @@ rewrite onto a dropped span. `rebuild_state()` on a consistent store reports `ch
 
 ### 9.1 What the auxiliary compressor will and will not send
 
-`AuxCompressor.propose` rewrites **whole spans**, so it refuses anything it cannot show the
-model whole:
+`AuxCompressor.propose` rewrites **whole spans**. A real tool result routinely runs 8k-27k
+characters, so a span larger than one prompt chunk is rewritten **map-reduce style**: it is
+split on newline boundaries into lossless chunks (`"".join(chunks) == span`), each chunk gets
+its own request tagged `part=i/n`, and the returned parts are concatenated in order into one
+whole-span rewrite. Safety does not rest on the 4k figure — the auxiliary output is untrusted
+and the store pins the proposal by hash either way.
 
-* a span longer than `prompt_span_chars` (4000) is refused *before* the aux call with
-  `span_too_large` (message names the span and both sizes; hint: drop it, split it into
-  smaller spans, or `clm_stage` a rewrite). The batch is refused as a unit — no partial
-  proposal, no second call, no spent budget. Span text is never truncated, so a returned
-  rewrite always covers exactly the bytes the model saw.
-* the total prompt is bounded by `prompt_total_chars` (24000): spans that no longer fit are
-  left out of the request entirely rather than clipped.
-* a returned rewrite larger than `max_rewrite_bytes` is refused (`aux_invalid_output`).
+* the largest single request payload is `prompt_span_chars` (8000) characters of span text;
+  the total prompt is bounded by `prompt_total_chars` (24000). Small spans are packed into
+  **as many requests as that total needs**: a batch that does not fit one prompt is split, never
+  clipped and never reported as proposed with a span left out. Span text is sent whole or the
+  batch is refused before the first call — there is no "did not fit, so it was skipped" path.
+* one span may be split into at most `max_span_chunks` (8) chunks, and one proposal may spend
+  at most `max_aux_calls` (8) auxiliary calls. A span or batch that would need more is refused
+  *before* the first call with `span_too_large` (message names the span, its size and the
+  budget), so there is no partial proposal and no spent budget.
+* every chunk must come back: a chunked span whose parts are incomplete is refused with
+  `aux_incomplete` rather than joined from a prefix, which is the one way a chunked rewrite
+  could silently lose its tail.
+* a returned rewrite larger than `max_rewrite_bytes` is refused (`aux_invalid_output`),
+  checked per part **and** on the reassembled whole span (parts that each fit can sum past it).
 
 ### 9.2 Proposal identity
 

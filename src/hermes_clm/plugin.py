@@ -43,8 +43,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .auxiliary import AuxCompressor, AuxLimits, bound_timeout
-from .commands import COMMAND_NAME
+from .commands import COMMAND_NAME, USAGE, parse
 from .commands import handle as handle_command
+from .engine import engine_for_session
 from .guidance import (
     SYSTEM_PROMPT_SECTION_ID,
     SYSTEM_PROMPT_SECTION_MAX_CHARS,
@@ -269,6 +270,8 @@ def build_aux(
         max_spans=limits.max_aux_spans,
         max_rewrite_bytes=limits.max_rewrite_bytes,
         max_instruction_bytes=limits.max_instruction_bytes,
+        max_span_chunks=limits.max_span_chunks,
+        max_aux_calls=limits.max_aux_calls,
     )
     timeout = bound_timeout(_config_get(config, "aux_timeout_seconds", DEFAULT_AUX_TIMEOUT_SECONDS))
     return AuxCompressor(
@@ -333,7 +336,27 @@ def build_tool_handlers(
 
 
 class PluginRuntime:
-    """State shared by the registered tools and the operator command."""
+    """State shared by the registered tools and the operator command.
+
+    Ownership rules, one writer per session:
+
+    * **engine lane** (``ctx.register_context_engine``) — the engine handed to the
+      host owns the ``clm_*`` tools (``get_tool_schemas()``) and the store. ``/clm``
+      is one global registry entry, so its handler resolves the engine bound to the
+      *calling* session (:func:`hermes_clm.engine.engine_for_session`) rather than
+      closing over the instance that happened to register first.
+    * **general-plugin fallback** (no engine registration, engine not selected) —
+      this lane builds its own engine and registers the tools against it: one
+      isolated runtime, no other writer in the process.
+    * **deferred lane** (engine selected *and* the plugin enabled) — usage section
+      only: no engine, no tools, no command, no store.
+
+    There is deliberately no "find the host's engine" helper. The plugin system's
+    registered engine is a **prototype** that the host deep-copies per agent
+    (``_select_context_engine`` → ``clone_for_agent``); routing tools or ``/clm``
+    at it would open a second writer for a session the resident engine already owns,
+    which is exactly the ``no_session`` failure it looked like it fixed.
+    """
 
     def __init__(
         self,
@@ -341,10 +364,17 @@ class PluginRuntime:
         *,
         config: Mapping[str, Any] | None = None,
         aux: AuxCompressor | None = None,
+        lane: str = "engine",
     ) -> None:
         self.engine = engine
         self.config = dict(config or {})
         self.aux = aux
+        #: ``"engine"`` when this registration handed the host an engine (so the
+        #: host, not this object, owns the resident instance), ``"fallback"`` when
+        #: this lane keeps its own isolated engine. It decides whether ``/clm`` may
+        #: consult ``self.engine`` at all: an engine-lane runtime holds a prototype
+        #: that must never open a session's store.
+        self.lane = lane
         self.handlers = build_tool_handlers(self.service, config=self.config, aux=aux)
         #: True when this lane deliberately registered nothing but the usage
         #: section: the profile selects this engine, and the *selected* engine
@@ -363,9 +393,15 @@ class PluginRuntime:
     # -- session → service -------------------------------------------------- #
 
     def service(self, session_id: str | None) -> Any:
-        """Resolve the calling session's scoped service; ``None`` when unavailable."""
+        """Resolve the calling session's scoped service; ``None`` when unavailable.
+
+        This lane's engine answers only for the session it is bound to; any other
+        id gets ``None`` (an honest refusal) rather than another archive.
+        """
 
         engine = self.engine
+        if engine is None:
+            return None
         resolver = getattr(engine, "service_for_session", None)
         if callable(resolver):
             try:
@@ -384,10 +420,72 @@ class PluginRuntime:
     # -- operator command --------------------------------------------------- #
 
     def command(self, raw_args: str = "", **kwargs: Any) -> str:
-        """Handler for ``/clm``; receives ``session_id`` from the host dispatcher."""
+        """Handler for ``/clm``; receives ``session_id`` from the host dispatcher.
 
-        session_id = kwargs.get("session_id")
-        return handle_command(raw_args, resolve_service=self.service, session_id=session_id)
+        The host's command registry is process-wide and its dispatcher passes only a
+        session id, so the engine is resolved per call:
+
+        1. the live engine bound to that session (whichever lane owns it);
+        2. else this lane's own engine — the general-plugin fallback's isolated
+           runtime, which the host never hands a session hook to, and which refuses
+           any id but the one it is bound to.
+
+        With no session id there is nothing to resolve and the command refuses: it
+        never falls back to "the engine this handler closed over", which would show
+        and edit whatever session that instance happens to serve.
+        """
+
+        session_id = kwargs.get("session_id") or kwargs.get("session_key")
+        # Help is static text and needs no archive; refusing it would hide the only
+        # way to learn what the command does.
+        if parse(raw_args)[0] in {"help", "?", "-h", "--help"}:
+            return USAGE
+        if not session_id:
+            return (
+                "clm: no session id was supplied, so no hermes-clm engine can be "
+                "resolved. Run /clm from a session (CLI or gateway)."
+            )
+        engine = engine_for_session(session_id)
+        if engine is None:
+            own = self.engine
+            # A fallback lane owns its isolated engine outright. An engine lane may
+            # only use its own instance when that instance reports *this* session:
+            # otherwise it is the host's unbound prototype.
+            if own is not None and (
+                self.lane != "engine" or getattr(own, "session_id", None) == str(session_id)
+            ):
+                engine = own
+        if engine is None:
+            return (
+                "clm: no hermes-clm engine is bound to this session. The context engine "
+                "may not be selected, or it may have failed to start."
+            )
+        service = engine.service_for_session(str(session_id))
+        if service is None:
+            return (
+                "clm: this session has no attached store, so there is nothing to report "
+                "or edit. Check /clm status after the session's first turn, or the "
+                "engine's store_error in its status."
+            )
+        return handle_command(
+            raw_args,
+            resolve_service=_fixed_service(service),
+            session_id=str(session_id),
+        )
+
+
+def _fixed_service(service: Any) -> Callable[[str | None], Any]:
+    """The resolver ``commands`` expects: this session's service, for any id.
+
+    ``None`` / another id never reaches here — the engine's own
+    ``service_for_session`` already refused them — so the closure is a plain
+    "the service I resolved", typed rather than a bare lambda.
+    """
+
+    def resolve(_session_id: str | None = None) -> Any:
+        return service
+
+    return resolve
 
 
 def register(
@@ -411,7 +509,8 @@ def register(
       calling ``register_tool`` here would either raise (the collector is not a
       general plugin context) or duplicate every name.
     * **general-plugin fallback** — no engine registration exists, so the same
-      schemas are registered through ``ctx.register_tool``.
+      schemas are registered through ``ctx.register_tool`` against this lane's own
+      engine: one isolated runtime that owns the session it is bound to.
 
     In the engine lane the tools exist only while the engine is selected
     (``context.engine: hermes-clm``); enabling the plugin without selecting the
@@ -429,6 +528,11 @@ def register(
     command, no service runtime — and says so in the log
     (:attr:`PluginRuntime.deferred_to_engine`). The tools are still callable:
     they arrive from the selected engine.
+
+    The engine lane's ``/clm`` handler resolves the engine *bound to the calling
+    session* (``engine_for_session``), never the registered prototype: the host
+    deep-copies the prototype per agent, so a handler closed over it would report
+    another session's store — or open a second writer for it.
 
     The system-prompt section is registered whenever the host offers
     ``register_system_prompt_section``, including in the deferred lane. The
@@ -471,7 +575,12 @@ def register(
     compressor = aux if aux is not None else build_aux(cfg, call=aux_call)
     clm_engine = engine if engine is not None else (engine_factory or build_engine)(cfg)
 
-    runtime = PluginRuntime(clm_engine, config=cfg, aux=compressor)
+    runtime = PluginRuntime(
+        clm_engine,
+        config=cfg,
+        aux=compressor,
+        lane="engine" if engine_lane else "fallback",
+    )
 
     if engine_lane and register_engine is not None:
         register_engine(clm_engine)
