@@ -1,5 +1,7 @@
 name: hermes-clm
-version: 0.1.0
+# x-release-please-start-version
+version: 0.2.0
+# x-release-please-end
 manifest_version: 2
 description: >-
   Durable, editable request projection: the agent inspects, stages and commits
