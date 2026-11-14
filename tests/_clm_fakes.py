@@ -251,8 +251,19 @@ class FakeStore:
     def status(self) -> Dict[str, Any]:
         return {"revision": self._snapshot.revision, "session": self.family}
 
-    def inspect(self, *, cursor: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
-        return {"cursor": cursor, "limit": limit, "spans": sorted(self._snapshot.spans)}
+    def inspect(
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> Dict[str, Any]:
+        return {
+            "cursor": cursor,
+            "limit": limit,
+            "include_stale": include_stale,
+            "spans": sorted(self._snapshot.spans),
+        }
 
     def search(
         self, query: str, *, cursor: Optional[str] = None, limit: int = 20

@@ -268,6 +268,15 @@ def _optional_int(args: Mapping[str, Any], key: str, default: int, *, maximum: i
     return value
 
 
+def _optional_bool(args: Mapping[str, Any], key: str, default: bool) -> bool:
+    if key not in args:
+        return default
+    value = args[key]
+    if not isinstance(value, bool):
+        raise _Invalid("invalid_field", f"{key} must be a boolean")
+    return value
+
+
 def _require_text(
     args: Mapping[str, Any], key: str, *, max_bytes: int, allow_empty: bool = False
 ) -> str:
@@ -668,10 +677,17 @@ class ToolHandlers:
     def inspect(
         self, args: dict[str, Any], *, session_id: str | None = None, **_: Any
     ) -> Mapping[str, Any]:
-        _check_keys(args, allowed=("cursor", "limit"))
+        _check_keys(args, allowed=("cursor", "limit", "include_stale"))
         cursor = _optional_cursor(args)
         limit = _optional_int(args, "limit", 50, maximum=self.limits.inspect_limit_max)
-        return self._call(self._service(session_id), "inspect", cursor=cursor, limit=limit)
+        include_stale = _optional_bool(args, "include_stale", False)
+        return self._call(
+            self._service(session_id),
+            "inspect",
+            cursor=cursor,
+            limit=limit,
+            include_stale=include_stale,
+        )
 
     @_guarded
     def search(
@@ -1001,6 +1017,11 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                         "type": "integer",
                         "minimum": 1,
                         "maximum": handlers.limits.inspect_limit_max,
+                    },
+                    "include_stale": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include archived rows absent from the host history. Do not change this setting mid-pagination; restart without a cursor.",
                     },
                 },
                 "additionalProperties": False,

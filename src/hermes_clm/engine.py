@@ -668,7 +668,13 @@ class ToolService:
                             payload[key] = live[key]
         return payload
 
-    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+    def inspect(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> dict[str, Any]:
         """Bounded active-context view for this session only.
 
         Each span keeps the store's raw ``est_tokens`` (``chars/4``) and gains
@@ -676,7 +682,10 @@ class ToolService:
         edit from the raw figure while the budget uses the calibrated one is the
         mismatch this field exists to end.
         """
-        payload = self._call_store("inspect", cursor=cursor, limit=limit)
+        payload = self._call_store(
+            "inspect", cursor=cursor, limit=limit, include_stale=include_stale
+        )
+        evidence = self._alignment_evidence(payload)
         items = payload.get("items")
         if isinstance(items, list):
             calibration = self._engine.calibration
@@ -687,11 +696,44 @@ class ToolService:
                     raw = fresh.get("est_tokens")
                     if isinstance(raw, int) and not isinstance(raw, bool):
                         fresh.setdefault("est_calibrated", calibration.adjust(raw))
+                    if fresh.get("present") is True:
+                        fresh["status"] = "live"
+                    elif not evidence["available"]:
+                        fresh["status"] = "unverified"
+                    elif fresh.get("before_live_window"):
+                        fresh["status"] = "stale"
+                    else:
+                        fresh["status"] = "absent_now"
                     enriched.append(fresh)
                 else:
                     enriched.append(item)
             payload["items"] = enriched
+        payload["alignment"] = evidence
         return payload
+
+    def _alignment_evidence(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        result = getattr(self._engine, "_last_projection", None)
+        alignment = getattr(result, "alignment", None)
+        matched = 0
+        if isinstance(alignment, Mapping):
+            value = alignment.get("matched")
+            if isinstance(value, int) and not isinstance(value, bool):
+                matched = max(0, value)
+        ok = bool(getattr(result, "ok", False))
+        checked = getattr(result, "revision", None)
+        reason = (
+            "no_projection" if result is None
+            else "projection_refused" if not ok
+            else "no_aligned_rows" if matched <= 0
+            else None
+        )
+        return {
+            "available": reason is None,
+            "reason": reason,
+            "matched": matched if result is not None else None,
+            "checked_revision": checked if isinstance(checked, int) and not isinstance(checked, bool) else None,
+            "store_revision": payload.get("revision"),
+        }
 
     def preview(self, operations: Sequence[Any]) -> dict[str, Any]:
         """Pure projection of a staged batch (no write, no revision bump)."""

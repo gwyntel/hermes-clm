@@ -98,8 +98,16 @@ class FakeService:
             "last_error": None,
         }
 
-    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        self._record("inspect", (), {"cursor": cursor, "limit": limit})
+    def inspect(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> dict[str, Any]:
+        self._record(
+            "inspect", (), {"cursor": cursor, "limit": limit, "include_stale": include_stale}
+        )
         spans = [
             {
                 "span_id": span_id,

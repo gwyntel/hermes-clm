@@ -3437,14 +3437,27 @@ class ContextStore:
         }
 
     @_serialized
-    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        """Bounded, session-scoped view of current spans (never cross-session)."""
-
+    def inspect(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> dict[str, Any]:
+        """Page current spans; absent rows are opt-in and never deleted."""
         self._require_open()
         after = _decode_cursor(cursor)
         n = _clamp_limit(limit, maximum=self._config.inspect_limit_max, default=50)
         cur = self._conn.cursor()
         try:
+            window = cur.execute(
+                "SELECT MIN(s.seq) AS first_seq, MAX(s.seq) AS last_seq, "
+                "COUNT(*) AS present_count FROM spans s "
+                "JOIN current_spans cs ON cs.span_id = s.span_id WHERE cs.present = 1"
+            ).fetchone()
+            first_present = (
+                int(window["first_seq"]) if window["first_seq"] is not None else None
+            )
             rows = cur.execute(
                 "SELECT s.span_id AS span_id, s.uid AS uid, s.origin AS origin, s.role AS role, "
                 "s.group_id AS group_id, s.protected AS protected, s.seq AS seq, s.version AS version, "
@@ -3453,33 +3466,39 @@ class ContextStore:
                 "EXISTS(SELECT 1 FROM pins p WHERE p.span_id = s.span_id) AS pinned "
                 "FROM spans s JOIN current_spans cs ON cs.span_id = s.span_id "
                 "LEFT JOIN span_state st ON st.span_id = s.span_id "
-                "WHERE s.seq > ? ORDER BY s.seq LIMIT ?",
-                (after, n + 1),
+                "WHERE s.seq > ? AND (? = 1 OR cs.present = 1) "
+                "ORDER BY s.seq LIMIT ?",
+                (after, 1 if include_stale else 0, n + 1),
             ).fetchall()
+            omitted = 0 if include_stale else int(
+                cur.execute("SELECT COUNT(*) FROM current_spans WHERE present = 0").fetchone()[0]
+            )
         finally:
             cur.close()
         items = []
         for row in rows[:n]:
             text = row["rewrite_text"] or row["message_json"]
-            items.append(
-                {
-                    "span_id": str(row["span_id"]),
-                    "uid": str(row["uid"]),
-                    "origin": str(row["origin"]),
-                    "role": str(row["role"]),
-                    "group_id": row["group_id"],
-                    "protected": bool(row["protected"]),
-                    "pinned": bool(row["pinned"]),
-                    "state": str(row["state"] or SpanState.ACTIVE.value),
-                    "present": bool(row["present"]),
-                    "seq": int(row["seq"]),
-                    "version": int(row["version"]),
-                    "est_tokens": _tokens_for_text(text),
-                    "preview": _preview(
-                        text if row["rewrite_text"] else _message_text(row["message_json"])
-                    ),
-                }
-            )
+            present = bool(row["present"])
+            items.append({
+                "span_id": str(row["span_id"]),
+                "uid": str(row["uid"]),
+                "origin": str(row["origin"]),
+                "role": str(row["role"]),
+                "group_id": row["group_id"],
+                "protected": bool(row["protected"]),
+                "pinned": bool(row["pinned"]),
+                "state": str(row["state"] or SpanState.ACTIVE.value),
+                "present": present,
+                "before_live_window": bool(
+                    not present and first_present is not None and int(row["seq"]) < first_present
+                ),
+                "seq": int(row["seq"]),
+                "version": int(row["version"]),
+                "est_tokens": _tokens_for_text(text),
+                "preview": _preview(
+                    text if row["rewrite_text"] else _message_text(row["message_json"])
+                ),
+            })
         next_cursor = _encode_cursor(int(str(items[-1]["seq"]))) if len(rows) > n else None
         return {
             "ok": True,
@@ -3488,6 +3507,13 @@ class ContextStore:
             "items": items,
             "next_cursor": next_cursor,
             "limit": n,
+            "include_stale": bool(include_stale),
+            "live_window": {
+                "first_seq": first_present,
+                "last_seq": int(window["last_seq"]) if window["last_seq"] is not None else None,
+                "present_count": int(window["present_count"]),
+            },
+            "omitted_absent": omitted,
         }
 
     @_serialized

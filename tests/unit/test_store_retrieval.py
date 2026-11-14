@@ -73,6 +73,40 @@ class InspectTests(kit.StoreTestCase):
         listed = {item["uid"] for item in self.store.inspect()["items"]}
         self.assertNotIn("u-other", listed)
 
+    def test_inspect_omits_absent_rows_by_default(self) -> None:
+        self.store.ingest([kit.sample_messages()[0]])
+        page = self.store.inspect()
+        self.assertFalse(page["include_stale"])
+        self.assertTrue(all(item["present"] for item in page["items"]))
+        self.assertEqual(page["omitted_absent"], 5)
+
+    def test_inspect_filters_before_the_page_is_cut(self) -> None:
+        messages = kit.sample_messages()
+        self.store.ingest([messages[0], messages[2], messages[4]])
+        seen, cursor, pages = [], None, 0
+        while True:
+            page = self.store.inspect(limit=1, cursor=cursor)
+            self.assertEqual(len(page["items"]), 1)
+            seen.extend(item["seq"] for item in page["items"])
+            pages += 1
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        self.assertEqual(pages, 3)
+        self.assertEqual(seen, [1, 3, 5])
+
+    def test_include_stale_pagination_visits_every_row_once(self) -> None:
+        self.store.ingest([kit.sample_messages()[0]])
+        seen, cursor = [], None
+        while True:
+            page = self.store.inspect(limit=2, cursor=cursor, include_stale=True)
+            seen.extend(item["span_id"] for item in page["items"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        self.assertEqual(len(seen), 6)
+        self.assertEqual(len(set(seen)), 6)
+
 
 class SearchTests(kit.StoreTestCase):
     def setUp(self) -> None:
