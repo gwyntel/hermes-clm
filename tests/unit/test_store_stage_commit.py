@@ -132,3 +132,39 @@ class StageCommitTests(kit.StoreTestCase):
             [(r["event"], r["revision"], r["actor_origin"]) for r in fast_events],
             [(r["event"], r["revision"], r["actor_origin"]) for r in two_events],
         )
+
+    def test_two_phase_stage_reusing_a_committed_id_with_a_new_payload_is_refused(self):
+        """The same honesty rule as the fast path: never echo a batch that was not staged.
+
+        ``stage()`` returns the stored outcome for a committed ``txn_id``. Returning
+        it for a *different* operation set would tell the caller its new batch is
+        staged (and, for a patch, hand back receipts for text never written) while
+        ``commit()`` replays the original.
+        """
+
+        self.store.stage(
+            self.drop_ops("u-a2"), expected_revision=1, txn_id="txn-reuse", actor_origin="agent"
+        )
+        self.store.commit(txn_id="txn-reuse", expected_revision=1)
+
+        with self.assertRaises(ConflictError) as ctx:
+            self.store.stage(
+                [EditOperation(kind=EditKind.KEEP, span_ids=(self.ids["u-a2"],))],
+                expected_revision=2,
+                txn_id="txn-reuse",
+                actor_origin="agent",
+            )
+        self.assertEqual(ctx.exception.code, "txn_payload_mismatch")
+
+    def test_two_phase_stage_replaying_a_committed_id_with_the_same_payload_replays(self):
+        self.store.stage(
+            self.drop_ops("u-a2"), expected_revision=1, txn_id="txn-replay", actor_origin="agent"
+        )
+        self.store.commit(txn_id="txn-replay", expected_revision=1)
+        again = self.store.stage(
+            self.drop_ops("u-a2"), expected_revision=2, txn_id="txn-replay", actor_origin="agent"
+        )
+        self.assertTrue(again.replayed)
+        self.assertTrue(again.already_committed)
+        self.assertEqual(again.revision, 2)
+        self.assertEqual([op.kind for op in again.staged_operations], [EditKind.DROP])

@@ -775,7 +775,9 @@ class _Planned:
 _STATE_CHANGING_KINDS = frozenset(
     {EditKind.KEEP, EditKind.DROP, EditKind.OFFLOAD, EditKind.RESTORE}
 )
-_REFUSE_PROTECTED_KINDS = frozenset({EditKind.DROP, EditKind.OFFLOAD, EditKind.REWRITE})
+_REFUSE_PROTECTED_KINDS = frozenset(
+    {EditKind.DROP, EditKind.OFFLOAD, EditKind.REWRITE, EditKind.RESTORE}
+)
 
 
 def _tokens_for_text(text: str) -> int:
@@ -1940,6 +1942,29 @@ class ContextStore:
                 effect, reason = ("applied", "")
                 if state_aware:
                     effect, reason = self._transition(span, op)
+                    if (
+                        effect == "applied"
+                        and op.kind in (EditKind.KEEP, EditKind.RESTORE)
+                        and span.state is not SpanState.ACTIVE
+                    ):
+                        # A reactivation emits bytes the projector re-checks. If the
+                        # store accepted a payload the projector refuses, the commit
+                        # would succeed and *every* later projection would be
+                        # refused — the session silently loses context editing until
+                        # a revert. Refuse here, where nothing has been written.
+                        payload = span.rewrite_text
+                        if not (isinstance(payload, str) and payload):
+                            content = (span.message or {}).get("content")
+                            payload = content if isinstance(content, str) else ""
+                        if len(payload.encode("utf-8")) > self._config.max_rewrite_bytes:
+                            raise StoreBudgetError(
+                                f"{op.kind.value} exceeds max_rewrite_bytes",
+                                code=f"{op.kind.value}_too_large",
+                                details={
+                                    "limit": self._config.max_rewrite_bytes,
+                                    "span_id": span.span_id,
+                                },
+                            )
                 planned.append(_Planned(op=op, span=span, effect=effect, reason=reason))
 
         if state_aware:
@@ -1955,7 +1980,11 @@ class ContextStore:
                 return "inert", "not_active"
             return "applied", ""
         if span.state is SpanState.ACTIVE:
-            if kind is EditKind.KEEP:
+            if kind in (EditKind.KEEP, EditKind.RESTORE):
+                # Nothing to reinstate: the row already projects. Recording an
+                # "applied" reactivation here would hand the projector a state
+                # transition that never happened (and, for a protected row, one it
+                # refuses) — so it is inert exactly like `keep`.
                 return "inert", "already_active"
             return "applied", ""
         # span is dropped or offloaded
@@ -2046,6 +2075,16 @@ class ContextStore:
         existing = self._txn_row(cur, txn_id)
         if existing is not None:
             state = str(existing["state"])
+            if str(existing["staged_sha256"]) != staged_sha:
+                # One rule for every path: a txn_id identifies one operation set.
+                # Echoing a different batch back as staged (or as committed) would
+                # tell the caller its new work is recorded when commit() will replay
+                # the original, so compare the signature before returning anything.
+                raise IdempotencyConflictError(
+                    "txn_id reused with a different payload",
+                    code="txn_payload_mismatch",
+                    details={"txn_id": txn_id},
+                )
             if state == "committed":
                 return StageResult(
                     ok=True,
@@ -2061,12 +2100,6 @@ class ContextStore:
             if state == "discarded":
                 raise IdempotencyConflictError(
                     "transaction was discarded", code="txn_discarded", details={"txn_id": txn_id}
-                )
-            if str(existing["staged_sha256"]) != staged_sha:
-                raise IdempotencyConflictError(
-                    "txn_id reused with a different payload",
-                    code="txn_payload_mismatch",
-                    details={"txn_id": txn_id},
                 )
             planned = self._plan(cur, ops)
             return self._stage_result(
