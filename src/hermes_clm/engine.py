@@ -597,7 +597,10 @@ class ToolService:
         if not callable(handler):
             raise RuntimeError(f"clm store does not implement {name}()")
         try:
-            return _payload(handler(*args, **kwargs))
+            payload = _payload(handler(*args, **kwargs))
+            if payload.get("ok") is not False:
+                payload.setdefault("pressure", self._engine.pressure_hint())
+            return payload
         except CLMError as exc:
             return {
                 "ok": False,
@@ -666,6 +669,7 @@ class ToolService:
                     ):
                         if key in live:
                             payload[key] = live[key]
+        payload["compactable"] = self._engine.compactable()
         return payload
 
     def inspect(
@@ -2140,14 +2144,16 @@ class CLMEngine(_EngineBase):
                 newest_tool_uid = row.get("message_uid")
                 break
         candidates: List[_budget.OffloadCandidate] = []
-        for order, (group_id, members) in enumerate(
-            sorted(
-                groups.members.items(),
-                key=lambda item: min(
-                    (row_positions.get(uid, len(rows)) for uid in item[1]), default=len(rows)
-                ),
+        ordered_groups = sorted(
+            groups.members.items(),
+            key=lambda item: min(
+                (row_positions.get(uid, len(rows)) for uid in item[1]), default=len(rows)
+            ),
+        )
+        for group_id, members in ordered_groups:
+            first_position = min(
+                (row_positions.get(uid, len(rows)) for uid in members), default=len(rows)
             )
-        ):
             span_list = [by_uid.get(uid) for uid in members]
             protected = any(
                 span is None
@@ -2178,7 +2184,7 @@ class CLMEngine(_EngineBase):
             )
             candidates.append(
                 _budget.OffloadCandidate(
-                    order=order,
+                    order=first_position,
                     group_id=group_id,
                     uids=tuple(members),
                     # Store-facing ids: the snapshot span id when archived, else
@@ -2192,6 +2198,9 @@ class CLMEngine(_EngineBase):
                         for uid in members
                     ),
                     tokens=tokens,
+                    raw_tokens=sum(
+                        _budget.estimate_message_tokens(uid_rows.get(uid, {})) for uid in members
+                    ),
                     protected=protected or clipped,
                     pinned=pinned,
                 )
@@ -2296,6 +2305,38 @@ class CLMEngine(_EngineBase):
             calibration=self.calibration,
             last_prompt_tokens=self.last_prompt_tokens,
         ).to_dict()
+
+    def compactable(self, snapshot: Any = None) -> Dict[str, Any]:
+        """Conservative addressable savings; unknown is never encoded as zero."""
+        history = list(getattr(self, "_last_history", ()) or ())
+        if snapshot is None:
+            snapshot = self._snapshot()
+        if snapshot is None:
+            return {"known": False, "reason": "store_unavailable"}
+        if bool(getattr(snapshot, "operations_truncated", False)):
+            return {"known": False, "reason": "operations_truncated"}
+        if not history:
+            return {"known": False, "reason": "no_request_observed"}
+        units = [candidate for candidate in self._offload_candidates(history, snapshot)
+                 if candidate.eligible]
+        return {
+            "known": True,
+            "reason": None,
+            "units": len(units),
+            "tokens": int(sum(item.conservative_tokens for item in units)),
+            "basis": "request",
+            "revision": int(getattr(snapshot, "revision", 0) or 0),
+        }
+
+    def pressure_hint(self) -> Dict[str, Any]:
+        """Declarative readout for a newly-created CLM tool result, not projection."""
+        budget = self.budget_state()
+        return {
+            "scope": "request",
+            "tier": budget.get("tier"),
+            "headroom_tokens": budget.get("headroom_tokens"),
+            "overflow_tokens": budget.get("overflow_tokens"),
+        }
 
     def get_status(self) -> Dict[str, Any]:
         """Host status plus CLM revision, budget, receipts and last error."""
