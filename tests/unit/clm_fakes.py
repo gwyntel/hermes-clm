@@ -37,6 +37,7 @@ class FakeService:
         self.spans: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.stage_result: dict[str, Any] | None = None
+        self.stage_commit_result: dict[str, Any] | None = None
         self.commit_result: dict[str, Any] | None = None
         self.revert_result: dict[str, Any] | None = None
         self.status_result: dict[str, Any] | None = None
@@ -66,16 +67,33 @@ class FakeService:
                 return args
         raise AssertionError(f"no call to {name}; calls={self.names()}")
 
-    def add_span(self, span_id: str, content: str, *, protected: bool = False) -> None:
-        self.spans[span_id] = {
+    def add_span(
+        self,
+        span_id: str,
+        content: Any,
+        *,
+        protected: bool = False,
+        role: str = "tool",
+        state: str = "active",
+        pinned: bool = False,
+        rewrite_text: str | None = None,
+        present: bool = True,
+    ) -> None:
+        span = {
             "ok": True,
             "span_id": span_id,
-            "message": {"role": "tool", "content": content},
-            "role": "tool",
+            "message": {"role": role, "content": content},
+            "role": role,
             "origin": "host",
+            "state": state,
             "protected": protected,
+            "pinned": pinned,
+            "present": present,
             "content_sha256": "0" * 64,
         }
+        if rewrite_text is not None:
+            span["rewrite_text"] = rewrite_text
+        self.spans[span_id] = span
 
     # -- service surface --------------------------------------------------- #
 
@@ -98,8 +116,16 @@ class FakeService:
             "last_error": None,
         }
 
-    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        self._record("inspect", (), {"cursor": cursor, "limit": limit})
+    def inspect(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> dict[str, Any]:
+        self._record(
+            "inspect", (), {"cursor": cursor, "limit": limit, "include_stale": include_stale}
+        )
         spans = [
             {
                 "span_id": span_id,
@@ -139,6 +165,36 @@ class FakeService:
             "inert": 0,
             "errors": [],
             "receipts": [],
+            # Mirrors the real service: the staged payload is echoed back.
+            "staged_operations": [dict(op) for op in operations],
+        }
+
+    def stage_commit(
+        self,
+        operations: Any,
+        *,
+        expected_revision: int,
+        txn_id: str,
+        min_saved_tokens: int | None = None,
+        actor_origin: str = "agent",
+    ) -> dict[str, Any]:
+        self._record(
+            "stage_commit",
+            (operations,),
+            {
+                "expected_revision": expected_revision,
+                "txn_id": txn_id,
+                "min_saved_tokens": min_saved_tokens,
+                "actor_origin": actor_origin,
+            },
+        )
+        if self.stage_commit_result is not None:
+            return dict(self.stage_commit_result)
+        return {
+            "ok": True,
+            "revision": expected_revision + 1,
+            "applied": len(operations),
+            "atomic": True,
         }
 
     def commit(self, *, txn_id: str, expected_revision: int) -> dict[str, Any]:

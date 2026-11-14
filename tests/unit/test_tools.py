@@ -420,7 +420,22 @@ def test_revert_records_a_new_revision_not_a_truncation(
 def test_inspect_passes_bounded_limit(handlers: ToolHandlers, service: FakeService):
     payload = load(handlers.inspect({"limit": 7, "cursor": "c1"}))
     assert payload["ok"] is True
-    assert service.kwargs_for("inspect") == {"cursor": "c1", "limit": 7}
+    assert service.kwargs_for("inspect") == {
+        "cursor": "c1",
+        "limit": 7,
+        "include_stale": False,
+    }
+
+
+def test_inspect_passes_include_stale(handlers, service):
+    payload = load(handlers.inspect({"include_stale": True, "limit": 7}))
+    assert payload["ok"] is True
+    assert service.kwargs_for("inspect")["include_stale"] is True
+
+
+def test_inspect_include_stale_must_be_boolean(handlers):
+    payload = load(handlers.inspect({"include_stale": "yes"}))
+    assert payload["errors"][0]["code"] == "invalid_field"
 
 
 def test_inspect_treats_omitted_null_and_empty_cursor_as_the_first_page(

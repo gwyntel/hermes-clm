@@ -58,7 +58,10 @@ One SQLite transaction covers operation append, archive additions, revision bump
 
 - Reuse Hermes model/context-length state and rough estimators. Calibrate estimates against real `usage.prompt_tokens` with bounded ratio; record real cache read/write fields when supplied.
 - Default configurable reserve and pressure tiers; `context_status`/tool receipts expose the same estimate used for edit validation.
-- Existing Hermes pressure notices remain intact because newest tool output is protected.
+- **Token scope is explicit.** The request budget uses one request-scoped vocabulary: `tokens` carries `scope: "request"`, and `headroom_tokens`/`overflow_tokens`/`compactable_tokens` are all measured against the live request. The store-wide aggregate over every archived span is a separate field, `all_spans_est_tokens`, and is never what the window is checked against — the two were previously confusable under one name, which made a healthy request look over-limit.
+- **Headroom distinguishes unknown from exhausted.** `headroom_tokens` is `None` when no context length has been reported (`fits` stays `True`: unknown is not a refusal), and `0` when the usable window is used up — which covers both an exactly-full and an over-limit request, since headroom is floored at zero; `overflow_tokens` is what distinguishes those two. `compactable_tokens` is `None` with a `compactable_unknown` reason (`no_request_observed`) rather than a fabricated `0`. A per-candidate saving is priced as `min(calibrated, raw)` so a pessimistic calibration can never overstate a reduction.
+- **Pressure is information, not an action.** `should_compress`, `should_compress_preflight` and default pruning remain no-ops, and the pressure hint is attached only to new CLM tool responses — never injected into a projected row — so a model reading pressure decides; nothing compacts on its behalf.
+- Hermes' own context-limit notices are operator-facing print lines, not projected rows, so CLM neither suppresses nor duplicates them: the plugin never writes those notices and has no row to collide with. Nothing here depends on newest-tool protection.
 - Routine projection does not inject changing status rows (would destroy cache). The one
   injected row is the **compaction notice**: after an operator `/compact` or an overflow
   offload, a single `[clm.notice rev=N ...]` row anchored right after the system row tells
@@ -73,6 +76,7 @@ One SQLite transaction covers operation append, archive additions, revision bump
 - `should_compress=False`, `should_compress_preflight=False`, default pruning no-op.
 - Manual `/compress`: commit current valid projection only; if no reduction, report no changes.
 - Overflow (`bypass_cooldown=True`): archive first, then commit projection; if needed, deterministically offload oldest unpinned tool groups until reserve fits. Never delete system/user/pinned content.
+- Offloadable groups are two classes: tool groups, and **eligible settled assistant prose**. Prose eligibility is deliberately narrow — a settled assistant row in the tail beyond the newest tool-call row, at least `PROSE_OFFLOAD_KEEP_RECENT` (2) rows back from the end, unpinned, unprotected, `active`, textual, not multimodal and not a duplicate content digest, within `max_rewrite_bytes`, and worth at least `PROSE_OFFLOAD_MIN_SAVING_TOKENS` (64) net of the stub it is replaced with. At most `PROSE_OFFLOAD_MAX_SPANS` (24) such spans are proposed per pass, oldest first. A prose offload is priced as row-minus-stub, never as the whole row. Candidates are ordered by earliest row position so a plan reads top-down. The price is computed from the **archived** row, so a saving can be overstated when an earlier `rewrite` already shortened the rendered text — candidates are re-priced against the current request on every observation, and the caller sees the real reduction in `preview`/`saved` after the commit.
 - Lazy initialization from host `session_id`; no reliance on `bind_session_state` or `on_session_end`.
 - `clone_for_agent()` returns a fresh engine with reopened store, never deep-copies SQLite/locks.
 - Compression boundaries carry state through the explicit `old_session_id` lifecycle: the store is
@@ -85,7 +89,7 @@ One SQLite transaction covers operation append, archive additions, revision bump
 The tool surface is useless if the model does not know the operating rules, so the plugin
 registers one static text block through the host's section API
 (`ctx.register_system_prompt_section`): id `hermes-clm.usage`, position `after_memory`,
-`max_chars` 4000 (the host ceiling; the text is ~3.5 KB with headroom because an
+`max_chars` 4000 (the host ceiling; the text is ~2.7 KB with headroom because an
 oversized section is skipped, not truncated).
 
 - **Static by construction.** The section is registered as a string, never a callable.

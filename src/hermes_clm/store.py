@@ -775,7 +775,9 @@ class _Planned:
 _STATE_CHANGING_KINDS = frozenset(
     {EditKind.KEEP, EditKind.DROP, EditKind.OFFLOAD, EditKind.RESTORE}
 )
-_REFUSE_PROTECTED_KINDS = frozenset({EditKind.DROP, EditKind.OFFLOAD, EditKind.REWRITE})
+_REFUSE_PROTECTED_KINDS = frozenset(
+    {EditKind.DROP, EditKind.OFFLOAD, EditKind.REWRITE, EditKind.RESTORE}
+)
 
 
 def _tokens_for_text(text: str) -> int:
@@ -1940,6 +1942,29 @@ class ContextStore:
                 effect, reason = ("applied", "")
                 if state_aware:
                     effect, reason = self._transition(span, op)
+                    if (
+                        effect == "applied"
+                        and op.kind in (EditKind.KEEP, EditKind.RESTORE)
+                        and span.state is not SpanState.ACTIVE
+                    ):
+                        # A reactivation emits bytes the projector re-checks. If the
+                        # store accepted a payload the projector refuses, the commit
+                        # would succeed and *every* later projection would be
+                        # refused — the session silently loses context editing until
+                        # a revert. Refuse here, where nothing has been written.
+                        payload = span.rewrite_text
+                        if not (isinstance(payload, str) and payload):
+                            content = (span.message or {}).get("content")
+                            payload = content if isinstance(content, str) else ""
+                        if len(payload.encode("utf-8")) > self._config.max_rewrite_bytes:
+                            raise StoreBudgetError(
+                                f"{op.kind.value} exceeds max_rewrite_bytes",
+                                code=f"{op.kind.value}_too_large",
+                                details={
+                                    "limit": self._config.max_rewrite_bytes,
+                                    "span_id": span.span_id,
+                                },
+                            )
                 planned.append(_Planned(op=op, span=span, effect=effect, reason=reason))
 
         if state_aware:
@@ -1955,7 +1980,11 @@ class ContextStore:
                 return "inert", "not_active"
             return "applied", ""
         if span.state is SpanState.ACTIVE:
-            if kind is EditKind.KEEP:
+            if kind in (EditKind.KEEP, EditKind.RESTORE):
+                # Nothing to reinstate: the row already projects. Recording an
+                # "applied" reactivation here would hand the projector a state
+                # transition that never happened (and, for a protected row, one it
+                # refuses) — so it is inert exactly like `keep`.
                 return "inert", "already_active"
             return "applied", ""
         # span is dropped or offloaded
@@ -2046,6 +2075,16 @@ class ContextStore:
         existing = self._txn_row(cur, txn_id)
         if existing is not None:
             state = str(existing["state"])
+            if str(existing["staged_sha256"]) != staged_sha:
+                # One rule for every path: a txn_id identifies one operation set.
+                # Echoing a different batch back as staged (or as committed) would
+                # tell the caller its new work is recorded when commit() will replay
+                # the original, so compare the signature before returning anything.
+                raise IdempotencyConflictError(
+                    "txn_id reused with a different payload",
+                    code="txn_payload_mismatch",
+                    details={"txn_id": txn_id},
+                )
             if state == "committed":
                 return StageResult(
                     ok=True,
@@ -2061,12 +2100,6 @@ class ContextStore:
             if state == "discarded":
                 raise IdempotencyConflictError(
                     "transaction was discarded", code="txn_discarded", details={"txn_id": txn_id}
-                )
-            if str(existing["staged_sha256"]) != staged_sha:
-                raise IdempotencyConflictError(
-                    "txn_id reused with a different payload",
-                    code="txn_payload_mismatch",
-                    details={"txn_id": txn_id},
                 )
             planned = self._plan(cur, ops)
             return self._stage_result(
@@ -2142,6 +2175,52 @@ class ContextStore:
             item.receipt for item in planned if item.effect == effect and item.span is not None
         )
 
+    def stage_commit(
+        self,
+        operations: Sequence[Any],
+        *,
+        expected_revision: int,
+        txn_id: str,
+        actor_origin: str,
+    ) -> CommitResult:
+        """Stage and commit one new transaction in one BEGIN IMMEDIATE write."""
+        self._require_writable()
+        ops = coerce_operations(operations, actor_origin=actor_origin)
+        validate_txn_id(txn_id)
+        expected = self._validate_revision(expected_revision)
+        actor = ActorOrigin(actor_origin)
+        with self._write() as cur:
+            staged = self._stage_locked(
+                cur,
+                ops,
+                expected_revision=expected,
+                txn_id=txn_id,
+                actor_origin=actor,
+            )
+            row = self._txn_row(cur, txn_id)
+            if row is None:  # pragma: no cover - defensive store invariant
+                raise CorruptStoreError("transaction row disappeared", code="missing_txn")
+            if staged.already_committed:
+                payload_sha = canonical_sha256([op.to_payload() for op in ops])
+                if str(row["staged_sha256"]) != payload_sha:
+                    raise ConflictError(
+                        "txn_id reused with a different payload",
+                        code="txn_payload_mismatch",
+                        details={"txn_id": txn_id},
+                    )
+                result = self._replay_commit(row)
+            elif staged.replayed:
+                raise ConflictError(
+                    "transaction is already staged; commit it explicitly",
+                    code="txn_already_staged",
+                    details={"txn_id": txn_id},
+                )
+            else:
+                result = self._commit_locked(cur, row, expected=expected)
+        self._invalidate()
+        self._write_index()
+        return result
+
     def commit(self, *, txn_id: str, expected_revision: int) -> CommitResult:
         """Apply a staged transaction atomically; replay is idempotent."""
 
@@ -2156,45 +2235,53 @@ class ContextStore:
                     code="unknown_txn",
                     details={"txn_id": txn_id},
                 )
-            state = str(txn["state"])
-            if state == "committed":
+            if str(txn["state"]) == "committed":
                 return self._replay_commit(txn)
-            if state == "discarded":
-                raise IdempotencyConflictError(
-                    "transaction was discarded", code="txn_discarded", details={"txn_id": txn_id}
-                )
-            head = self._head(cur)
-            if expected != head:
-                raise StaleRevisionError(
-                    "expected_revision does not match the current head",
-                    code="stale_revision",
-                    details={"expected": expected, "current": head},
-                )
-            if int(txn["base_revision"]) != head:
-                raise StaleRevisionError(
-                    "staged transaction is based on an older revision",
-                    code="stale_stage",
-                    details={"base_revision": int(txn["base_revision"]), "current": head},
-                )
-            ops = self._decode_staged_ops(dict(txn))
-            planned = self._plan(cur, ops)
-            result = self._apply(
-                cur,
-                planned,
-                txn_id=txn_id,
-                actor_origin=ActorOrigin(str(txn["actor_origin"])),
-                kind=self._commit_kind(ops),
-                base_revision=head,
-                extra_audit={"txn_id": txn_id},
-            )
-            now = self._now()
-            cur.execute(
-                "UPDATE txns SET state = 'committed', committed_revision = ?, updated_at = ?, result_json = ? "
-                "WHERE txn_id = ? AND state = 'staged'",
-                (result.revision, now, canonical_json(result.to_dict()), txn_id),
-            )
+            result = self._commit_locked(cur, txn, expected=expected)
         self._invalidate()
         self._write_index()
+        return result
+
+    def _commit_locked(self, cur, txn, *, expected: int) -> CommitResult:
+        state = str(txn["state"])
+        if state == "committed":
+            return self._replay_commit(txn)
+        if state == "discarded":
+            raise IdempotencyConflictError(
+                "transaction was discarded",
+                code="txn_discarded",
+                details={"txn_id": str(txn["txn_id"])},
+            )
+        head = self._head(cur)
+        if expected != head:
+            raise StaleRevisionError(
+                "expected_revision does not match the current head",
+                code="stale_revision",
+                details={"expected": expected, "current": head},
+            )
+        if int(txn["base_revision"]) != head:
+            raise StaleRevisionError(
+                "staged transaction is based on an older revision",
+                code="stale_stage",
+                details={"base_revision": int(txn["base_revision"]), "current": head},
+            )
+        ops = self._decode_staged_ops(dict(txn))
+        planned = self._plan(cur, ops)
+        txn_id = str(txn["txn_id"])
+        result = self._apply(
+            cur,
+            planned,
+            txn_id=txn_id,
+            actor_origin=ActorOrigin(str(txn["actor_origin"])),
+            kind=self._commit_kind(ops),
+            base_revision=head,
+            extra_audit={"txn_id": txn_id},
+        )
+        cur.execute(
+            "UPDATE txns SET state = 'committed', committed_revision = ?, updated_at = ?, result_json = ? "
+            "WHERE txn_id = ? AND state = 'staged'",
+            (result.revision, self._now(), canonical_json(result.to_dict()), txn_id),
+        )
         return result
 
     @staticmethod
@@ -3323,7 +3410,7 @@ class ContextStore:
             index = self._index_summary()
             tokens_cur = self._conn.cursor()
             try:
-                est_tokens = self._est_active_tokens(tokens_cur)
+                all_spans_tokens = self._est_active_tokens(tokens_cur)
             finally:
                 tokens_cur.close()
             return {
@@ -3335,7 +3422,7 @@ class ContextStore:
                 "head_hash": str(rev_row["head_hash"]),
                 "revision_kind": str(rev_row["kind"]),
                 "counts": counts,
-                "est_tokens": est_tokens,
+                "all_spans_est_tokens": all_spans_tokens,
                 "estimator": TOKEN_ESTIMATOR,
                 "spans_archived": spans_total,
                 "archive_entries": archive_count,
@@ -3437,14 +3524,25 @@ class ContextStore:
         }
 
     @_serialized
-    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        """Bounded, session-scoped view of current spans (never cross-session)."""
-
+    def inspect(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> dict[str, Any]:
+        """Page current spans; absent rows are opt-in and never deleted."""
         self._require_open()
         after = _decode_cursor(cursor)
         n = _clamp_limit(limit, maximum=self._config.inspect_limit_max, default=50)
         cur = self._conn.cursor()
         try:
+            window = cur.execute(
+                "SELECT MIN(s.seq) AS first_seq, MAX(s.seq) AS last_seq, "
+                "COUNT(*) AS present_count FROM spans s "
+                "JOIN current_spans cs ON cs.span_id = s.span_id WHERE cs.present = 1"
+            ).fetchone()
+            first_present = int(window["first_seq"]) if window["first_seq"] is not None else None
             rows = cur.execute(
                 "SELECT s.span_id AS span_id, s.uid AS uid, s.origin AS origin, s.role AS role, "
                 "s.group_id AS group_id, s.protected AS protected, s.seq AS seq, s.version AS version, "
@@ -3453,14 +3551,25 @@ class ContextStore:
                 "EXISTS(SELECT 1 FROM pins p WHERE p.span_id = s.span_id) AS pinned "
                 "FROM spans s JOIN current_spans cs ON cs.span_id = s.span_id "
                 "LEFT JOIN span_state st ON st.span_id = s.span_id "
-                "WHERE s.seq > ? ORDER BY s.seq LIMIT ?",
-                (after, n + 1),
+                "WHERE s.seq > ? AND (? = 1 OR cs.present = 1) "
+                "ORDER BY s.seq LIMIT ?",
+                (after, 1 if include_stale else 0, n + 1),
             ).fetchall()
+            omitted = (
+                0
+                if include_stale
+                else int(
+                    cur.execute("SELECT COUNT(*) FROM current_spans WHERE present = 0").fetchone()[
+                        0
+                    ]
+                )
+            )
         finally:
             cur.close()
         items = []
         for row in rows[:n]:
             text = row["rewrite_text"] or row["message_json"]
+            present = bool(row["present"])
             items.append(
                 {
                     "span_id": str(row["span_id"]),
@@ -3471,7 +3580,12 @@ class ContextStore:
                     "protected": bool(row["protected"]),
                     "pinned": bool(row["pinned"]),
                     "state": str(row["state"] or SpanState.ACTIVE.value),
-                    "present": bool(row["present"]),
+                    "present": present,
+                    "before_live_window": bool(
+                        not present
+                        and first_present is not None
+                        and int(row["seq"]) < first_present
+                    ),
                     "seq": int(row["seq"]),
                     "version": int(row["version"]),
                     "est_tokens": _tokens_for_text(text),
@@ -3488,6 +3602,13 @@ class ContextStore:
             "items": items,
             "next_cursor": next_cursor,
             "limit": n,
+            "include_stale": bool(include_stale),
+            "live_window": {
+                "first_seq": first_present,
+                "last_seq": int(window["last_seq"]) if window["last_seq"] is not None else None,
+                "present_count": int(window["present_count"]),
+            },
+            "omitted_absent": omitted,
         }
 
     @_serialized

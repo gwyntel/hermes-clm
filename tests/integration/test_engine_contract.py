@@ -622,6 +622,167 @@ def test_real_store_overflow_commits_a_system_offload_and_the_next_request_shows
     assert "FAILED tests/test_x.py" in history[2]["content"]
 
 
+def test_real_store_fast_commit_applies_a_group_offload_in_one_call(tmp_path):
+    """`clm_stage` with `commit=true` writes once and the next request shows it."""
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+    spans = inspect_spans(engine, history)
+    revision = service.revision
+    group = [spans["a1"]["span_id"], spans["t1"]["span_id"]]
+
+    payload = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [{"kind": "offload", "span_ids": group}],
+                "expected_revision": revision,
+                "txn_id": "txn-fast-offload",
+                "commit": True,
+            },
+            messages=history,
+        )
+    )
+    assert payload["ok"] is True, payload
+    assert payload["committed"] is True
+    assert payload["atomic"] is True
+    assert payload["revision"] == revision + 1
+    assert service.revision == revision + 1
+    assert service.status()["staged_transactions"] == []
+
+    request, selected = host.iterate()
+    assert selected is not None
+    row = request_index(history, "t1")
+    assert "[clm.offloaded" in selected[row]["content"]
+
+    # A refused minimum writes nothing: no revision, no staged row, no change.
+    refused = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [{"kind": "offload", "span_ids": group}],
+                "expected_revision": service.revision,
+                "txn_id": "txn-fast-refused",
+                "commit": True,
+                "min_saved_tokens": 10**9,
+            },
+            messages=history,
+        )
+    )
+    assert refused["ok"] is False, refused
+    assert refused["errors"][0]["code"] == "insufficient_saving"
+    assert refused.get("committed") is not True
+    assert service.revision == revision + 1
+    assert service.status()["staged_transactions"] == []
+    _, after = host.iterate()
+    assert after is not None
+    assert after[row]["content"] == selected[row]["content"]
+
+
+def patch_history():
+    """Older editable ``t1`` with one matchable line; newest ``t2`` stays protected.
+
+    ``clm_history()``'s ``t1`` is 60 identical repetitions, so it contains no
+    unique matchable substring; this fixture needs a single literal occurrence.
+    """
+    return [
+        message("user", "check the deploy", "u1"),
+        assistant_call("a1", "call_1"),
+        tool_result("t1", "call_1", "deploy report\nSTATUS: failing\nrollback ready"),
+        message("assistant", "The deploy is failing.", "a2"),
+        message("user", "what now", "u2"),
+        assistant_call("a3", "call_2"),
+        tool_result("t2", "call_2", "NEWEST TOOL OUTPUT"),
+    ]
+
+
+def test_real_store_literal_patch_rewrites_one_span_and_nothing_else(tmp_path):
+    history = patch_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+    revision = service.revision
+    spans = inspect_spans(engine, history)
+    span_id = spans["t1"]["span_id"]
+    patch_ops = [
+        {
+            "kind": "patch",
+            "span_ids": [span_id],
+            "old": "STATUS: failing",
+            "new": "STATUS: passing",
+        }
+    ]
+
+    staged = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": patch_ops,
+                "expected_revision": revision,
+                "txn_id": "txn-patch",
+            },
+            messages=history,
+        )
+    )
+    assert staged["ok"] is True, staged
+    assert staged["patched"][0]["span_id"] == span_id
+    assert "STATUS: passing" not in json.dumps(staged["staged_operations"])
+    assert service.revision == revision  # staged only: no write yet
+
+    # Replaying the staged transaction before commit stays idempotent.
+    replay = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": patch_ops,
+                "expected_revision": revision,
+                "txn_id": "txn-patch",
+            },
+            messages=history,
+        )
+    )
+    assert replay["ok"] is True, replay
+    assert service.revision == revision
+
+    committed = json.loads(
+        engine.handle_tool_call(
+            "clm_commit", {"txn_id": "txn-patch", "expected_revision": revision}
+        )
+    )
+    assert committed["ok"] is True, committed
+    assert committed["revision"] == revision + 1
+
+    rewrite = [op for op in engine.store.snapshot().operations if str(op.kind) == "rewrite"]
+    assert rewrite, "the patch must persist as a whole-span rewrite"
+    assert rewrite[-1].provenance["via"] == "patch"
+    assert rewrite[-1].replacement == "deploy report\nSTATUS: passing\nrollback ready"
+
+    request, selected = host.iterate()
+    assert selected is not None
+    row = request_index(history, "t1")
+    assert "STATUS: passing" in selected[row]["content"]
+    # The raw transcript is untouched and the newest tool output is byte-identical.
+    assert history[2]["content"] == "deploy report\nSTATUS: failing\nrollback ready"
+    assert selected[-1]["content"] == "NEWEST TOOL OUTPUT"
+
+    # Re-staging a committed patch resolves against the new text: not found, no write.
+    restaged = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": patch_ops,
+                "expected_revision": service.revision,
+                "txn_id": "txn-patch-again",
+            },
+            messages=history,
+        )
+    )
+    assert restaged["ok"] is False, restaged
+    assert restaged["errors"][0]["code"] == "patch_not_found"
+    assert service.revision == revision + 1
+
+
 def test_real_store_last_compaction_names_the_revision_that_archived_output(tmp_path):
     """The store, not the caller, decides what counts as a compaction."""
 

@@ -39,7 +39,7 @@ from .auxiliary import (
 from .budget import TokenCalibration, token_vocabulary
 from .errors import CLMError
 from .models import MAX_REWRITE_BYTES
-from .projection import ProjectionResult, project
+from .projection import ProjectionResult, offload_stub, project
 from .tools import ToolHandlers, ToolLimits, build_tool_specs
 
 #: Fallback logger: an aborted compaction must leave a trace even when the host
@@ -55,6 +55,13 @@ _PROPOSAL_OPERATION_FIELDS = ("kind", "span_ids", "replacement")
 
 #: How many recent projection/usage receipts the engine keeps in memory for status.
 RECEIPT_LIMIT = 20
+
+#: Automatic prose offload bounds. Settled assistant prose is the second-largest
+#: reclaimable class after tool output; these keep it bounded, reversible and
+#: worth the transaction.
+PROSE_OFFLOAD_KEEP_RECENT = 2
+PROSE_OFFLOAD_MAX_SPANS = 24
+PROSE_OFFLOAD_MIN_SAVING_TOKENS = 64
 
 #: Default fraction of the projection a manual ``/compact`` tries to shed when the
 #: window is not under pressure. Deterministic, archive-backed, and capped by the
@@ -597,7 +604,10 @@ class ToolService:
         if not callable(handler):
             raise RuntimeError(f"clm store does not implement {name}()")
         try:
-            return _payload(handler(*args, **kwargs))
+            payload = _payload(handler(*args, **kwargs))
+            if payload.get("ok") is not False:
+                payload.setdefault("pressure", self._engine.pressure_hint())
+            return payload
         except CLMError as exc:
             return {
                 "ok": False,
@@ -652,7 +662,7 @@ class ToolService:
                         "head_hash",
                         "revision_kind",
                         "counts",
-                        "est_tokens",
+                        "all_spans_est_tokens",
                         "estimator",
                         "spans_archived",
                         "archive_entries",
@@ -666,9 +676,16 @@ class ToolService:
                     ):
                         if key in live:
                             payload[key] = live[key]
+        payload["compactable"] = self._engine.compactable()
         return payload
 
-    def inspect(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+    def inspect(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_stale: bool = False,
+    ) -> dict[str, Any]:
         """Bounded active-context view for this session only.
 
         Each span keeps the store's raw ``est_tokens`` (``chars/4``) and gains
@@ -676,7 +693,10 @@ class ToolService:
         edit from the raw figure while the budget uses the calibrated one is the
         mismatch this field exists to end.
         """
-        payload = self._call_store("inspect", cursor=cursor, limit=limit)
+        payload = self._call_store(
+            "inspect", cursor=cursor, limit=limit, include_stale=include_stale
+        )
+        evidence = self._alignment_evidence(payload)
         items = payload.get("items")
         if isinstance(items, list):
             calibration = self._engine.calibration
@@ -687,11 +707,49 @@ class ToolService:
                     raw = fresh.get("est_tokens")
                     if isinstance(raw, int) and not isinstance(raw, bool):
                         fresh.setdefault("est_calibrated", calibration.adjust(raw))
+                    if fresh.get("present") is True:
+                        fresh["status"] = "live"
+                    elif not evidence["available"]:
+                        fresh["status"] = "unverified"
+                    elif fresh.get("before_live_window"):
+                        fresh["status"] = "stale"
+                    else:
+                        fresh["status"] = "absent_now"
                     enriched.append(fresh)
                 else:
                     enriched.append(item)
             payload["items"] = enriched
+        payload["alignment"] = evidence
         return payload
+
+    def _alignment_evidence(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        result = getattr(self._engine, "_last_projection", None)
+        alignment = getattr(result, "alignment", None)
+        matched = 0
+        if isinstance(alignment, Mapping):
+            value = alignment.get("matched")
+            if isinstance(value, int) and not isinstance(value, bool):
+                matched = max(0, value)
+        ok = bool(getattr(result, "ok", False))
+        checked = getattr(result, "revision", None)
+        reason = (
+            "no_projection"
+            if result is None
+            else "projection_refused"
+            if not ok
+            else "no_aligned_rows"
+            if matched <= 0
+            else None
+        )
+        return {
+            "available": reason is None,
+            "reason": reason,
+            "matched": matched if result is not None else None,
+            "checked_revision": checked
+            if isinstance(checked, int) and not isinstance(checked, bool)
+            else None,
+            "store_revision": payload.get("revision"),
+        }
 
     def preview(self, operations: Sequence[Any]) -> dict[str, Any]:
         """Pure projection of a staged batch (no write, no revision bump)."""
@@ -717,6 +775,96 @@ class ToolService:
     def commit(self, *, txn_id: str, expected_revision: int) -> dict[str, Any]:
         """Commit a staged transaction (idempotent replay by ``txn_id``)."""
         return self._call_store("commit", txn_id=txn_id, expected_revision=expected_revision)
+
+    def stage_commit(
+        self,
+        operations: Sequence[Any],
+        *,
+        expected_revision: int,
+        txn_id: str,
+        min_saved_tokens: int | None = None,
+        actor_origin: str = "agent",
+    ) -> dict[str, Any]:
+        store = self._require_store()
+        head = self._live_revision(store)
+        if head > 0 and int(expected_revision) != head:
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "errors": [
+                    {
+                        "code": "stale_revision",
+                        "message": f"expected revision {expected_revision}, head is {head}",
+                    }
+                ],
+            }
+        try:
+            projected = self.preview(operations)
+        except Exception as exc:
+            self._engine._record_error(exc)
+            projected = None
+        if not isinstance(projected, Mapping) or projected.get("available") is False:
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "errors": [
+                    {
+                        "code": "preview_unavailable",
+                        "message": "fast commit requires a successful pure preview; use two-phase stage/commit",
+                    }
+                ],
+            }
+        if projected.get("ok") is False:
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "projected": dict(projected),
+                "errors": [
+                    {
+                        "code": "projection_refused",
+                        "message": "the projector refuses this batch; nothing was written",
+                    }
+                ],
+            }
+        raw = projected.get("saved")
+        raw_saved = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+        calibrated = projected.get("calibrated")
+        calibrated_saved = calibrated.get("saved") if isinstance(calibrated, Mapping) else raw_saved
+        if not isinstance(calibrated_saved, int) or isinstance(calibrated_saved, bool):
+            calibrated_saved = 0
+        saved = {"raw": raw_saved, "calibrated": calibrated_saved}
+        if min_saved_tokens is not None and calibrated_saved < min_saved_tokens:
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "min_saved_tokens": min_saved_tokens,
+                "saved_tokens": saved,
+                "projected": dict(projected),
+                "errors": [
+                    {
+                        "code": "insufficient_saving",
+                        "message": (
+                            f"batch saves {calibrated_saved} calibrated tokens, "
+                            f"below required {min_saved_tokens}"
+                        ),
+                    }
+                ],
+            }
+        payload = self._call_store(
+            "stage_commit",
+            list(operations),
+            expected_revision=expected_revision,
+            txn_id=txn_id,
+            actor_origin=actor_origin,
+        )
+        payload.setdefault("atomic", True)
+        payload["projected"] = dict(projected)
+        payload["saved_tokens"] = saved
+        return payload
 
     def discard(self, *, txn_id: str) -> None:
         """Drop a staged transaction without committing."""
@@ -2048,6 +2196,19 @@ class CLMEngine(_EngineBase):
             head_hash=str(getattr(snapshot, "head_hash", "") or ""),
         )
 
+    def _live_tail_start(self, rows: Sequence[Mapping[str, Any]]) -> int:
+        """No automatic prose edit may touch the host-owned live tail."""
+        from .identity import role_of, tool_call_ids
+
+        start = max(0, len(rows) - PROSE_OFFLOAD_KEEP_RECENT)
+        newest_group = None
+        for position, row in enumerate(rows):
+            if role_of(row) == "assistant" and tool_call_ids(row):
+                newest_group = position
+        if newest_group is not None:
+            start = min(start, newest_group)
+        return start
+
     def _offload_candidates(
         self, messages: Sequence[Mapping[str, Any]], snapshot: Any
     ) -> List[_budget.OffloadCandidate]:
@@ -2065,9 +2226,12 @@ class CLMEngine(_EngineBase):
         """
 
         from .identity import (
+            content_sha256,
             is_editable_content,
             is_protected_message,
             role_of,
+            tool_call_id_of,
+            tool_call_ids,
             tool_groups,
         )
 
@@ -2098,14 +2262,16 @@ class CLMEngine(_EngineBase):
                 newest_tool_uid = row.get("message_uid")
                 break
         candidates: List[_budget.OffloadCandidate] = []
-        for order, (group_id, members) in enumerate(
-            sorted(
-                groups.members.items(),
-                key=lambda item: min(
-                    (row_positions.get(uid, len(rows)) for uid in item[1]), default=len(rows)
-                ),
+        ordered_groups = sorted(
+            groups.members.items(),
+            key=lambda item: min(
+                (row_positions.get(uid, len(rows)) for uid in item[1]), default=len(rows)
+            ),
+        )
+        for group_id, members in ordered_groups:
+            first_position = min(
+                (row_positions.get(uid, len(rows)) for uid in members), default=len(rows)
             )
-        ):
             span_list = [by_uid.get(uid) for uid in members]
             protected = any(
                 span is None
@@ -2136,7 +2302,7 @@ class CLMEngine(_EngineBase):
             )
             candidates.append(
                 _budget.OffloadCandidate(
-                    order=order,
+                    order=first_position,
                     group_id=group_id,
                     uids=tuple(members),
                     # Store-facing ids: the snapshot span id when archived, else
@@ -2150,8 +2316,60 @@ class CLMEngine(_EngineBase):
                         for uid in members
                     ),
                     tokens=tokens,
+                    raw_tokens=sum(
+                        _budget.estimate_message_tokens(uid_rows.get(uid, {})) for uid in members
+                    ),
                     protected=protected or clipped,
                     pinned=pinned,
+                )
+            )
+
+        # Settled assistant prose. Groups keep their old upper-bound price; prose
+        # is priced net (row minus stub) because the stub is what replaces it.
+        tail_start = self._live_tail_start(rows)
+        digests: Dict[str, int] = {}
+        for span in by_uid.values():
+            digest = str(getattr(span, "content_sha256", "") or "")
+            if digest:
+                digests[digest] = digests.get(digest, 0) + 1
+        prose_count = 0
+        for position, row in enumerate(rows):
+            if position >= tail_start or prose_count >= PROSE_OFFLOAD_MAX_SPANS:
+                break
+            if role_of(row) != "assistant" or tool_call_ids(row) or tool_call_id_of(row):
+                continue
+            uid = row.get("message_uid") if isinstance(row, Mapping) else None
+            if not isinstance(uid, str) or not uid:
+                continue
+            span = by_uid.get(uid)
+            if span is None:
+                continue
+            span_id = str(getattr(span, "span_id", None) or uid)
+            if uid in pin_ids or span_id in pin_ids or span_id in settled:
+                continue
+            if bool(getattr(span, "protected", False)) or _span_state(span) != "active":
+                continue
+            content = (getattr(span, "message", {}) or {}).get("content")
+            if not isinstance(content, str) or not is_editable_content(content):
+                continue
+            digest = str(getattr(span, "content_sha256", "") or "")
+            if digest and digests.get(digest, 0) > 1:
+                continue  # the projector must not hit an ambiguous text identity
+            if len(content.encode("utf-8")) > int(self.config.max_rewrite_bytes):
+                continue  # the current keep/restore ceiling must stay recoverable
+            stub = offload_stub(span_id, digest or content_sha256(content))
+            saving = _budget.estimate_message_tokens(row) - _budget.estimate_text_tokens(stub)
+            if saving < PROSE_OFFLOAD_MIN_SAVING_TOKENS:
+                continue
+            prose_count += 1
+            candidates.append(
+                _budget.OffloadCandidate(
+                    order=position,
+                    group_id="span:" + span_id,
+                    uids=(uid,),
+                    span_ids=(span_id,),
+                    tokens=self.calibration.adjust(saving),
+                    raw_tokens=saving,
                 )
             )
         return candidates
@@ -2254,6 +2472,41 @@ class CLMEngine(_EngineBase):
             calibration=self.calibration,
             last_prompt_tokens=self.last_prompt_tokens,
         ).to_dict()
+
+    def compactable(self, snapshot: Any = None) -> Dict[str, Any]:
+        """Conservative addressable savings; unknown is never encoded as zero."""
+        history = list(getattr(self, "_last_history", ()) or ())
+        if snapshot is None:
+            snapshot = self._snapshot()
+        if snapshot is None:
+            return {"known": False, "reason": "store_unavailable"}
+        if bool(getattr(snapshot, "operations_truncated", False)):
+            return {"known": False, "reason": "operations_truncated"}
+        if not history:
+            return {"known": False, "reason": "no_request_observed"}
+        units = [
+            candidate
+            for candidate in self._offload_candidates(history, snapshot)
+            if candidate.eligible
+        ]
+        return {
+            "known": True,
+            "reason": None,
+            "units": len(units),
+            "tokens": int(sum(item.conservative_tokens for item in units)),
+            "basis": "request",
+            "revision": int(getattr(snapshot, "revision", 0) or 0),
+        }
+
+    def pressure_hint(self) -> Dict[str, Any]:
+        """Declarative readout for a newly-created CLM tool result, not projection."""
+        budget = self.budget_state()
+        return {
+            "scope": "request",
+            "tier": budget.get("tier"),
+            "headroom_tokens": budget.get("headroom_tokens"),
+            "overflow_tokens": budget.get("overflow_tokens"),
+        }
 
     def get_status(self) -> Dict[str, Any]:
         """Host status plus CLM revision, budget, receipts and last error."""

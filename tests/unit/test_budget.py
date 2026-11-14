@@ -225,3 +225,53 @@ def test_pressure_state_keeps_the_raw_estimate_recoverable():
 def test_pressure_state_raw_estimate_equals_calibrated_without_calibration():
     state = pressure_state(estimated_tokens=1_000, context_length=10_000)
     assert state.raw_estimated_tokens == state.estimated_tokens == 1_000
+
+
+def test_token_vocabulary_declares_request_scope():
+    assert token_vocabulary(spans=400, actual=512)["scope"] == "request"
+
+
+def test_budget_has_one_calibrated_spelling_and_a_scope():
+    state = pressure_state(
+        estimated_tokens=1_000,
+        context_length=10_000,
+        calibration=TokenCalibration(ratio=2.0),
+    )
+    payload = state.to_dict()
+    assert payload["scope"] == "request"
+    assert payload["estimated_tokens"] == 2_000
+    assert payload["raw_estimated_tokens"] == 1_000
+    assert "calibrated_tokens" not in payload
+    assert state.calibrated_tokens == 2_000
+
+
+def test_headroom_uses_calibrated_estimate_and_reserve():
+    state = pressure_state(
+        estimated_tokens=3_000,
+        context_length=10_000,
+        calibration=TokenCalibration(ratio=2.0),
+    )
+    assert state.estimated_tokens == 6_000
+    assert state.headroom_tokens == 10_000 - 2_048 - 6_000
+    assert state.to_dict()["headroom_tokens"] == state.headroom_tokens
+
+
+def test_headroom_distinguishes_unknown_from_measured_zero():
+    unknown = pressure_state(estimated_tokens=999_999, context_length=0)
+    full = pressure_state(estimated_tokens=9_000, context_length=10_000)
+    assert unknown.headroom_tokens is None
+    assert unknown.fits is True
+    assert full.headroom_tokens == 0
+    assert full.overflow_tokens == 1_048
+
+
+def test_conservative_tokens_never_exceeds_either_estimate():
+    above = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=900, raw_tokens=600)
+    below = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=600, raw_tokens=900)
+    unmeasured = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=600)
+    assert (
+        above.conservative_tokens
+        == below.conservative_tokens
+        == unmeasured.conservative_tokens
+        == 600
+    )

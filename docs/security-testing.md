@@ -9,10 +9,12 @@ Sources of truth, in order: `docs/integration-contract.md`, `docs/architecture.m
 
 ## 1. Status
 
-> **Integrated and green (local).** On the integration tree the full suite reports
-> **811 passed, 3 skipped, 0 failed, 0 xpassed** with `CLM_HERMES_CHECKOUT` pointing at a
-> real Hermes checkout (this count includes the system-prompt-section tests); without it
-> the same tree is 782 passed / 32 skipped. The three
+> **Integrated and green (local).** With `CLM_HERMES_CHECKOUT` pointing at a real Hermes
+> checkout, `pytest -m 'not slow'` is green and includes the system-prompt-section tests;
+> without the checkout the real-discovery, prompt-section, dual-lane and lifecycle tests
+> skip instead of failing. The current totals live in
+> [`limitations.md`](limitations.md#current-gates) — this page does not restate a count,
+> because a stale number in a security document reads as a measured claim. The three
 > remaining skips are expected: two media probes do not apply to inline archives, and one
 > tool-schema probe has no module-level JSON schema object. `tests/security` and
 > `tests/fuzz` all pass, including the 16-test mutation harness: a correct fixture baseline

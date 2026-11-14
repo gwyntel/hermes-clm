@@ -10,18 +10,15 @@ committed revision onto each provider request as a pure function. Raw history is
 rewritten, tool-call groups stay atomic, and system / user / pinned rows pass through
 byte-identically.
 
-> **Status: pre-release, integrated tree.** The engine, store, tools, plugin, benchmark
-> harness and packaging are integrated. Local gates: **811 passed, 3 skipped, 0 failed**
-> with `CLM_HERMES_CHECKOUT` set (782 passed, 32 skipped without the checkout), including
-> the system-prompt-section tests;
-> `ruff check`, `ruff format --check`, `mypy src`, `python -m build` and
-> `twine check` pass. The remaining skips are two media-blob probes that do not apply to
-> inline archives and one tool-schema probe with no module-level schema object.
-> Remote CI passes lint, types, tests on Python 3.11–3.14, mutation, security, build and
-> the aggregate gate. Only a GitHub prerelease exists until operator acceptance completes;
-> no PyPI publication has occurred. Public APIs may change before `v0.1.0`.
-> Exact commands and remaining limitations are in
-> [`docs/limitations.md`](docs/limitations.md#current-gates).
+> **Status: released, independent implementation.** This is a CLM-inspired,
+> independent model-directed context-editing engine, not a reproduction of the paper's
+> shell/file protocol. The closed operation vocabulary, protected user/system rows,
+> structured tool pairing, and durable revision/archive are deliberate differences.
+> `v0.2.0` is a GitHub release with wheel and sdist assets; no PyPI publication is
+> claimed. Current test totals and CI run IDs are recorded only in
+> [`docs/limitations.md`](docs/limitations.md#current-gates) after a verification run —
+> the numbers there are measured, not aspirational. Live smoke testing is not an
+> efficacy benchmark, and no task-accuracy claim is made anywhere in this repository.
 
 ## The problem
 
