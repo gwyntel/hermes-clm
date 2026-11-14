@@ -258,10 +258,19 @@ def test_aux_metrics_ride_only_on_the_full_answer():
 
 def test_summary_reports_headroom_and_compactable_savings():
     service = StatusService(
-        budget={"tier": "high", "context_length": 128_000,
-                "headroom_tokens": 12_000, "overflow_tokens": 0},
-        compactable={"known": True, "units": 3, "tokens": 28_400,
-                     "basis": "request", "reason": None},
+        budget={
+            "tier": "high",
+            "context_length": 128_000,
+            "headroom_tokens": 12_000,
+            "overflow_tokens": 0,
+        },
+        compactable={
+            "known": True,
+            "units": 3,
+            "tokens": 28_400,
+            "basis": "request",
+            "reason": None,
+        },
     )
     payload = load(handlers_for(service).status({}))
     assert payload["headroom_tokens"] == 12_000
@@ -271,9 +280,11 @@ def test_summary_reports_headroom_and_compactable_savings():
 
 
 def test_summary_never_turns_unknown_compactable_into_zero():
-    payload = load(handlers_for(StatusService(
-        compactable={"known": False, "reason": "no_request_observed"}
-    )).status({}))
+    payload = load(
+        handlers_for(
+            StatusService(compactable={"known": False, "reason": "no_request_observed"})
+        ).status({})
+    )
     assert payload["compactable_tokens"] is None
     assert payload["compactable_unknown"] == "no_request_observed"
 

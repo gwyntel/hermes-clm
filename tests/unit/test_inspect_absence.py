@@ -11,10 +11,7 @@ def make_engine(tmp_path):
 
 
 def conversation(*uids):
-    return [
-        {"message_uid": uid, "role": "user", "content": f"message {uid}"}
-        for uid in uids
-    ]
+    return [{"message_uid": uid, "role": "user", "content": f"message {uid}"} for uid in uids]
 
 
 def test_absence_is_unverified_without_alignment(tmp_path):

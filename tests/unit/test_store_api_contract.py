@@ -88,7 +88,11 @@ class SignatureTests(unittest.TestCase):
     def test_read_surfaces(self) -> None:
         self.assertEqual(
             [(name, kind) for name, kind, _ in params(store.ContextStore.inspect)],
-            [("cursor", "KEYWORD_ONLY"), ("limit", "KEYWORD_ONLY"), ("include_stale", "KEYWORD_ONLY")],
+            [
+                ("cursor", "KEYWORD_ONLY"),
+                ("limit", "KEYWORD_ONLY"),
+                ("include_stale", "KEYWORD_ONLY"),
+            ],
         )
         self.assertEqual(
             [(name, kind) for name, kind, _ in params(store.ContextStore.search)],

@@ -2158,8 +2158,11 @@ class ContextStore:
         actor = ActorOrigin(actor_origin)
         with self._write() as cur:
             staged = self._stage_locked(
-                cur, ops, expected_revision=expected,
-                txn_id=txn_id, actor_origin=actor,
+                cur,
+                ops,
+                expected_revision=expected,
+                txn_id=txn_id,
+                actor_origin=actor,
             )
             row = self._txn_row(cur, txn_id)
             if row is None:  # pragma: no cover - defensive store invariant
@@ -2176,7 +2179,8 @@ class ContextStore:
             elif staged.replayed:
                 raise ConflictError(
                     "transaction is already staged; commit it explicitly",
-                    code="txn_already_staged", details={"txn_id": txn_id},
+                    code="txn_already_staged",
+                    details={"txn_id": txn_id},
                 )
             else:
                 result = self._commit_locked(cur, row, expected=expected)
@@ -2211,27 +2215,33 @@ class ContextStore:
             return self._replay_commit(txn)
         if state == "discarded":
             raise IdempotencyConflictError(
-                "transaction was discarded", code="txn_discarded",
+                "transaction was discarded",
+                code="txn_discarded",
                 details={"txn_id": str(txn["txn_id"])},
             )
         head = self._head(cur)
         if expected != head:
             raise StaleRevisionError(
-                "expected_revision does not match the current head", code="stale_revision",
+                "expected_revision does not match the current head",
+                code="stale_revision",
                 details={"expected": expected, "current": head},
             )
         if int(txn["base_revision"]) != head:
             raise StaleRevisionError(
-                "staged transaction is based on an older revision", code="stale_stage",
+                "staged transaction is based on an older revision",
+                code="stale_stage",
                 details={"base_revision": int(txn["base_revision"]), "current": head},
             )
         ops = self._decode_staged_ops(dict(txn))
         planned = self._plan(cur, ops)
         txn_id = str(txn["txn_id"])
         result = self._apply(
-            cur, planned, txn_id=txn_id,
+            cur,
+            planned,
+            txn_id=txn_id,
             actor_origin=ActorOrigin(str(txn["actor_origin"])),
-            kind=self._commit_kind(ops), base_revision=head,
+            kind=self._commit_kind(ops),
+            base_revision=head,
             extra_audit={"txn_id": txn_id},
         )
         cur.execute(
@@ -3499,9 +3509,7 @@ class ContextStore:
                 "COUNT(*) AS present_count FROM spans s "
                 "JOIN current_spans cs ON cs.span_id = s.span_id WHERE cs.present = 1"
             ).fetchone()
-            first_present = (
-                int(window["first_seq"]) if window["first_seq"] is not None else None
-            )
+            first_present = int(window["first_seq"]) if window["first_seq"] is not None else None
             rows = cur.execute(
                 "SELECT s.span_id AS span_id, s.uid AS uid, s.origin AS origin, s.role AS role, "
                 "s.group_id AS group_id, s.protected AS protected, s.seq AS seq, s.version AS version, "
@@ -3514,8 +3522,14 @@ class ContextStore:
                 "ORDER BY s.seq LIMIT ?",
                 (after, 1 if include_stale else 0, n + 1),
             ).fetchall()
-            omitted = 0 if include_stale else int(
-                cur.execute("SELECT COUNT(*) FROM current_spans WHERE present = 0").fetchone()[0]
+            omitted = (
+                0
+                if include_stale
+                else int(
+                    cur.execute("SELECT COUNT(*) FROM current_spans WHERE present = 0").fetchone()[
+                        0
+                    ]
+                )
             )
         finally:
             cur.close()
@@ -3523,26 +3537,30 @@ class ContextStore:
         for row in rows[:n]:
             text = row["rewrite_text"] or row["message_json"]
             present = bool(row["present"])
-            items.append({
-                "span_id": str(row["span_id"]),
-                "uid": str(row["uid"]),
-                "origin": str(row["origin"]),
-                "role": str(row["role"]),
-                "group_id": row["group_id"],
-                "protected": bool(row["protected"]),
-                "pinned": bool(row["pinned"]),
-                "state": str(row["state"] or SpanState.ACTIVE.value),
-                "present": present,
-                "before_live_window": bool(
-                    not present and first_present is not None and int(row["seq"]) < first_present
-                ),
-                "seq": int(row["seq"]),
-                "version": int(row["version"]),
-                "est_tokens": _tokens_for_text(text),
-                "preview": _preview(
-                    text if row["rewrite_text"] else _message_text(row["message_json"])
-                ),
-            })
+            items.append(
+                {
+                    "span_id": str(row["span_id"]),
+                    "uid": str(row["uid"]),
+                    "origin": str(row["origin"]),
+                    "role": str(row["role"]),
+                    "group_id": row["group_id"],
+                    "protected": bool(row["protected"]),
+                    "pinned": bool(row["pinned"]),
+                    "state": str(row["state"] or SpanState.ACTIVE.value),
+                    "present": present,
+                    "before_live_window": bool(
+                        not present
+                        and first_present is not None
+                        and int(row["seq"]) < first_present
+                    ),
+                    "seq": int(row["seq"]),
+                    "version": int(row["version"]),
+                    "est_tokens": _tokens_for_text(text),
+                    "preview": _preview(
+                        text if row["rewrite_text"] else _message_text(row["message_json"])
+                    ),
+                }
+            )
         next_cursor = _encode_cursor(int(str(items[-1]["seq"]))) if len(rows) > n else None
         return {
             "ok": True,

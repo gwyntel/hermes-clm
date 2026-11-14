@@ -269,5 +269,9 @@ def test_conservative_tokens_never_exceeds_either_estimate():
     above = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=900, raw_tokens=600)
     below = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=600, raw_tokens=900)
     unmeasured = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=600)
-    assert above.conservative_tokens == below.conservative_tokens == unmeasured.conservative_tokens == 600
-
+    assert (
+        above.conservative_tokens
+        == below.conservative_tokens
+        == unmeasured.conservative_tokens
+        == 600
+    )

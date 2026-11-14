@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from hermes_clm.errors import ConflictError, ProtectedSpanError, StaleRevisionError
-from hermes_clm.models import ActorOrigin, EditKind, EditOperation
 import store_testkit as kit
+
+from hermes_clm.errors import ConflictError, ProtectedSpanError, StaleRevisionError
+from hermes_clm.models import EditKind, EditOperation
 
 
 class StageCommitTests(kit.StoreTestCase):
@@ -12,22 +13,27 @@ class StageCommitTests(kit.StoreTestCase):
         self.ids = self.ingest(self.store)
 
     def drop_ops(self, *uids):
-        return [EditOperation(
-            kind=EditKind.DROP,
-            span_ids=tuple(self.ids[uid] for uid in uids),
-        )]
+        return [
+            EditOperation(
+                kind=EditKind.DROP,
+                span_ids=tuple(self.ids[uid] for uid in uids),
+            )
+        ]
 
     def test_atomic_commit_leaves_no_staged_transaction(self):
         result = self.store.stage_commit(
-            self.drop_ops("u-a2"), expected_revision=1,
-            txn_id="txn-fast", actor_origin="agent",
+            self.drop_ops("u-a2"),
+            expected_revision=1,
+            txn_id="txn-fast",
+            actor_origin="agent",
         )
         self.assertEqual(result.revision, 2)
         self.assertEqual(self.store.status()["staged_transactions"], [])
         self.assertEqual(
-            self.raw_connect().execute(
-                "SELECT state FROM txns WHERE txn_id='txn-fast'"
-            ).fetchone()[0], "committed",
+            self.raw_connect()
+            .execute("SELECT state FROM txns WHERE txn_id='txn-fast'")
+            .fetchone()[0],
+            "committed",
         )
 
     def test_same_payload_replays_idempotently(self):
@@ -45,31 +51,39 @@ class StageCommitTests(kit.StoreTestCase):
     def test_cas_refusal_leaves_no_transaction(self):
         with self.assertRaises(StaleRevisionError):
             self.store.stage_commit(
-                self.drop_ops("u-a2"), expected_revision=0,
-                txn_id="txn-stale", actor_origin="agent",
+                self.drop_ops("u-a2"),
+                expected_revision=0,
+                txn_id="txn-stale",
+                actor_origin="agent",
             )
-        self.assertIsNone(self.raw_connect().execute(
-            "SELECT 1 FROM txns WHERE txn_id='txn-stale'"
-        ).fetchone())
+        self.assertIsNone(
+            self.raw_connect().execute("SELECT 1 FROM txns WHERE txn_id='txn-stale'").fetchone()
+        )
         self.assertEqual(self.store.snapshot().revision, 1)
 
     def test_protected_refusal_leaves_no_staged_row(self):
         with self.assertRaises(ProtectedSpanError):
             self.store.stage_commit(
-                self.drop_ops("u-q1"), expected_revision=1,
-                txn_id="txn-protected", actor_origin="agent",
+                self.drop_ops("u-q1"),
+                expected_revision=1,
+                txn_id="txn-protected",
+                actor_origin="agent",
             )
         self.assertEqual(self.store.status()["staged_transactions"], [])
 
     def test_existing_stage_is_not_consumed(self):
         self.store.stage(
-            self.drop_ops("u-a2"), expected_revision=1,
-            txn_id="txn-existing", actor_origin="agent",
+            self.drop_ops("u-a2"),
+            expected_revision=1,
+            txn_id="txn-existing",
+            actor_origin="agent",
         )
         with self.assertRaises(ConflictError) as ctx:
             self.store.stage_commit(
-                self.drop_ops("u-a2"), expected_revision=1,
-                txn_id="txn-existing", actor_origin="agent",
+                self.drop_ops("u-a2"),
+                expected_revision=1,
+                txn_id="txn-existing",
+                actor_origin="agent",
             )
         self.assertEqual(ctx.exception.code, "txn_already_staged")
         self.assertEqual(len(self.store.status()["staged_transactions"]), 1)
@@ -77,13 +91,17 @@ class StageCommitTests(kit.StoreTestCase):
 
     def test_committed_id_with_different_payload_refuses(self):
         self.store.stage_commit(
-            self.drop_ops("u-a2"), expected_revision=1,
-            txn_id="txn-mismatch", actor_origin="agent",
+            self.drop_ops("u-a2"),
+            expected_revision=1,
+            txn_id="txn-mismatch",
+            actor_origin="agent",
         )
         with self.assertRaises(ConflictError) as ctx:
             self.store.stage_commit(
-                self.drop_ops("u-t1"), expected_revision=1,
-                txn_id="txn-mismatch", actor_origin="agent",
+                self.drop_ops("u-t1"),
+                expected_revision=1,
+                txn_id="txn-mismatch",
+                actor_origin="agent",
             )
         self.assertEqual(ctx.exception.code, "txn_payload_mismatch")
         self.assertEqual(self.store.snapshot().revision, 2)
@@ -100,12 +118,16 @@ class StageCommitTests(kit.StoreTestCase):
         two_phase = ordinary.commit(txn_id="txn-two-phase", expected_revision=1)
         self.assertEqual(fast.revision, two_phase.revision)
         self.assertEqual(fast.applied, two_phase.applied)
-        fast_events = self.raw_connect().execute(
-            "SELECT event, revision, actor_origin FROM audit ORDER BY seq"
-        ).fetchall()
-        two_events = self.raw_connect("ordinary").execute(
-            "SELECT event, revision, actor_origin FROM audit ORDER BY seq"
-        ).fetchall()
+        fast_events = (
+            self.raw_connect()
+            .execute("SELECT event, revision, actor_origin FROM audit ORDER BY seq")
+            .fetchall()
+        )
+        two_events = (
+            self.raw_connect("ordinary")
+            .execute("SELECT event, revision, actor_origin FROM audit ORDER BY seq")
+            .fetchall()
+        )
         self.assertEqual(
             [(r["event"], r["revision"], r["actor_origin"]) for r in fast_events],
             [(r["event"], r["revision"], r["actor_origin"]) for r in two_events],

@@ -726,16 +726,21 @@ class ToolService:
         ok = bool(getattr(result, "ok", False))
         checked = getattr(result, "revision", None)
         reason = (
-            "no_projection" if result is None
-            else "projection_refused" if not ok
-            else "no_aligned_rows" if matched <= 0
+            "no_projection"
+            if result is None
+            else "projection_refused"
+            if not ok
+            else "no_aligned_rows"
+            if matched <= 0
             else None
         )
         return {
             "available": reason is None,
             "reason": reason,
             "matched": matched if result is not None else None,
-            "checked_revision": checked if isinstance(checked, int) and not isinstance(checked, bool) else None,
+            "checked_revision": checked
+            if isinstance(checked, int) and not isinstance(checked, bool)
+            else None,
             "store_revision": payload.get("revision"),
         }
 
@@ -776,26 +781,47 @@ class ToolService:
         store = self._require_store()
         head = self._live_revision(store)
         if head > 0 and int(expected_revision) != head:
-            return {"ok": False, "revision": head, "receipts": [], "errors": [{
-                "code": "stale_revision",
-                "message": f"expected revision {expected_revision}, head is {head}",
-            }]}
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "errors": [
+                    {
+                        "code": "stale_revision",
+                        "message": f"expected revision {expected_revision}, head is {head}",
+                    }
+                ],
+            }
         try:
             projected = self.preview(operations)
         except Exception as exc:
             self._engine._record_error(exc)
             projected = None
         if not isinstance(projected, Mapping) or projected.get("available") is False:
-            return {"ok": False, "revision": head, "receipts": [], "errors": [{
-                "code": "preview_unavailable",
-                "message": "fast commit requires a successful pure preview; use two-phase stage/commit",
-            }]}
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "errors": [
+                    {
+                        "code": "preview_unavailable",
+                        "message": "fast commit requires a successful pure preview; use two-phase stage/commit",
+                    }
+                ],
+            }
         if projected.get("ok") is False:
-            return {"ok": False, "revision": head, "receipts": [],
-                    "projected": dict(projected), "errors": [{
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "projected": dict(projected),
+                "errors": [
+                    {
                         "code": "projection_refused",
                         "message": "the projector refuses this batch; nothing was written",
-                    }]}
+                    }
+                ],
+            }
         raw = projected.get("saved")
         raw_saved = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
         calibrated = projected.get("calibrated")
@@ -804,24 +830,34 @@ class ToolService:
             calibrated_saved = 0
         saved = {"raw": raw_saved, "calibrated": calibrated_saved}
         if min_saved_tokens is not None and calibrated_saved < min_saved_tokens:
-            return {"ok": False, "revision": head, "receipts": [],
-                    "min_saved_tokens": min_saved_tokens, "saved_tokens": saved,
-                    "projected": dict(projected), "errors": [{
+            return {
+                "ok": False,
+                "revision": head,
+                "receipts": [],
+                "min_saved_tokens": min_saved_tokens,
+                "saved_tokens": saved,
+                "projected": dict(projected),
+                "errors": [
+                    {
                         "code": "insufficient_saving",
                         "message": (
                             f"batch saves {calibrated_saved} calibrated tokens, "
                             f"below required {min_saved_tokens}"
                         ),
-                    }]}
+                    }
+                ],
+            }
         payload = self._call_store(
-            "stage_commit", list(operations), expected_revision=expected_revision,
-            txn_id=txn_id, actor_origin=actor_origin,
+            "stage_commit",
+            list(operations),
+            expected_revision=expected_revision,
+            txn_id=txn_id,
+            actor_origin=actor_origin,
         )
         payload.setdefault("atomic", True)
         payload["projected"] = dict(projected)
         payload["saved_tokens"] = saved
         return payload
-
 
     def discard(self, *, txn_id: str) -> None:
         """Drop a staged transaction without committing."""
@@ -2376,8 +2412,11 @@ class CLMEngine(_EngineBase):
             return {"known": False, "reason": "operations_truncated"}
         if not history:
             return {"known": False, "reason": "no_request_observed"}
-        units = [candidate for candidate in self._offload_candidates(history, snapshot)
-                 if candidate.eligible]
+        units = [
+            candidate
+            for candidate in self._offload_candidates(history, snapshot)
+            if candidate.eligible
+        ]
         return {
             "known": True,
             "reason": None,
