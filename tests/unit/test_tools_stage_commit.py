@@ -91,3 +91,23 @@ def test_schema_advertises_optional_fast_commit_arguments():
     assert set(parameters["required"]) == {"operations", "expected_revision"}
     assert parameters["properties"]["commit"]["default"] is False
     assert parameters["properties"]["min_saved_tokens"]["minimum"] == 1
+
+
+def test_a_store_without_stage_commit_is_an_error_not_a_two_phase_fallback():
+    """``ToolService`` calls ``store.stage_commit``; a store lacking it raises RuntimeError.
+
+    That must surface as ``internal_error`` with no write, never as a silent stage+commit:
+    the fast path is an opt-in the caller asked for, so degrading it quietly would commit
+    work the caller never priced.
+    """
+
+    service = FakeService()
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("clm store does not implement stage_commit()")
+
+    service.stage_commit = boom
+    payload = load(make_handlers(service).stage(args(commit=True)))
+    assert payload["ok"] is False
+    assert payload["errors"][0]["code"] == "internal_error"
+    assert "stage" not in service.names() and "commit" not in service.names()
