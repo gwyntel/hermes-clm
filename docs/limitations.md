@@ -5,37 +5,35 @@ not enforceable, it is listed here rather than implied by the architecture.
 
 ## Current gates
 
-Measured locally on macOS/CPython 3.14 with `CLM_HERMES_CHECKOUT` set. `v0.2.0` is a
-GitHub release carrying wheel and sdist assets; no PyPI publication is claimed. The table
-records the last measured run rather than a promise about the current branch — re-run the
-commands to get today's totals, and never quote a number from here as a fresh measurement.
+Measured locally on macOS/CPython 3.14 with `CLM_HERMES_CHECKOUT` set, on
+`feat/model-ergonomics`. `v0.2.0` is a GitHub release carrying wheel and sdist assets; no
+PyPI publication is claimed. **This branch is not pushed, so no remote CI run covers it** —
+the rows below are local measurements, not CI results, and the branch adds tests the last
+remote run never executed. Re-run the commands to get today's totals; never quote a number
+from here as a fresh measurement.
 
 | Gate | Command | Result |
 |---|---|---|
-| Format | `ruff format --check .` | pass (129 files) |
+| Format | `ruff format --check .` | pass (148 files) |
 | Lint | `ruff check .` | pass |
-| Types | `mypy` | pass (19 modules) |
-| Build | `python -m build`, `twine check dist/*` | pass (sdist + wheel) |
-| Bandit | `bandit -q -r src -ll` | pass; 0 medium/high, 3 accepted Low (item 44) |
-| Tests | `pytest -o addopts='-ra --import-mode=importlib'` | 867 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; 836 passed, 34 skipped without it |
-| Coverage | `pytest --cov=hermes_clm` | 87.07% branches, floor 85% |
-| Security + fuzz | its own suite | all pass; mutation baseline green, 16/16 injected defects red |
-| Benchmarks | offline simulator, two runs and CPython 3.11/3.12/3.14 | byte-identical JSON; simulator only, no model calls |
+| Types | `mypy src` | pass (20 modules) |
+| Build | `python -m build`, `twine check dist/*`, `tests/packaging/verify_wheel.py dist` | pass (sdist + wheel) |
+| Bandit | `bandit -q -ll -r src benchmarks -x tests` | pass; 0 medium/high, 3 accepted Low (item 44) |
+| Tests | `pytest -m 'not slow'` | 1163 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; without it the real-discovery, prompt-section, dual-lane and lifecycle tests skip instead of running |
+| Coverage | `pytest --cov=hermes_clm` | 88.39% branches, floor 85% |
+| Security + fuzz | `pytest tests/security` | pass; mutation baseline green, 16/16 injected defects red |
+| Benchmarks | offline simulator | previously measured byte-identical on CPython 3.11/3.12/3.14; **not re-run for this branch** — the simulator is untouched by it |
 
 The three skips are expected and explicit: two media-blob probes do not apply to inline
-archives, and one tool-schema probe has no module-level JSON schema object. Without a Hermes
-checkout, 31 further real-discovery, prompt-section, dual-lane and lifecycle tests skip.
-
-The format/type/test rows were re-measured locally after the dual-enablement and `keep`
-work; no remote CI run covers those changes yet, so treat the row values as local until one
-does.
+archives, and one tool-schema probe has no module-level JSON schema object.
 
 Resolved during integration: the `commit()`-without-`stage()` test adaptation, the
 `model`→`agent` actor vocabulary, hashed-but-stable session IDs, `EngineConfig` mapping
 construction, mutation-fixture isolation, the missing `expect_refusal` import, the
 intermittent CAS-loser corruption error, the duplicate `clm_*` tool surface under dual
 enablement, and `keep` as a documented-but-unprojected reactivation. The CAS one is now
-covered by a non-`xfail` test.
+covered by a non-`xfail` test. `restore`/`keep` reactivation safety (items 58–59) and the
+`txn_id` payload rule (item 60) were resolved during the model-ergonomics change.
 
 ## Host and platform
 
@@ -222,10 +220,10 @@ covered by a non-`xfail` test.
     the wheel excludes `benchmarks/` and `tests/` on purpose. The installed CLI reports the
     missing harness and exits nonzero.
 43. **The coverage floor is 85%, not a target.** The current full-suite measurement under a
-    Hermes checkout is 87% branches over a green suite (867 passed, 3 skipped); the floor
-    stays where it is so an unrelated refactor cannot quietly delete coverage, and raising
-    it is a follow-up, not a claim of completeness. Coverage is measured in the test job;
-    the build job does not re-measure it.
+    Hermes checkout is 88.39% branches over a green suite (1163 passed, 3 skipped); the
+    floor stays where it is so an unrelated refactor cannot quietly delete coverage, and
+    raising it is a follow-up, not a claim of completeness. Coverage is measured in the
+    test job; the build job does not re-measure it.
 44. **The mutation harness is a separate CI gate.** It re-runs probe tests in subprocesses
     with a fixture implementation on `sys.path`; it has its own job so a broken harness
     cannot be mistaken for a broken suite. It passes locally (16/16 injected defects go
@@ -326,4 +324,31 @@ covered by a non-`xfail` test.
 57. **`include_stale` is a pagination-wide decision.** The store filters before it paginates,
     so flipping the flag mid-pagination skips or repeats rows; `clm_inspect` therefore warns
     in its schema and callers must restart without a cursor. Absent rows are omitted by
-    default because a page of archive residue is worse than a short page.
+    default because a page of archive residue is worse than a short page. The store's
+    `omitted_absent` is a session-wide total, identical on every page — it counts rows the
+    store hid from the whole walk, not rows missing from the page in hand.
+
+## Reactivation and transaction identity
+
+58. **A `restore` or `keep` must not create work the projector will refuse.** Reactivating a
+    span re-emits its bytes, and the projector re-checks them (`max_rewrite_bytes`,
+    protected rows). When the store accepted an operation the projector rejected, the commit
+    succeeded and *every later projection* was refused — context editing silently stopped for
+    the session until `clm_revert`. The store now refuses first: protected rows
+    (`protected_span`), reactivations over `max_rewrite_bytes` (`restore_too_large` /
+    `keep_too_large`), and a `restore` of an already-active span is inert (`already_active`)
+    exactly like `keep`. Both refusals leave no revision and no staged transaction.
+59. **A `restore` after a rewrite brings back the archived bytes, not the rewrite.** `drop`
+    and `offload` clear `rewrite_text`, so a later `restore` reinstates the original. This is
+    documented store behaviour and is unchanged, but prose offload makes it reachable on
+    assistant rows — an automatic overflow compaction can discard an agent's rewritten prose,
+    and restoring it returns the longer original. Use `rewrite` again if the short text is
+    still wanted.
+60. **A `txn_id` names one operation set, on every path.** `stage`, `stage_commit` and
+    `commit` all compare the stored payload signature and refuse a mismatch with
+    `txn_payload_mismatch`; reusing a committed id with different operations no longer
+    returns the old outcome while echoing the new operations as staged.
+61. **A failure after the write is durable is reported as a write error.** A post-commit
+    index rebuild failure surfaces as `internal_error` even though the revision committed;
+    retrying the same `txn_id` replays the stored outcome rather than applying twice
+    (at-most-once, idempotent retry).

@@ -48,8 +48,8 @@ __all__ = [
 #: bookkeeping and is never a span an edit can target.
 NOTICE_PREFIX = "[clm.notice"
 
-#: Hard ceiling for the row's text. The worst case a hostile store can produce —
-#: maximal revision/count integers and 32-char ``at``/``actor`` tokens — is 345
+#: Hard ceiling for the row's text. The worst case a real store can produce — maximal
+#: revision/count integers and 32-char ``at``/``actor`` tokens — measures 372
 #: characters, so 400 leaves headroom without ever truncating a row we wrote (a
 #: truncated row would fail recognition and could then be mistaken for content).
 NOTICE_MAX_CHARS = 400

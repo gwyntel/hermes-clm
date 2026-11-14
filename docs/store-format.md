@@ -363,12 +363,18 @@ returning the earlier outcome.
 `stage_commit(operations, expected_revision, txn_id, actor_origin)` is the same contract with the
 staging step folded in: it validates, writes the `staged` row and performs steps 2–4 above inside
 one `BEGIN IMMEDIATE`, so a caller never observes (or leaves behind) a staged-but-uncommitted
-transaction. It differs from `stage`+`commit` in exactly three ways, all refusals rather than
+transaction. It differs from `stage`+`commit` in exactly two ways, both refusals rather than
 behaviour changes: an existing `staged` row for `txn_id` raises `txn_already_staged` (two-phase
-`stage` would overwrite it), any failure rolls back the transaction row entirely, and a
-`committed` replay follows the same `txns.staged_sha256` signature comparison described above.
-Nothing else about CAS, validation order or audit events changes, and two-phase remains the only
-path for patches and auxiliary proposals.
+`stage` would instead return that stage result as a replay), and any failure rolls back the
+transaction row entirely. Nothing else about CAS, validation order or audit events changes, and
+two-phase remains the only path for patches and auxiliary proposals.
+
+One rule covers every path: a `txn_id` identifies exactly one operation set. `stage()`,
+`stage_commit()` and `commit()` all compare `txns.staged_sha256` to the payload they were handed
+and refuse a mismatch with `txn_payload_mismatch` — including the `committed` case, because
+returning a committed outcome (or echoing the new operations as `staged_operations`) while
+`commit()` would replay the original is how a caller comes to believe a batch it never staged is
+recorded.
 
 One `BEGIN IMMEDIATE` transaction covers, atomically: operation rows, `span_state` changes, pins and
 pin events, the revision row, the idempotency outcome (`txns.result_json`), the snapshot row, token
