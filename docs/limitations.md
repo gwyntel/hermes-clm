@@ -19,7 +19,7 @@ from here as a fresh measurement.
 | Types | `mypy src` | pass (20 modules) |
 | Build | `python -m build`, `twine check dist/*`, `tests/packaging/verify_wheel.py dist` | pass (sdist + wheel) |
 | Bandit | `bandit -q -ll -r src benchmarks -x tests` | pass; 0 medium/high, 3 accepted Low (item 44) |
-| Tests | `pytest -m 'not slow'` | 1163 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; without it the real-discovery, prompt-section, dual-lane and lifecycle tests skip instead of running |
+| Tests | `pytest -m 'not slow'` | 1164 passed, 3 skipped, 0 failed with `CLM_HERMES_CHECKOUT`; without it the real-discovery, prompt-section, dual-lane and lifecycle tests skip instead of running |
 | Coverage | `pytest --cov=hermes_clm` | 88.39% branches, floor 85% |
 | Security + fuzz | `pytest tests/security` | pass; mutation baseline green, 16/16 injected defects red |
 | Benchmarks | offline simulator | previously measured byte-identical on CPython 3.11/3.12/3.14; **not re-run for this branch** — the simulator is untouched by it |
@@ -220,7 +220,7 @@ covered by a non-`xfail` test. `restore`/`keep` reactivation safety (items 58–
     the wheel excludes `benchmarks/` and `tests/` on purpose. The installed CLI reports the
     missing harness and exits nonzero.
 43. **The coverage floor is 85%, not a target.** The current full-suite measurement under a
-    Hermes checkout is 88.39% branches over a green suite (1163 passed, 3 skipped); the
+    Hermes checkout is 88.39% branches over a green suite (1164 passed, 3 skipped); the
     floor stays where it is so an unrelated refactor cannot quietly delete coverage, and
     raising it is a follow-up, not a claim of completeness. Coverage is measured in the
     test job; the build job does not re-measure it.
