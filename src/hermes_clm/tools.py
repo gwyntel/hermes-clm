@@ -41,13 +41,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .models import MAX_REWRITE_BYTES
+from .models import MAX_REWRITE_BYTES, sha256_hex
 
 __all__ = [
     "AGENT_ORIGIN",
     "DEDICATED_KINDS",
+    "PATCH_KIND",
     "SPAN_ID_PATTERN",
     "STAGE_KINDS",
+    "STAGE_TOOL_KINDS",
     "TOOLSET",
     "ToolHandlers",
     "ToolLimits",
@@ -73,6 +75,11 @@ STATUS_RECEIPT_LIMIT = 3
 #: ``boundary`` have dedicated tools so their semantics are not blurred into a
 #: free-form batch; ``unpin`` is operator-only and never agent-reachable.
 STAGE_KINDS = frozenset({"keep", "drop", "rewrite", "offload", "restore"})
+#: ``patch`` is a *tool*-level kind: it is resolved into a whole-span ``rewrite``
+#: before anything reaches the store, so no persisted kind, schema or SQL change
+#: is needed and a stored operation stays replayable byte-for-byte.
+PATCH_KIND = "patch"
+STAGE_TOOL_KINDS = frozenset(STAGE_KINDS | {PATCH_KIND})
 DEDICATED_KINDS = {"pin": "clm_pin", "boundary": "clm_boundary"}
 
 #: Public span-ID format: no whitespace, no separators that could be read as a path.
@@ -373,7 +380,7 @@ def _txn_id(args: Mapping[str, Any], *, required: bool) -> str:
 
 
 def _normalise_operations(
-    raw: Any, limits: ToolLimits, *, allow_kinds: frozenset[str] = STAGE_KINDS
+    raw: Any, limits: ToolLimits, *, allow_kinds: frozenset[str] = STAGE_TOOL_KINDS
 ) -> list[dict[str, Any]]:
     """Validate a batch of edits into store-ready ``EditOperation`` payloads."""
 
@@ -393,7 +400,7 @@ def _normalise_operations(
         where = f"operations[{index}]"
         if not isinstance(item, Mapping):
             raise _Invalid("invalid_field", f"{where} must be an object")
-        _check_keys(item, allowed=("kind", "span_ids", "replacement"))
+        _check_keys(item, allowed=("kind", "span_ids", "replacement", "old", "new"))
         kind = item.get("kind")
         if not isinstance(kind, str):
             raise _Invalid("invalid_field", f"{where}.kind must be a string")
@@ -422,6 +429,34 @@ def _normalise_operations(
 
         operation: dict[str, Any] = {"kind": kind, "span_ids": ids}
         replacement = item.get("replacement")
+        if kind == PATCH_KIND:
+            if len(ids) != 1:
+                raise _Invalid(
+                    "invalid_field",
+                    f"{where} patches exactly one span; got {len(ids)}",
+                )
+            if replacement is not None:
+                raise _Invalid(
+                    "invalid_field",
+                    f"{where}.replacement is not valid for kind 'patch'; use old/new",
+                )
+            for key in ("old", "new"):
+                if key not in item:
+                    raise _Invalid("missing_field", f"{where}.{key} is required for patch")
+            # ``old`` must be findable, so an empty or whitespace-only needle is
+            # refused; ``new`` may be empty, which deletes the match.
+            operation["old"] = _require_text(item, "old", max_bytes=limits.max_rewrite_bytes)
+            operation["new"] = _require_text(
+                item, "new", max_bytes=limits.max_rewrite_bytes, allow_empty=True
+            )
+            operations.append(operation)
+            continue
+        for key in ("old", "new"):
+            if key in item:
+                raise _Invalid(
+                    "invalid_field",
+                    f"{where}.{key} is only valid for kind 'patch'",
+                )
         if kind == "rewrite":
             if replacement is None:
                 raise _Invalid("missing_field", f"{where}.replacement is required for rewrite")
@@ -459,6 +494,125 @@ def _result_mapping(result: Any) -> dict[str, Any]:
             "service_error",
             f"service returned an unsupported result type: {type(result).__name__}",
         ) from exc
+
+
+def _literal_patch(text: str, old: str, new: str, *, where: str) -> str:
+    """Replace exactly one literal occurrence; never a regex, never a guess."""
+    if old == new:
+        raise _Invalid("patch_noop", f"{where} would not change the span")
+    occurrences = text.count(old)
+    if occurrences == 0:
+        raise _Invalid(
+            "patch_not_found",
+            f"{where}.old does not occur in the current span text",
+            hint="inspect/retrieve again; never guess at changed text",
+        )
+    if occurrences > 1:
+        raise _Invalid(
+            "patch_ambiguous",
+            f"{where}.old occurs {occurrences} times; include more surrounding text",
+        )
+    return text.replace(old, new, 1)
+
+
+def _patchable_text(detail: Mapping[str, Any], span_id: str) -> str:
+    """The exact text a patch may edit: never a projection, notice or footer."""
+    state = str(detail.get("state") or "active")
+    if state != "active":
+        raise _Invalid("span_not_active", f"span {span_id} is {state}; restore it first")
+    if bool(detail.get("protected")):
+        raise _Invalid("protected_span", f"span {span_id} is protected")
+    if bool(detail.get("pinned")):
+        raise _Invalid("span_pinned", f"span {span_id} is pinned; ask the operator")
+    rewrite = detail.get("rewrite_text")
+    if isinstance(rewrite, str):
+        return rewrite
+    message = detail.get("message")
+    content = message.get("content") if isinstance(message, Mapping) else None
+    if not isinstance(content, str) or not content:
+        raise _Invalid(
+            "patch_unsupported_content",
+            f"span {span_id} is not nonempty plain text; refusing to flatten it",
+        )
+    return content
+
+
+def _resolve_patches(
+    service: Any,
+    operations: Sequence[Mapping[str, Any]],
+    *,
+    limits: ToolLimits,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve only against head; every refusal precedes any store write."""
+    resolved: list[dict[str, Any]] = []
+    receipts: list[dict[str, Any]] = []
+    for index, operation in enumerate(operations):
+        if operation.get("kind") != PATCH_KIND:
+            resolved.append(dict(operation))
+            continue
+        span_id = operation["span_ids"][0]
+        detail = _result_mapping(service.retrieve(span_id))
+        if detail.get("ok") is False:
+            errors = detail.get("errors")
+            error = errors[0] if isinstance(errors, list) and errors else {}
+            raise _Invalid(
+                str(error.get("code") or "unknown_span"),
+                str(error.get("message") or "cannot retrieve span for patch"),
+            )
+        replacement = _literal_patch(
+            _patchable_text(detail, span_id),
+            operation["old"],
+            operation["new"],
+            where=f"operations[{index}]",
+        )
+        size = len(replacement.encode("utf-8"))
+        if size > limits.max_rewrite_bytes:
+            raise _Invalid(
+                "limit_exceeded",
+                f"operations[{index}] expands to {size} bytes; limit is {limits.max_rewrite_bytes}",
+            )
+        resolved.append(
+            {
+                "kind": "rewrite",
+                "span_ids": [span_id],
+                "replacement": replacement,
+                "provenance": {"via": PATCH_KIND},
+            }
+        )
+        receipts.append(
+            {
+                "span_id": span_id,
+                "kind": PATCH_KIND,
+                "bytes": size,
+                "sha256": sha256_hex(replacement),
+                "old_bytes": len(operation["old"].encode("utf-8")),
+                "new_bytes": len(operation["new"].encode("utf-8")),
+            }
+        )
+    return resolved, receipts
+
+
+def _withhold_patch_text(staged: Sequence[Any], receipts: Sequence[Mapping[str, Any]]) -> list[Any]:
+    """Echo a patch as a digest receipt instead of the whole expanded span."""
+    by_span = {str(item["span_id"]): item for item in receipts}
+    output: list[Any] = []
+    for entry in staged:
+        raw_ids = entry.get("span_ids") if isinstance(entry, Mapping) else None
+        ids = list(raw_ids) if isinstance(raw_ids, (list, tuple)) else None
+        receipt = by_span.get(str(ids[0])) if ids is not None and len(ids) == 1 else None
+        if receipt is not None and entry.get("kind") == "rewrite":
+            output.append(
+                {
+                    "kind": "rewrite",
+                    "span_ids": ids,
+                    "via": PATCH_KIND,
+                    "bytes": receipt["bytes"],
+                    "sha256": receipt["sha256"],
+                }
+            )
+        else:
+            output.append(entry)
+    return output
 
 
 def _first_message(payload: Mapping[str, Any]) -> str | None:
@@ -754,10 +908,20 @@ class ToolHandlers:
                 hint="set commit=true to apply the batch in one write",
             )
         operations = _normalise_operations(args["operations"], self.limits)
+        if commit_now and any(op.get("kind") == PATCH_KIND for op in operations):
+            raise _Invalid(
+                "invalid_field",
+                "patch currently requires explicit stage then commit so txn replay "
+                "cannot re-resolve changed text",
+                hint="stage the patch, then call clm_commit with the same txn_id",
+            )
         expected_revision = _require_int(args, "expected_revision")
         txn_id = _txn_id(args, required=False)
         service = self._service(session_id)
         name = "stage_commit" if commit_now else "stage"
+        patches: list[dict[str, Any]] = []
+        if not commit_now:
+            operations, patches = _resolve_patches(service, operations, limits=self.limits)
         extra: dict[str, Any] = {}
         if commit_now:
             extra["min_saved_tokens"] = min_saved_tokens
@@ -782,6 +946,11 @@ class ToolHandlers:
                 payload.setdefault(
                     "note", "staged only; call clm_commit with expected_revision to apply"
                 )
+                if patches:
+                    payload["patched"] = patches
+                    staged_ops = payload.get("staged_operations")
+                    if isinstance(staged_ops, list):
+                        payload["staged_operations"] = _withhold_patch_text(staged_ops, patches)
                 projected = _preview(service, operations)
                 if projected is not None:
                     payload["projected"] = projected
@@ -991,15 +1160,28 @@ _OPERATIONS_SCHEMA = {
     "minItems": 1,
     "description": (
         "Edits to stage atomically. Each entry is "
-        "{kind: keep|drop|rewrite|offload|restore, span_ids: [span ID], replacement?: string}. "
-        "replacement is required for rewrite and forbidden otherwise."
+        "{kind: keep|drop|rewrite|offload|restore|patch, span_ids: [span ID], "
+        "replacement?: string, old?: string, new?: string}. "
+        "replacement is required for rewrite and forbidden otherwise. "
+        "patch targets exactly one span, requires a literal unique old substring "
+        "and a new substring that may be empty; it is resolved into a rewrite "
+        "before anything is written."
     ),
     "items": {
         "type": "object",
         "properties": {
-            "kind": {"type": "string", "enum": sorted(STAGE_KINDS)},
+            "kind": {"type": "string", "enum": sorted(STAGE_TOOL_KINDS)},
             "span_ids": _SPAN_IDS_SCHEMA,
             "replacement": {"type": "string"},
+            "old": {
+                "type": "string",
+                "minLength": 1,
+                "description": "patch only: literal text that must occur exactly once.",
+            },
+            "new": {
+                "type": "string",
+                "description": "patch only: literal replacement; may be empty to delete the match.",
+            },
         },
         "required": ["kind", "span_ids"],
         "additionalProperties": False,

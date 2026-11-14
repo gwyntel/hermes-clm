@@ -159,6 +159,16 @@ class ProposalTests(kit.StoreTestCase):
         with self.assertRaises(StaleProposalError):
             self._proposal(base=99)
 
+    def test_proposal_cannot_persist_a_tool_level_patch(self) -> None:
+        """``patch`` is resolved by the tool layer; the store never sees it."""
+        with self.assertRaises(ValidationError) as ctx:
+            self.store.create_proposal(
+                [EditOperation.from_mapping({"kind": "patch", "span_ids": [self.ids["u-a2"]]})],
+                base_revision=1,
+            )
+        self.assertEqual(ctx.exception.code, "invalid_kind")
+        self.assertEqual(self.store.snapshot().revision, 1)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

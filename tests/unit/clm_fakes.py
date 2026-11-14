@@ -67,16 +67,33 @@ class FakeService:
                 return args
         raise AssertionError(f"no call to {name}; calls={self.names()}")
 
-    def add_span(self, span_id: str, content: str, *, protected: bool = False) -> None:
-        self.spans[span_id] = {
+    def add_span(
+        self,
+        span_id: str,
+        content: Any,
+        *,
+        protected: bool = False,
+        role: str = "tool",
+        state: str = "active",
+        pinned: bool = False,
+        rewrite_text: str | None = None,
+        present: bool = True,
+    ) -> None:
+        span = {
             "ok": True,
             "span_id": span_id,
-            "message": {"role": "tool", "content": content},
-            "role": "tool",
+            "message": {"role": role, "content": content},
+            "role": role,
             "origin": "host",
+            "state": state,
             "protected": protected,
+            "pinned": pinned,
+            "present": present,
             "content_sha256": "0" * 64,
         }
+        if rewrite_text is not None:
+            span["rewrite_text"] = rewrite_text
+        self.spans[span_id] = span
 
     # -- service surface --------------------------------------------------- #
 
@@ -148,6 +165,8 @@ class FakeService:
             "inert": 0,
             "errors": [],
             "receipts": [],
+            # Mirrors the real service: the staged payload is echoed back.
+            "staged_operations": [dict(op) for op in operations],
         }
 
     def stage_commit(
