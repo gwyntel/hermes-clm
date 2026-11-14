@@ -39,7 +39,7 @@ from .auxiliary import (
 from .budget import TokenCalibration, token_vocabulary
 from .errors import CLMError
 from .models import MAX_REWRITE_BYTES
-from .projection import ProjectionResult, project
+from .projection import ProjectionResult, offload_stub, project
 from .tools import ToolHandlers, ToolLimits, build_tool_specs
 
 #: Fallback logger: an aborted compaction must leave a trace even when the host
@@ -55,6 +55,13 @@ _PROPOSAL_OPERATION_FIELDS = ("kind", "span_ids", "replacement")
 
 #: How many recent projection/usage receipts the engine keeps in memory for status.
 RECEIPT_LIMIT = 20
+
+#: Automatic prose offload bounds. Settled assistant prose is the second-largest
+#: reclaimable class after tool output; these keep it bounded, reversible and
+#: worth the transaction.
+PROSE_OFFLOAD_KEEP_RECENT = 2
+PROSE_OFFLOAD_MAX_SPANS = 24
+PROSE_OFFLOAD_MIN_SAVING_TOKENS = 64
 
 #: Default fraction of the projection a manual ``/compact`` tries to shed when the
 #: window is not under pressure. Deterministic, archive-backed, and capped by the
@@ -2189,6 +2196,19 @@ class CLMEngine(_EngineBase):
             head_hash=str(getattr(snapshot, "head_hash", "") or ""),
         )
 
+    def _live_tail_start(self, rows: Sequence[Mapping[str, Any]]) -> int:
+        """No automatic prose edit may touch the host-owned live tail."""
+        from .identity import role_of, tool_call_ids
+
+        start = max(0, len(rows) - PROSE_OFFLOAD_KEEP_RECENT)
+        newest_group = None
+        for position, row in enumerate(rows):
+            if role_of(row) == "assistant" and tool_call_ids(row):
+                newest_group = position
+        if newest_group is not None:
+            start = min(start, newest_group)
+        return start
+
     def _offload_candidates(
         self, messages: Sequence[Mapping[str, Any]], snapshot: Any
     ) -> List[_budget.OffloadCandidate]:
@@ -2206,9 +2226,12 @@ class CLMEngine(_EngineBase):
         """
 
         from .identity import (
+            content_sha256,
             is_editable_content,
             is_protected_message,
             role_of,
+            tool_call_id_of,
+            tool_call_ids,
             tool_groups,
         )
 
@@ -2298,6 +2321,55 @@ class CLMEngine(_EngineBase):
                     ),
                     protected=protected or clipped,
                     pinned=pinned,
+                )
+            )
+
+        # Settled assistant prose. Groups keep their old upper-bound price; prose
+        # is priced net (row minus stub) because the stub is what replaces it.
+        tail_start = self._live_tail_start(rows)
+        digests: Dict[str, int] = {}
+        for span in by_uid.values():
+            digest = str(getattr(span, "content_sha256", "") or "")
+            if digest:
+                digests[digest] = digests.get(digest, 0) + 1
+        prose_count = 0
+        for position, row in enumerate(rows):
+            if position >= tail_start or prose_count >= PROSE_OFFLOAD_MAX_SPANS:
+                break
+            if role_of(row) != "assistant" or tool_call_ids(row) or tool_call_id_of(row):
+                continue
+            uid = row.get("message_uid") if isinstance(row, Mapping) else None
+            if not isinstance(uid, str) or not uid:
+                continue
+            span = by_uid.get(uid)
+            if span is None:
+                continue
+            span_id = str(getattr(span, "span_id", None) or uid)
+            if uid in pin_ids or span_id in pin_ids or span_id in settled:
+                continue
+            if bool(getattr(span, "protected", False)) or _span_state(span) != "active":
+                continue
+            content = (getattr(span, "message", {}) or {}).get("content")
+            if not isinstance(content, str) or not is_editable_content(content):
+                continue
+            digest = str(getattr(span, "content_sha256", "") or "")
+            if digest and digests.get(digest, 0) > 1:
+                continue  # the projector must not hit an ambiguous text identity
+            if len(content.encode("utf-8")) > int(self.config.max_rewrite_bytes):
+                continue  # the current keep/restore ceiling must stay recoverable
+            stub = offload_stub(span_id, digest or content_sha256(content))
+            saving = _budget.estimate_message_tokens(row) - _budget.estimate_text_tokens(stub)
+            if saving < PROSE_OFFLOAD_MIN_SAVING_TOKENS:
+                continue
+            prose_count += 1
+            candidates.append(
+                _budget.OffloadCandidate(
+                    order=position,
+                    group_id="span:" + span_id,
+                    uids=(uid,),
+                    span_ids=(span_id,),
+                    tokens=self.calibration.adjust(saving),
+                    raw_tokens=saving,
                 )
             )
         return candidates

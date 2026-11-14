@@ -577,3 +577,232 @@ def test_stage_preview_after_compact_needs_no_prior_turn():
 
     assert priced["available"] is True, priced
     assert priced["before"] == engine.budget_state(compacted)["raw_estimated_tokens"]
+
+
+# ------------------------------------------------ settled assistant prose rows
+
+
+def prose_history():
+    """Two long settled assistant prose rows, no tool groups at all."""
+    return [
+        message("user", "summarise the incident", "u1"),
+        message("assistant", "PROSE ONE DETAIL\n" * 200, "a1"),
+        message("user", "and the follow-up", "u2"),
+        message("assistant", "PROSE TWO DETAIL\n" * 200, "a2"),
+    ]
+
+
+def prose_candidates(engine, factory, history):
+    return engine._offload_candidates(history, factory.store.snapshot())
+
+
+def test_manual_compaction_offloads_the_oldest_settled_assistant_prose():
+    history = prose_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    result = engine.compress([dict(row) for row in history], force=True)
+
+    assert "[clm.offloaded" in result[1]["content"], result[1]["content"][:80]
+    assert result[3]["content"].startswith("PROSE TWO DETAIL")
+    # Host-owned rows survive byte-identically.
+    assert result[0]["content"] == "summarise the incident"
+    assert result[2]["content"] == "and the follow-up"
+    assert engine.compression_count == 1
+    assert len(factory.store.commits) == 1
+    staged_ops, expected_revision, txn_id, actor_origin = factory.store.staged[0]
+    assert expected_revision == 1
+    assert txn_id.startswith("manual-")
+    assert actor_origin == "operator"
+    assert [op.kind for op in staged_ops] == ["offload"]
+    assert staged_ops[0].span_ids == ("a1",)
+
+
+def test_overflow_offloads_assistant_prose_under_a_system_actor():
+    history = prose_history()
+    engine, factory, before = _overflow_engine(snapshot_for(history, [], revision=1), history)
+
+    result = engine.compress(history, bypass_cooldown=True)
+
+    assert estimate_messages_tokens(result) < before
+    assert "[clm.offloaded" in result[1]["content"]
+    staged_ops, _, txn_id, actor_origin = factory.store.staged[0]
+    assert actor_origin == "system"
+    assert txn_id.startswith("overflow-")
+    assert [op.kind for op in staged_ops] == ["offload"]
+
+
+def prose_row(rows, uid):
+    for row in rows:
+        if row.get("message_uid") == uid:
+            return row
+    raise AssertionError(f"no row with uid {uid}")
+
+
+def test_offloading_prose_is_recoverable_and_never_rewrites_the_archive():
+    history = prose_history()
+    offload = OperationSpec(kind="offload", span_ids=("a1",))
+    engine, factory = build_engine(snapshot_for(history, [offload], revision=2))
+
+    request = [dict(row) for row in history]
+    compacted = engine.select_context(request, conversation_messages=history)
+    assert compacted is not None
+    stubbed = prose_row(compacted, "a1")["content"]
+    assert "[clm.offloaded" in stubbed
+    # The stub names the span and its content digest, so the row stays addressable.
+    assert "span=a1" in stubbed
+
+    # A later restore reproduces the original prose exactly: the projection is the
+    # stored transcript again, and the archive was never rewritten.
+    restore = OperationSpec(kind="restore", span_ids=("a1",))
+    restore_engine, _ = build_engine(snapshot_for(history, [offload, restore], revision=3))
+    restored = restore_engine.select_context(
+        [dict(row) for row in history], conversation_messages=history
+    )
+    rows = restored if restored is not None else [dict(row) for row in history]
+    assert prose_row(rows, "a1")["content"] == history[1]["content"]
+    assert history[1]["content"].startswith("PROSE ONE DETAIL")
+
+
+def test_a_settled_prose_span_is_never_re_planned():
+    history = prose_history()
+    for kind in ("offload", "drop"):
+        engine, factory = build_engine(
+            snapshot_for(history, [OperationSpec(kind=kind, span_ids=("a1",))], revision=2)
+        )
+        assert prose_candidates(engine, factory, history) == [], kind
+
+
+def test_the_last_two_rows_are_never_taken_without_a_newer_tool_group():
+    history = prose_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    candidates = prose_candidates(engine, factory, history)
+
+    assert [candidate.uids for candidate in candidates] == [("a1",)]
+
+
+def test_a_newer_assistant_tool_group_anchors_the_protected_tail():
+    history = [
+        message("user", "old question", "u1"),
+        message("assistant", "SETTLED PROSE\n" * 200, "a1"),
+        message("user", "now look something up", "u2"),
+        assistant_call("a3", "call_2"),
+        tool_result("t2", "call_2", "LOOKUP RESULT"),
+        message("assistant", "the lookup said so", "a4"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    candidates = prose_candidates(engine, factory, history)
+
+    prose = [candidate for candidate in candidates if candidate.group_id.startswith("span:")]
+    taken = {uid for candidate in prose for uid in candidate.uids}
+    assert "a1" in taken, "prose before the anchor stays eligible"
+    assert not taken & {"a3", "t2", "a4"}, "the newest tool group and its tail are protected"
+
+
+def test_prose_candidates_skip_every_guarded_shape():
+    cases = {
+        "pinned": dict(pins=("a1",)),
+        "protected": dict(protected=("a1",)),
+    }
+    history = prose_history()
+    for label, snapshot_kwargs in cases.items():
+        engine, factory = build_engine(snapshot_for(history, [], revision=1, **snapshot_kwargs))
+        candidates = prose_candidates(engine, factory, history)
+        assert candidates == [], label
+
+    # Multimodal content is not editable text, so it is never flattened.
+    multimodal = prose_history()
+    multimodal[1]["content"] = [{"type": "text", "text": "PROSE\n" * 400}]
+    engine, factory = build_engine(snapshot_for(multimodal, [], revision=1))
+    assert prose_candidates(engine, factory, multimodal) == []
+
+    # Two spans with identical text would make the projector's match ambiguous.
+    duplicate = prose_history()
+    duplicate[3]["content"] = duplicate[1]["content"]
+    engine, factory = build_engine(snapshot_for(duplicate, [], revision=1))
+    assert prose_candidates(engine, factory, duplicate) == []
+
+
+def test_prose_over_max_rewrite_bytes_is_skipped():
+    history = prose_history()
+    engine, factory = build_engine(snapshot_for(history, [], revision=1), max_rewrite_bytes=64)
+    assert prose_candidates(engine, factory, history) == []
+
+
+def test_a_prose_row_smaller_than_its_stub_is_not_offloaded():
+    history = [
+        message("user", "short question", "u1"),
+        message("assistant", "yes", "a1"),
+        message("user", "and again", "u2"),
+        message("assistant", "still yes", "a2"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    assert prose_candidates(engine, factory, history) == []
+    result = engine.compress(history, force=True)
+    assert result == history
+    assert engine._last_compress_aborted is True
+    assert "manual_no_offloadable_groups" in (engine._last_summary_error or "")
+
+
+def test_prose_only_overflow_is_solvable_and_prose_without_candidates_is_honest():
+    history = prose_history()
+    engine, factory, before = _overflow_engine(snapshot_for(history, [], revision=1), history)
+    result = engine.compress(history, bypass_cooldown=True)
+    assert estimate_messages_tokens(result) < before
+    assert "manual_no_offloadable_groups" not in (engine._last_summary_error or "")
+
+    tiny = [
+        message("user", "short", "u1"),
+        message("assistant", "ok", "a1"),
+        message("user", "short again", "u2"),
+        message("assistant", "ok again", "a2"),
+    ]
+    engine2, factory2, _ = _overflow_engine(snapshot_for(tiny, [], revision=1), tiny)
+    refused = engine2.compress(tiny, bypass_cooldown=True)
+    assert refused == tiny
+    # Overflow reports the shortfall in its receipt rather than inventing a plan.
+    overflow_receipt = [
+        r for r in engine2.get_status()["receipts"] if r.get("stage") == "overflow"
+    ][-1]
+    assert overflow_receipt["offloaded"] == []
+    assert overflow_receipt["needed"] > 0
+    assert factory2.store.commits == []
+
+
+def test_the_oldest_tool_group_still_wins_over_newer_prose():
+    history = [
+        message("user", "list everything", "u1"),
+        assistant_call("a1", "call_1"),
+        tool_result("t1", "call_1", "HUGE OUTPUT LINE\n" * 400),
+        message("assistant", "SETTLED PROSE LINE\n" * 200, "a2"),
+        message("user", "the tests", "u2"),
+        assistant_call("a3", "call_2"),
+        tool_result("t2", "call_2", "NEWEST OUTPUT"),
+    ]
+    engine, factory = build_engine(snapshot_for(history, [], revision=1))
+
+    candidates = prose_candidates(engine, factory, history)
+
+    # The tool group comes first in row order and covers the saving on its own.
+    assert candidates[0].group_id == "group:a1"
+    result = engine.compress([dict(row) for row in history], force=True)
+    receipt = [r for r in engine.get_status()["receipts"] if r.get("stage") == "manual"][-1]
+    assert receipt["offloaded"] == ["group:a1"]
+    assert "SETTLED PROSE LINE" in result[3]["content"]
+
+
+def test_projection_at_one_revision_is_byte_identical():
+    history = prose_history()
+    engine, factory = build_engine(
+        snapshot_for(history, [OperationSpec(kind="offload", span_ids=("a1",))], revision=2)
+    )
+
+    first = engine.select_context(assemble(history), conversation_messages=history)
+    second = engine.select_context(assemble(history), conversation_messages=history)
+
+    assert first is not None
+    assert first == second
+    assert first != assemble(history), "the committed offload is applied"
+    assert history[1]["content"].startswith("PROSE ONE DETAIL")
