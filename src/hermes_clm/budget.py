@@ -236,6 +236,13 @@ class PressureState:
         return max(0, self.context_length - self.reserve_tokens)
 
     @property
+    def headroom_tokens(self) -> Optional[int]:
+        """Free calibrated tokens before reserve; None means unknown, never full."""
+        if self.context_length <= 0:
+            return None
+        return max(0, self.usable_limit - self.estimated_tokens)
+
+    @property
     def ratio(self) -> float:
         """Projected usage as a fraction of the raw context length."""
         if self.context_length <= 0:
@@ -272,6 +279,7 @@ class PressureState:
             "context_length": self.context_length,
             "reserve_tokens": self.reserve_tokens,
             "usable_limit": self.usable_limit,
+            "headroom_tokens": self.headroom_tokens,
             "threshold_percent": self.threshold_percent,
             "ratio": round(self.ratio, 6),
             "tier": self.tier,
@@ -319,6 +327,14 @@ class OffloadCandidate:
     pinned: bool = False
     #: Store-facing span ids for this group (same order as ``uids``).
     span_ids: tuple[str, ...] = ()
+    raw_tokens: int = 0
+
+    @property
+    def conservative_tokens(self) -> int:
+        """A savings estimate that does not exceed either token vocabulary."""
+        if self.raw_tokens <= 0:
+            return max(0, int(self.tokens))
+        return max(0, min(int(self.tokens), int(self.raw_tokens)))
 
     @property
     def eligible(self) -> bool:

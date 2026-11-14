@@ -244,3 +244,30 @@ def test_budget_has_one_calibrated_spelling_and_a_scope():
     assert "calibrated_tokens" not in payload
     assert state.calibrated_tokens == 2_000
 
+
+def test_headroom_uses_calibrated_estimate_and_reserve():
+    state = pressure_state(
+        estimated_tokens=3_000,
+        context_length=10_000,
+        calibration=TokenCalibration(ratio=2.0),
+    )
+    assert state.estimated_tokens == 6_000
+    assert state.headroom_tokens == 10_000 - 2_048 - 6_000
+    assert state.to_dict()["headroom_tokens"] == state.headroom_tokens
+
+
+def test_headroom_distinguishes_unknown_from_measured_zero():
+    unknown = pressure_state(estimated_tokens=999_999, context_length=0)
+    full = pressure_state(estimated_tokens=9_000, context_length=10_000)
+    assert unknown.headroom_tokens is None
+    assert unknown.fits is True
+    assert full.headroom_tokens == 0
+    assert full.overflow_tokens == 1_048
+
+
+def test_conservative_tokens_never_exceeds_either_estimate():
+    above = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=900, raw_tokens=600)
+    below = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=600, raw_tokens=900)
+    unmeasured = OffloadCandidate(order=0, group_id="g", uids=("a",), tokens=600)
+    assert above.conservative_tokens == below.conservative_tokens == unmeasured.conservative_tokens == 600
+

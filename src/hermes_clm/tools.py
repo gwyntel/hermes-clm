@@ -535,6 +535,24 @@ def _status_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         summary["context_length"] = context_length
     if isinstance(tokens, Mapping):
         summary["tokens"] = dict(tokens)
+    headroom = budget.get("headroom_tokens")
+    if "headroom_tokens" in budget:
+        summary["headroom_tokens"] = (
+            headroom if isinstance(headroom, int) and not isinstance(headroom, bool) else None
+        )
+    overflow = budget.get("overflow_tokens", payload.get("overflow_tokens"))
+    if isinstance(overflow, int) and not isinstance(overflow, bool):
+        summary["overflow_tokens"] = overflow
+    compactable = payload.get("compactable")
+    if isinstance(compactable, Mapping):
+        known = compactable.get("known") is True
+        summary["compactable_tokens"] = compactable.get("tokens") if known else None
+        units = compactable.get("units")
+        summary["compactable_units"] = (
+            units if known and isinstance(units, int) and not isinstance(units, bool) else None
+        )
+        if not known:
+            summary["compactable_unknown"] = compactable.get("reason") or "unavailable"
     counts = payload.get("counts")
     if isinstance(counts, Mapping):
         summary["counts"] = dict(counts)

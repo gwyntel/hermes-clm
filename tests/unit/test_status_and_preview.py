@@ -256,6 +256,28 @@ def test_aux_metrics_ride_only_on_the_full_answer():
     assert load(handlers.status({"detail": "full"}))["aux"]["task"] == "compression"
 
 
+def test_summary_reports_headroom_and_compactable_savings():
+    service = StatusService(
+        budget={"tier": "high", "context_length": 128_000,
+                "headroom_tokens": 12_000, "overflow_tokens": 0},
+        compactable={"known": True, "units": 3, "tokens": 28_400,
+                     "basis": "request", "reason": None},
+    )
+    payload = load(handlers_for(service).status({}))
+    assert payload["headroom_tokens"] == 12_000
+    assert payload["compactable_tokens"] == 28_400
+    assert payload["compactable_units"] == 3
+    assert "compactable_unknown" not in payload
+
+
+def test_summary_never_turns_unknown_compactable_into_zero():
+    payload = load(handlers_for(StatusService(
+        compactable={"known": False, "reason": "no_request_observed"}
+    )).status({}))
+    assert payload["compactable_tokens"] is None
+    assert payload["compactable_unknown"] == "no_request_observed"
+
+
 def test_summary_tolerates_a_minimal_service_payload():
     service = FakeService(revision=1)
     service.status_result = {"ok": True, "revision": 1}
