@@ -17,6 +17,16 @@ The fixture and harness reference is [`benchmarks/README.md`](../benchmarks/READ
 
 ## Evidence class
 
+Four evidence classes exist in this repository, and they are not interchangeable. Quote the
+class whenever you quote a result.
+
+| Class | What runs | What it can prove | What it cannot prove |
+|---|---|---|---|
+| **offline-simulation** | The harness in `benchmarks/`: strategies A/B/C/D over scripted fixtures. No Hermes, no engine, no provider, no model. | Metric accounting, policy differentiation, determinism of the simulator. | Anything about the shipped engine's behaviour, and nothing about task accuracy. |
+| **real-engine-offline** | The actual `CLMEngine`, SQLite store, tool dispatch and projector driven by a scripted caller (`tests/integration/`). | That the shipped code paths project, commit, refuse and report as specified, with no provider involved. | Model behaviour, token-accuracy, or any efficacy claim — the caller is a script. |
+| **live-smoke** | An approved, model-driven run against a real profile. | That a specific model, on a specific fixture, exercised the tools without breaking a contract. | Generalisation to other models or tasks, and never a reproduced paper benchmark. |
+| **live-A/B** | A future controlled comparison. Requires separate approval, raw usage capture, and an explicit model/token/cost budget. | A comparative claim, once it exists and is reported with its budget. | Nothing yet — no such run has been performed or approved. |
+
 **offline-simulation.** The harness does not execute Hermes, the engine, a provider or a
 model. Strategy A is a model of a default threshold summariser; B is a model of
 microcompaction; C and D are reference CLM policies. None is the shipped engine.
@@ -125,7 +135,11 @@ Markdown report.
 
 ## Live runs
 
-There is no live mode. A live benchmark needs separate written approval listing:
+The harness has no live mode: `python -m benchmarks` cannot call a provider, by design. A
+**live-smoke** run is a separate, approval-gated activity against a real profile (see
+`docs/limitations.md` and the deployment notes); it exercises tool contracts and is reported
+as smoke, never as a benchmark result. A **live-A/B** benchmark needs separate written
+approval listing:
 
 - the model and provider alias, with alias classification;
 - the exact number of calls and a token ceiling;

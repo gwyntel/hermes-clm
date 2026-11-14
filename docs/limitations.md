@@ -5,9 +5,10 @@ not enforceable, it is listed here rather than implied by the architecture.
 
 ## Current gates
 
-Measured locally on macOS/CPython 3.14 from `feat/integration`, with matching remote CI on
-GitHub (run 43091861486). Only a GitHub prerelease exists; no PyPI or production-Hermes
-deployment has occurred.
+Measured locally on macOS/CPython 3.14 with `CLM_HERMES_CHECKOUT` set. `v0.2.0` is a
+GitHub release carrying wheel and sdist assets; no PyPI publication is claimed. The table
+records the last measured run rather than a promise about the current branch — re-run the
+commands to get today's totals, and never quote a number from here as a fresh measurement.
 
 | Gate | Command | Result |
 |---|---|---|
@@ -211,9 +212,11 @@ covered by a non-`xfail` test.
     proof.
 41. **Release Please owns version bumps.** Hand-editing `pyproject.toml` or `_version.py`
     without the release PR breaks the single-source contract; the packaging test fails if
-    they disagree. The manifest is seeded at `0.0.0` with `initial-version: 0.1.0`, so the
-    first release PR should produce `v0.1.0`; later releases follow Conventional Commits.
-    No tag or release exists yet.
+    they disagree. Conventional Commits drive the next version, and `v0.1.0`/`v0.2.0`
+    both shipped that way.
+    No PyPI publication is claimed. `v0.2.0` is a GitHub release whose assets are the
+    wheel and sdist; the publish workflow stays disabled until the `pypi` environment and
+    trusted publisher exist, and release-please owns the version bump either way.
 42. **The benchmark harness is not in the wheel.** `hermes-clm bench` and
     `python -m benchmarks` require a source checkout (a git clone or an unpacked sdist);
     the wheel excludes `benchmarks/` and `tests/` on purpose. The installed CLI reports the
@@ -276,7 +279,7 @@ covered by a non-`xfail` test.
     for tools that are not registered. There is no supported host hook to observe a later
     engine load from the plugin lane, so the plugin cannot fall back after the fact. This
     is the intended trade: instructions without tools are inert noise, whereas tools bound
-    to a store-less engine report failures on every call. Check `hermes-clm status` (or the
+    to a store-less engine report failures on every call. Check `/clm status` (or the
     host's engine list) after changing provider or engine configuration. The gate reads the
     same profile file the host reads (`context.engine`, resolved through `HERMES_HOME`); a
     deployment that points plugin loading at a different home than the agent would gate on
