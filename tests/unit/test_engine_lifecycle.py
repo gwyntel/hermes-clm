@@ -27,6 +27,18 @@ from hermes_clm.engine import (
 )
 
 
+def test_full_status_keeps_store_and_request_tokens_distinct(tmp_path):
+    engine = CLMEngine(hermes_home=str(tmp_path), store_factory=default_store_factory)
+    engine.on_session_start("sess-token-scope")
+    try:
+        status = engine.tool_service().status()
+        assert status["store"] == "attached"
+        assert "est_tokens" not in status
+        assert status["all_spans_est_tokens"] == engine.store.status()["all_spans_est_tokens"]
+    finally:
+        engine.on_session_end("sess-token-scope", [])
+
+
 def engine_for(snapshot=None, *, supports_commit: bool = True, **kwargs):
     factory = StoreFactory(snapshot, supports_commit=supports_commit)
     engine = CLMEngine(store_factory=factory, hermes_home="/tmp/hermes-home", **kwargs)

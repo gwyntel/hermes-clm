@@ -652,7 +652,7 @@ class ToolService:
                         "head_hash",
                         "revision_kind",
                         "counts",
-                        "est_tokens",
+                        "all_spans_est_tokens",
                         "estimator",
                         "spans_archived",
                         "archive_entries",

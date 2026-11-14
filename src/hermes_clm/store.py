@@ -3323,7 +3323,7 @@ class ContextStore:
             index = self._index_summary()
             tokens_cur = self._conn.cursor()
             try:
-                est_tokens = self._est_active_tokens(tokens_cur)
+                all_spans_tokens = self._est_active_tokens(tokens_cur)
             finally:
                 tokens_cur.close()
             return {
@@ -3335,7 +3335,7 @@ class ContextStore:
                 "head_hash": str(rev_row["head_hash"]),
                 "revision_kind": str(rev_row["kind"]),
                 "counts": counts,
-                "est_tokens": est_tokens,
+                "all_spans_est_tokens": all_spans_tokens,
                 "estimator": TOKEN_ESTIMATOR,
                 "spans_archived": spans_total,
                 "archive_entries": archive_count,
