@@ -72,7 +72,7 @@ class StatusService(FakeService):
             "context_length": 128_000,
             "usage_percent": 50.0,
             "counts": {"active": 4, "offloaded": 2},
-            "tokens": {"spans": 64_000, "calibrated": 64_000, "actual": None},
+            "tokens": {"scope": "request", "spans": 64_000, "calibrated": 64_000, "actual": None},
             "last_compaction": {"revision": 7, "spans_offloaded": 3, "tokens_freed": 900},
             "last_error": None,
             **PADDING,

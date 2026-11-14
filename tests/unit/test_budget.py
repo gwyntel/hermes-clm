@@ -225,3 +225,22 @@ def test_pressure_state_keeps_the_raw_estimate_recoverable():
 def test_pressure_state_raw_estimate_equals_calibrated_without_calibration():
     state = pressure_state(estimated_tokens=1_000, context_length=10_000)
     assert state.raw_estimated_tokens == state.estimated_tokens == 1_000
+
+
+def test_token_vocabulary_declares_request_scope():
+    assert token_vocabulary(spans=400, actual=512)["scope"] == "request"
+
+
+def test_budget_has_one_calibrated_spelling_and_a_scope():
+    state = pressure_state(
+        estimated_tokens=1_000,
+        context_length=10_000,
+        calibration=TokenCalibration(ratio=2.0),
+    )
+    payload = state.to_dict()
+    assert payload["scope"] == "request"
+    assert payload["estimated_tokens"] == 2_000
+    assert payload["raw_estimated_tokens"] == 1_000
+    assert "calibrated_tokens" not in payload
+    assert state.calibrated_tokens == 2_000
+

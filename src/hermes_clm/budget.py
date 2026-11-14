@@ -190,6 +190,7 @@ def token_vocabulary(
         # measurement of zero: keep the field honest.
         observed = None
     return {
+        "scope": "request",
         "spans": raw,
         "calibrated": calibrated,
         "actual": observed,
@@ -265,8 +266,8 @@ class PressureState:
     def to_dict(self) -> Dict[str, Any]:
         """JSON-serializable budget snapshot."""
         return {
+            "scope": "request",
             "estimated_tokens": self.estimated_tokens,
-            "calibrated_tokens": self.calibrated_tokens,
             "raw_estimated_tokens": self.raw_estimated_tokens,
             "context_length": self.context_length,
             "reserve_tokens": self.reserve_tokens,
