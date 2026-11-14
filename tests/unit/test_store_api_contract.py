@@ -58,6 +58,17 @@ class SignatureTests(unittest.TestCase):
             ],
         )
 
+    def test_stage_commit_signature(self) -> None:
+        self.assertEqual(
+            [(name, kind) for name, kind, _ in params(store.ContextStore.stage_commit)],
+            [
+                ("operations", "POSITIONAL_OR_KEYWORD"),
+                ("expected_revision", "KEYWORD_ONLY"),
+                ("txn_id", "KEYWORD_ONLY"),
+                ("actor_origin", "KEYWORD_ONLY"),
+            ],
+        )
+
     def test_commit_and_discard(self) -> None:
         self.assertEqual(
             [(name, kind) for name, kind, _ in params(store.ContextStore.commit)],

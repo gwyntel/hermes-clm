@@ -2142,6 +2142,48 @@ class ContextStore:
             item.receipt for item in planned if item.effect == effect and item.span is not None
         )
 
+    def stage_commit(
+        self,
+        operations: Sequence[Any],
+        *,
+        expected_revision: int,
+        txn_id: str,
+        actor_origin: str,
+    ) -> CommitResult:
+        """Stage and commit one new transaction in one BEGIN IMMEDIATE write."""
+        self._require_writable()
+        ops = coerce_operations(operations, actor_origin=actor_origin)
+        validate_txn_id(txn_id)
+        expected = self._validate_revision(expected_revision)
+        actor = ActorOrigin(actor_origin)
+        with self._write() as cur:
+            staged = self._stage_locked(
+                cur, ops, expected_revision=expected,
+                txn_id=txn_id, actor_origin=actor,
+            )
+            row = self._txn_row(cur, txn_id)
+            if row is None:  # pragma: no cover - defensive store invariant
+                raise CorruptStoreError("transaction row disappeared", code="missing_txn")
+            if staged.already_committed:
+                payload_sha = canonical_sha256([op.to_payload() for op in ops])
+                if str(row["staged_sha256"]) != payload_sha:
+                    raise ConflictError(
+                        "txn_id reused with a different payload",
+                        code="txn_payload_mismatch",
+                        details={"txn_id": txn_id},
+                    )
+                result = self._replay_commit(row)
+            elif staged.replayed:
+                raise ConflictError(
+                    "transaction is already staged; commit it explicitly",
+                    code="txn_already_staged", details={"txn_id": txn_id},
+                )
+            else:
+                result = self._commit_locked(cur, row, expected=expected)
+        self._invalidate()
+        self._write_index()
+        return result
+
     def commit(self, *, txn_id: str, expected_revision: int) -> CommitResult:
         """Apply a staged transaction atomically; replay is idempotent."""
 
@@ -2156,45 +2198,47 @@ class ContextStore:
                     code="unknown_txn",
                     details={"txn_id": txn_id},
                 )
-            state = str(txn["state"])
-            if state == "committed":
+            if str(txn["state"]) == "committed":
                 return self._replay_commit(txn)
-            if state == "discarded":
-                raise IdempotencyConflictError(
-                    "transaction was discarded", code="txn_discarded", details={"txn_id": txn_id}
-                )
-            head = self._head(cur)
-            if expected != head:
-                raise StaleRevisionError(
-                    "expected_revision does not match the current head",
-                    code="stale_revision",
-                    details={"expected": expected, "current": head},
-                )
-            if int(txn["base_revision"]) != head:
-                raise StaleRevisionError(
-                    "staged transaction is based on an older revision",
-                    code="stale_stage",
-                    details={"base_revision": int(txn["base_revision"]), "current": head},
-                )
-            ops = self._decode_staged_ops(dict(txn))
-            planned = self._plan(cur, ops)
-            result = self._apply(
-                cur,
-                planned,
-                txn_id=txn_id,
-                actor_origin=ActorOrigin(str(txn["actor_origin"])),
-                kind=self._commit_kind(ops),
-                base_revision=head,
-                extra_audit={"txn_id": txn_id},
-            )
-            now = self._now()
-            cur.execute(
-                "UPDATE txns SET state = 'committed', committed_revision = ?, updated_at = ?, result_json = ? "
-                "WHERE txn_id = ? AND state = 'staged'",
-                (result.revision, now, canonical_json(result.to_dict()), txn_id),
-            )
+            result = self._commit_locked(cur, txn, expected=expected)
         self._invalidate()
         self._write_index()
+        return result
+
+    def _commit_locked(self, cur, txn, *, expected: int) -> CommitResult:
+        state = str(txn["state"])
+        if state == "committed":
+            return self._replay_commit(txn)
+        if state == "discarded":
+            raise IdempotencyConflictError(
+                "transaction was discarded", code="txn_discarded",
+                details={"txn_id": str(txn["txn_id"])},
+            )
+        head = self._head(cur)
+        if expected != head:
+            raise StaleRevisionError(
+                "expected_revision does not match the current head", code="stale_revision",
+                details={"expected": expected, "current": head},
+            )
+        if int(txn["base_revision"]) != head:
+            raise StaleRevisionError(
+                "staged transaction is based on an older revision", code="stale_stage",
+                details={"base_revision": int(txn["base_revision"]), "current": head},
+            )
+        ops = self._decode_staged_ops(dict(txn))
+        planned = self._plan(cur, ops)
+        txn_id = str(txn["txn_id"])
+        result = self._apply(
+            cur, planned, txn_id=txn_id,
+            actor_origin=ActorOrigin(str(txn["actor_origin"])),
+            kind=self._commit_kind(ops), base_revision=head,
+            extra_audit={"txn_id": txn_id},
+        )
+        cur.execute(
+            "UPDATE txns SET state = 'committed', committed_revision = ?, updated_at = ?, result_json = ? "
+            "WHERE txn_id = ? AND state = 'staged'",
+            (result.revision, self._now(), canonical_json(result.to_dict()), txn_id),
+        )
         return result
 
     @staticmethod
