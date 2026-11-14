@@ -360,6 +360,16 @@ a request signature in `txns.staged_sha256` — the staged operation payloads fo
 replaying a `txn_id` with a *different* request raises `txn_payload_mismatch` instead of silently
 returning the earlier outcome.
 
+`stage_commit(operations, expected_revision, txn_id, actor_origin)` is the same contract with the
+staging step folded in: it validates, writes the `staged` row and performs steps 2–4 above inside
+one `BEGIN IMMEDIATE`, so a caller never observes (or leaves behind) a staged-but-uncommitted
+transaction. It differs from `stage`+`commit` in exactly three ways, all refusals rather than
+behaviour changes: an existing `staged` row for `txn_id` raises `txn_already_staged` (two-phase
+`stage` would overwrite it), any failure rolls back the transaction row entirely, and a
+`committed` replay follows the same `txns.staged_sha256` signature comparison described above.
+Nothing else about CAS, validation order or audit events changes, and two-phase remains the only
+path for patches and auxiliary proposals.
+
 One `BEGIN IMMEDIATE` transaction covers, atomically: operation rows, `span_state` changes, pins and
 pin events, the revision row, the idempotency outcome (`txns.result_json`), the snapshot row, token
 rows and the audit event. A crash at any point leaves either all of it or none of it (§10).

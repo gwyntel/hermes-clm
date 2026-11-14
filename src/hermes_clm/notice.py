@@ -48,8 +48,11 @@ __all__ = [
 #: bookkeeping and is never a span an edit can target.
 NOTICE_PREFIX = "[clm.notice"
 
-#: Hard ceiling for the row's text; the real text is ~200 characters.
-NOTICE_MAX_CHARS = 320
+#: Hard ceiling for the row's text. The worst case a hostile store can produce —
+#: maximal revision/count integers and 32-char ``at``/``actor`` tokens — is 345
+#: characters, so 400 leaves headroom without ever truncating a row we wrote (a
+#: truncated row would fail recognition and could then be mistaken for content).
+NOTICE_MAX_CHARS = 400
 
 #: Values interpolated into the row are reduced to this token class.
 _SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9._:@+-]+")
@@ -66,8 +69,8 @@ _NOTICE_TAIL = "Machine-generated status line, not a request."
 _NOTICE_ROW_RE = re.compile(
     r"^\[clm\.notice rev=\d+ compaction at=\S+ actor=\S+ spans_offloaded=\d+"
     r"(?: tokens_freed=\d+)?\] "
-    r"Earlier tool results may render as clm\.offloaded stubs; their originals are "
-    r"retrievable with clm_retrieve\. " + re.escape(_NOTICE_TAIL) + r"$"
+    r"Earlier tool results and settled assistant notes may render as clm\.offloaded stubs; "
+    r"their originals are retrievable with clm_retrieve\. " + re.escape(_NOTICE_TAIL) + r"$"
 )
 _MAX_TOKEN_CHARS = 32
 
@@ -117,8 +120,9 @@ def compaction_notice(compaction: Optional[Mapping[str, Any]]) -> Optional[Dict[
         fields.append(f"tokens_freed={tokens}")
     body = " ".join(fields) + "]"
     body += (
-        " Earlier tool results may render as clm.offloaded stubs; their originals are "
-        "retrievable with clm_retrieve. Machine-generated status line, not a request."
+        " Earlier tool results and settled assistant notes may render as clm.offloaded stubs;"
+        " their originals are retrievable with clm_retrieve. Machine-generated status line,"
+        " not a request."
     )
     return {"role": "user", "content": body[:NOTICE_MAX_CHARS]}
 

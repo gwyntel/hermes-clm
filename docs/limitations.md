@@ -296,3 +296,31 @@ covered by a non-`xfail` test.
     cross-instance state — but they are two objects, and a future host change that attaches
     stores eagerly rather than on the selected instance's first hook would break that
     guarantee.
+
+## Ergonomic fast paths
+
+53. **`stage_commit` decides on a preview it cannot re-verify.** The fast path previews the
+    batch through the engine's pure projection and only then commits, so a pin or an
+    ingestion landing between the two is caught by the store's own CAS (`stale_revision`) or
+    by the in-transaction re-validation, not by the preview. The refusal is safe — nothing is
+    written — but the saving the caller was promised is the pre-commit estimate.
+54. **`min_saved_tokens` compares the calibrated estimate.** It is a guard against a
+    disappointing edit, not a cost guarantee: calibration is a bounded ratio over a
+    four-chars-per-token estimator (item 29), so a measured saving near the threshold can
+    land on either side of it.
+55. **`patch` cannot be replayed and therefore cannot fast-commit.** A literal patch resolves
+    against the span's *current* text, which an earlier transaction may have changed; replaying
+    the `txn_id` would re-resolve different text, so `commit=true` with `kind: patch` is
+    refused by design. Stage the patch, inspect the receipt, then `clm_commit`. The resolved
+    rewrite is a whole-span edit, so the audit trail shows the full replacement text rather
+    than the patched region.
+56. **Prose offload is a heuristic over "settled", not a judgement about importance.** It
+    only offers assistant rows a couple of rows behind the newest tool call, and it skips
+    pinned, protected, multimodal, duplicate and oversized spans, but a long settled
+    explanation can still be a more useful thing to keep than a short tool result. The
+    candidate list is a suggestion the model or operator accepts; nothing offloads
+    automatically, and every offloaded span is restorable from the archive byte-for-byte.
+57. **`include_stale` is a pagination-wide decision.** The store filters before it paginates,
+    so flipping the flag mid-pagination skips or repeats rows; `clm_inspect` therefore warns
+    in its schema and callers must restart without a cursor. Absent rows are omitted by
+    default because a page of archive residue is worse than a short page.

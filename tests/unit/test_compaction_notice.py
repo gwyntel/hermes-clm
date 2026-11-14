@@ -173,6 +173,23 @@ def notice_body() -> str:
     return row["content"]
 
 
+def test_the_notice_names_both_reclaimable_classes():
+    """Compaction now covers settled assistant prose too, so the body must say so.
+
+    A model that reads "earlier tool results" only would re-derive prose it can
+    simply retrieve.
+    """
+
+    body = notice_body()
+    assert "Earlier tool results" in body
+    assert "settled assistant notes" in body
+    assert "clm_retrieve" in body
+
+    # A tool result quoting the widened body is still content, not our row.
+    assert notice.is_notice_row({"role": "tool", "content": body}) is False
+    assert notice.is_notice_row({"role": "user", "content": body}) is True
+
+
 def test_is_notice_row_requires_a_plain_user_row():
     """A tool/assistant row quoting the notice is content, not bookkeeping."""
 

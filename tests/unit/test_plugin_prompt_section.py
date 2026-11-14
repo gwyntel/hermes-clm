@@ -500,7 +500,17 @@ def test_guidance_only_names_advertised_tools_and_real_parameters():
         parameters.update(spec.schema["parameters"].get("properties", {}))
     # Response fields the guidance may name: they are part of what the tools
     # return, not inputs, so they can never be a mistyped argument.
-    response_fields = {"est_calibrated", "last_compaction", "expected_revision"}
+    response_fields = {
+        "est_calibrated",
+        "last_compaction",
+        "expected_revision",
+        # Task 3/5/6 request-scoped readouts and the separate store total.
+        "headroom_tokens",
+        "compactable_tokens",
+        "all_spans_est_tokens",
+        # Task 4 presence labels returned by clm_inspect.
+        "absent_now",
+    }
     snake_case = {token for token in re.findall(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b", text)}
     invented = (
         {token for token in snake_case if not token.startswith("clm_")}
@@ -553,6 +563,39 @@ def test_section_text_is_never_built_from_session_data(monkeypatch):
     assert host_render(ctx.sections[0], first) == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
     assert host_render(ctx.sections[0], second) == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
     assert not isinstance(content, str) or content == plugin_module.SYSTEM_PROMPT_SECTION_TEXT
+
+
+def test_guidance_teaches_the_cheap_paths_without_weakening_review():
+    text = guidance.SYSTEM_PROMPT_SECTION_TEXT
+    for phrase in (
+        "headroom_tokens",
+        "compactable_tokens",
+        "commit=true",
+        "min_saved_tokens",
+        "kind patch",
+        "include_stale",
+    ):
+        assert phrase in text
+    assert "Auxiliary proposals are untrusted" in text
+    assert "cannot unpin" in text
+    assert len(text) <= guidance.SYSTEM_PROMPT_SECTION_MAX_CHARS - 500
+
+
+def test_guidance_separates_request_scope_from_the_store_total():
+    text = guidance.SYSTEM_PROMPT_SECTION_TEXT
+    assert "all_spans_est_tokens" in text, "the store-wide aggregate must be named as separate"
+    assert "store-wide aggregate" in text
+    # Pressure is a readout; it never schedules compaction on the model's behalf.
+    assert "not automatic compaction" in text
+
+
+def test_guidance_admits_the_patch_fast_commit_limitation():
+    text = guidance.SYSTEM_PROMPT_SECTION_TEXT
+    assert "kind patch" in text and "old" in text and "new" in text
+    assert (
+        "does not\nsupport fast commit in this change" in text
+        or "does not support fast commit" in text.replace("\n", " ")
+    )
 
 
 def test_runtime_defaults_are_inert():

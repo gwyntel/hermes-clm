@@ -9,11 +9,12 @@ Delegates may refine internals, not these public semantics. Python type annotati
 - `snapshot() -> StoreSnapshot` — immutable, deep-copy-safe view; no SQLite handles.
 - `stage(operations: Sequence[EditOperation], *, expected_revision: int, txn_id: str, actor_origin: str) -> StageResult`
 - `commit(*, txn_id: str, expected_revision: int) -> CommitResult` — idempotent replay returns original outcome; stale revision rejected.
+- `stage_commit(operations, *, expected_revision: int, txn_id: str, actor_origin: str) -> CommitResult` — stage and commit one new transaction inside a single write transaction. Same conflict validation and audit events as `stage` + `commit`; a refusal (stale revision, protected span, bad operation) leaves **no** transaction row, and reusing an existing staged `txn_id` raises `txn_already_staged` instead of consuming it. Replaying a committed `txn_id` with an identical payload returns the original result; a different payload raises `txn_payload_mismatch`.
 - `discard(*, txn_id: str) -> None`
 - `revert(*, target_revision: int, expected_revision: int, txn_id: str, actor_origin: str) -> CommitResult` — new head revision, no truncation.
 - `status() -> dict[str, Any]`
 - `last_compaction() -> dict[str, Any] | None` — newest revision carrying a `drop` or `offload`, as `{revision, at, actor, kind, spans_offloaded, tokens_freed}`; `None` when nothing was ever compacted. A revert does not erase it, and it counts distinct spans. Optional: a store without it is supported (the engine then reports no compaction).
-- `inspect(*, cursor: str | None = None, limit: int = 50) -> dict[str, Any]`
+- `inspect(*, cursor: str | None = None, limit: int = 50, include_stale: bool = False) -> dict[str, Any]` — paginates aligned spans. Absent rows (archived, no longer supplied by the host) are omitted by default; `include_stale=True` returns them with their presence/status labels and reports `alignment`. Callers must not change `include_stale` mid-pagination.
 - `search(query: str, *, cursor: str | None = None, limit: int = 20) -> dict[str, Any]`
 - `retrieve(span_id: str) -> dict[str, Any]` — current session only.
 - `create_proposal(operations, *, base_revision: int) -> Proposal`
@@ -46,7 +47,15 @@ Engine calls only `for_session`, `ingest`, `snapshot`, `status`, lifecycle/close
 
 Engine exposes `store` only through its own scoped tool-service methods. Tool handlers never accept `session_id`, paths, provider, model, base URL or API keys. All return JSON strings. Tool schemas contain no provider configuration.
 
-`clm_status` takes an optional `detail`: `summary` (default) returns revision, tier, usage, token vocabulary, counts, `last_compaction`, `last_error`, the compact store/compression/lineage diagnostics (`engine_version`, `store`, `store_error`, `last_compress_aborted`, `last_compress_error`, `last_lineage_error`, and `last_rotation_error` when set) and a hint; `full` adds budget, projection, config, limits, health, aux metrics and receipts capped to the newest three with `receipts_omitted`. `clm_stage` prices a batch it just staged through the engine's pure `preview(operations) -> {before, after, saved, calibrated, conflicts}` and reports it as `projected`; no `preview` means absent detail, never a failed stage.
+`clm_status` takes an optional `detail`: `summary` (default) returns revision, tier, usage, token vocabulary, counts, `last_compaction`, `last_error`, the compact store/compression/lineage diagnostics (`engine_version`, `store`, `store_error`, `last_compress_aborted`, `last_compress_error`, `last_lineage_error`, and `last_rotation_error` when set) and a hint; `full` adds budget, projection, config, limits, health, aux metrics and receipts capped to the newest three with `receipts_omitted`.
+
+Token fields are named by scope. Everything the request budgets — `tokens` (`scope: "request"`), `headroom_tokens`, `overflow_tokens`, `compactable_tokens`/`compactable_units` — is measured against the live request; `all_spans_est_tokens` is the separate store-wide aggregate over every archived span and is **not** what the window is checked against. `headroom_tokens` is `None` when no context length is known (never `0`), and `compactable_tokens` is `None` with `compactable_unknown` naming the reason when no request has been observed.
+
+`clm_stage` prices a batch it just staged through the engine's pure `preview(operations) -> {before, after, saved, calibrated, conflicts}` and reports it as `projected`; no `preview` means absent detail, never a failed stage. `clm_stage` also accepts an opt-in fast path: `commit=true` performs the store's `stage_commit` for that batch and returns `committed`/`atomic`. Its preconditions are all-or-nothing — the engine previews first and refuses with `preview_unavailable`, `projection_refused` or `insufficient_saving` (`min_saved_tokens` compares the calibrated saving) without writing anything, and a store without `stage_commit` is a `service_error` rather than a silent two-phase fallback. Default behaviour is unchanged: no `commit` field means one `stage` call plus one preview.
+
+`kind: "patch"` is a tool-level kind, not a persisted one. It names exactly one span plus a literal `old` that must occur exactly once in the span's current text (a committed `rewrite_text` when present, otherwise the archived content) and a possibly empty `new`. The handler resolves it into a whole-span `rewrite` with `provenance.via = "patch"` before anything is written, echoes a digest receipt (`patched`) instead of the expanded text, and refuses with `patch_not_found`, `patch_ambiguous`, `patch_noop`, `patch_unsupported_content`, `protected_span`, `span_pinned` or `span_not_active`. Because resolution is against current text, `patch` deliberately does not support `commit=true`: stage it, then `clm_commit`.
+
+The plugin-owned `pressure` hint rides only on newly created CLM tool responses. It is never inserted into, or used to alter, any projected transcript row, so the projection stays token-independent.
 
 ## Configuration
 
