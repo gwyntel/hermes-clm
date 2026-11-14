@@ -622,6 +622,64 @@ def test_real_store_overflow_commits_a_system_offload_and_the_next_request_shows
     assert "FAILED tests/test_x.py" in history[2]["content"]
 
 
+def test_real_store_fast_commit_applies_a_group_offload_in_one_call(tmp_path):
+    """`clm_stage` with `commit=true` writes once and the next request shows it."""
+    history = clm_history()
+    host, engine = real_host(tmp_path, history)
+    host.iterate()
+    service = engine.tool_service()
+    spans = inspect_spans(engine, history)
+    revision = service.revision
+    group = [spans["a1"]["span_id"], spans["t1"]["span_id"]]
+
+    payload = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [{"kind": "offload", "span_ids": group}],
+                "expected_revision": revision,
+                "txn_id": "txn-fast-offload",
+                "commit": True,
+            },
+            messages=history,
+        )
+    )
+    assert payload["ok"] is True, payload
+    assert payload["committed"] is True
+    assert payload["atomic"] is True
+    assert payload["revision"] == revision + 1
+    assert service.revision == revision + 1
+    assert service.status()["staged_transactions"] == []
+
+    request, selected = host.iterate()
+    assert selected is not None
+    row = request_index(history, "t1")
+    assert "[clm.offloaded" in selected[row]["content"]
+
+    # A refused minimum writes nothing: no revision, no staged row, no change.
+    refused = json.loads(
+        engine.handle_tool_call(
+            "clm_stage",
+            {
+                "operations": [{"kind": "offload", "span_ids": group}],
+                "expected_revision": service.revision,
+                "txn_id": "txn-fast-refused",
+                "commit": True,
+                "min_saved_tokens": 10**9,
+            },
+            messages=history,
+        )
+    )
+    assert refused["ok"] is False, refused
+    assert refused["errors"][0]["code"] == "insufficient_saving"
+    assert refused.get("committed") is not True
+    assert service.revision == revision + 1
+    assert service.status()["staged_transactions"] == []
+    _, after = host.iterate()
+    assert after is not None
+    assert after[row]["content"] == selected[row]["content"]
+
+
 def test_real_store_last_compaction_names_the_revision_that_archived_output(tmp_path):
     """The store, not the caller, decides what counts as a compaction."""
 

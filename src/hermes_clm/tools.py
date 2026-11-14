@@ -268,6 +268,15 @@ def _optional_int(args: Mapping[str, Any], key: str, default: int, *, maximum: i
     return value
 
 
+def _optional_minimum(args: Mapping[str, Any], key: str) -> int | None:
+    if key not in args or args[key] is None:
+        return None
+    value = _require_int(args, key)
+    if value < 1:
+        raise _Invalid("invalid_field", f"{key} must be at least 1")
+    return value
+
+
 def _optional_bool(args: Mapping[str, Any], key: str, default: bool) -> bool:
     if key not in args:
         return default
@@ -733,31 +742,49 @@ class ToolHandlers:
     ) -> Mapping[str, Any]:
         _check_keys(
             args,
-            allowed=("operations", "expected_revision", "txn_id"),
+            allowed=("operations", "expected_revision", "txn_id", "commit", "min_saved_tokens"),
             required=("operations", "expected_revision"),
         )
+        commit_now = _optional_bool(args, "commit", False)
+        min_saved_tokens = _optional_minimum(args, "min_saved_tokens")
+        if min_saved_tokens is not None and not commit_now:
+            raise _Invalid(
+                "invalid_field",
+                "min_saved_tokens requires commit=true",
+                hint="set commit=true to apply the batch in one write",
+            )
         operations = _normalise_operations(args["operations"], self.limits)
         expected_revision = _require_int(args, "expected_revision")
         txn_id = _txn_id(args, required=False)
         service = self._service(session_id)
+        name = "stage_commit" if commit_now else "stage"
+        extra: dict[str, Any] = {}
+        if commit_now:
+            extra["min_saved_tokens"] = min_saved_tokens
         payload = self._call(
             service,
-            "stage",
+            name,
             operations,
             expected_revision=expected_revision,
             txn_id=txn_id,
             actor_origin=AGENT_ORIGIN,
+            **extra,
         )
         payload.setdefault("txn_id", txn_id)
         payload.setdefault("expected_revision", expected_revision)
         if payload.get("ok") is not False:
-            payload.setdefault("staged", True)
-            payload.setdefault(
-                "note", "staged only; call clm_commit with expected_revision to apply"
-            )
-            projected = _preview(service, operations)
-            if projected is not None:
-                payload["projected"] = projected
+            if commit_now:
+                payload.setdefault("committed", True)
+                payload.setdefault("atomic", True)
+                payload.pop("note", None)
+            else:
+                payload.setdefault("staged", True)
+                payload.setdefault(
+                    "note", "staged only; call clm_commit with expected_revision to apply"
+                )
+                projected = _preview(service, operations)
+                if projected is not None:
+                    payload["projected"] = projected
         return payload
 
     @_guarded
@@ -1064,6 +1091,16 @@ def build_tool_specs(handlers: ToolHandlers) -> list[ToolSpec]:
                     "txn_id": {
                         "type": "string",
                         "description": "Idempotency key; reuse the same value to replay a staged transaction.",
+                    },
+                    "commit": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Stage and apply the batch in one write transaction. The default (false) stages only and requires clm_commit. Rejected if the pure preview is unavailable.",
+                    },
+                    "min_saved_tokens": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "With commit=true, refuse to write unless the projected calibrated saving is at least this many tokens. Refusals write nothing.",
                     },
                 },
                 "required": ["operations", "expected_revision"],

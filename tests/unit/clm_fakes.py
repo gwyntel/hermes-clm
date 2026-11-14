@@ -37,6 +37,7 @@ class FakeService:
         self.spans: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.stage_result: dict[str, Any] | None = None
+        self.stage_commit_result: dict[str, Any] | None = None
         self.commit_result: dict[str, Any] | None = None
         self.revert_result: dict[str, Any] | None = None
         self.status_result: dict[str, Any] | None = None
@@ -147,6 +148,34 @@ class FakeService:
             "inert": 0,
             "errors": [],
             "receipts": [],
+        }
+
+    def stage_commit(
+        self,
+        operations: Any,
+        *,
+        expected_revision: int,
+        txn_id: str,
+        min_saved_tokens: int | None = None,
+        actor_origin: str = "agent",
+    ) -> dict[str, Any]:
+        self._record(
+            "stage_commit",
+            (operations,),
+            {
+                "expected_revision": expected_revision,
+                "txn_id": txn_id,
+                "min_saved_tokens": min_saved_tokens,
+                "actor_origin": actor_origin,
+            },
+        )
+        if self.stage_commit_result is not None:
+            return dict(self.stage_commit_result)
+        return {
+            "ok": True,
+            "revision": expected_revision + 1,
+            "applied": len(operations),
+            "atomic": True,
         }
 
     def commit(self, *, txn_id: str, expected_revision: int) -> dict[str, Any]:

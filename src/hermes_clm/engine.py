@@ -764,6 +764,65 @@ class ToolService:
         """Commit a staged transaction (idempotent replay by ``txn_id``)."""
         return self._call_store("commit", txn_id=txn_id, expected_revision=expected_revision)
 
+    def stage_commit(
+        self,
+        operations: Sequence[Any],
+        *,
+        expected_revision: int,
+        txn_id: str,
+        min_saved_tokens: int | None = None,
+        actor_origin: str = "agent",
+    ) -> dict[str, Any]:
+        store = self._require_store()
+        head = self._live_revision(store)
+        if head > 0 and int(expected_revision) != head:
+            return {"ok": False, "revision": head, "receipts": [], "errors": [{
+                "code": "stale_revision",
+                "message": f"expected revision {expected_revision}, head is {head}",
+            }]}
+        try:
+            projected = self.preview(operations)
+        except Exception as exc:
+            self._engine._record_error(exc)
+            projected = None
+        if not isinstance(projected, Mapping) or projected.get("available") is False:
+            return {"ok": False, "revision": head, "receipts": [], "errors": [{
+                "code": "preview_unavailable",
+                "message": "fast commit requires a successful pure preview; use two-phase stage/commit",
+            }]}
+        if projected.get("ok") is False:
+            return {"ok": False, "revision": head, "receipts": [],
+                    "projected": dict(projected), "errors": [{
+                        "code": "projection_refused",
+                        "message": "the projector refuses this batch; nothing was written",
+                    }]}
+        raw = projected.get("saved")
+        raw_saved = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+        calibrated = projected.get("calibrated")
+        calibrated_saved = calibrated.get("saved") if isinstance(calibrated, Mapping) else raw_saved
+        if not isinstance(calibrated_saved, int) or isinstance(calibrated_saved, bool):
+            calibrated_saved = 0
+        saved = {"raw": raw_saved, "calibrated": calibrated_saved}
+        if min_saved_tokens is not None and calibrated_saved < min_saved_tokens:
+            return {"ok": False, "revision": head, "receipts": [],
+                    "min_saved_tokens": min_saved_tokens, "saved_tokens": saved,
+                    "projected": dict(projected), "errors": [{
+                        "code": "insufficient_saving",
+                        "message": (
+                            f"batch saves {calibrated_saved} calibrated tokens, "
+                            f"below required {min_saved_tokens}"
+                        ),
+                    }]}
+        payload = self._call_store(
+            "stage_commit", list(operations), expected_revision=expected_revision,
+            txn_id=txn_id, actor_origin=actor_origin,
+        )
+        payload.setdefault("atomic", True)
+        payload["projected"] = dict(projected)
+        payload["saved_tokens"] = saved
+        return payload
+
+
     def discard(self, *, txn_id: str) -> None:
         """Drop a staged transaction without committing."""
         self._require_store().discard(txn_id=txn_id)
