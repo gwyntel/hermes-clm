@@ -5,6 +5,35 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/); Release Please
 generates release notes from those commits.
 
+## [0.3.0](https://github.com/gwyntel/hermes-clm/compare/v0.2.0...v0.3.0) (2026-11-14)
+
+
+### Features
+
+* **compaction:** offload eligible settled assistant prose ([132206f](https://github.com/gwyntel/hermes-clm/commit/132206fe5f1c32a5e0909836b98ebf8ab0ad9de9))
+* **inspect:** hide stale spans without hiding archive access ([e078429](https://github.com/gwyntel/hermes-clm/commit/e0784296e11c148bff0c334f6dd9fd168e573410))
+* model ergonomics — honest scope, cheap paths, safe reactivation ([207ba25](https://github.com/gwyntel/hermes-clm/commit/207ba25af1f56678e6045b07d745dc8e4aaac20e))
+* **status:** expose headroom and honest savings estimates ([c3f7412](https://github.com/gwyntel/hermes-clm/commit/c3f7412df18fe3f27e9f5440e3f66bccb59e70e1))
+* **store:** commit direct edits in one write transaction ([9ebea3a](https://github.com/gwyntel/hermes-clm/commit/9ebea3af0fbe2825b2dfb4d4c49d583dc1a86e2f))
+* **tools:** offer checked single-call direct commits ([54487f8](https://github.com/gwyntel/hermes-clm/commit/54487f84c4933521c892630649f9d44f7c1f3f73))
+* **tools:** patch literal text inside one span ([bdebc75](https://github.com/gwyntel/hermes-clm/commit/bdebc75f9ab28255af810e04e2950981e56537c1))
+* **tools:** return compactable savings and pressure hints ([e3f7857](https://github.com/gwyntel/hermes-clm/commit/e3f785750204f33324ac8d34e4c89e551423b1ea))
+
+
+### Bug Fixes
+
+* **budget:** use one request-scoped token vocabulary ([fa2245c](https://github.com/gwyntel/hermes-clm/commit/fa2245cfc1812204b29f71730c2c2ac7fe451807))
+* **status:** name store-wide token totals by scope ([95d5aba](https://github.com/gwyntel/hermes-clm/commit/95d5abafb87328a360701cc4a3f2f4f1fdbd01c8))
+* **store:** refuse reactivations the projector would reject ([31a41a8](https://github.com/gwyntel/hermes-clm/commit/31a41a8a135ce99b7426611476f19673f0d8b0dd))
+
+
+### Documentation
+
+* correct the claims independent review disproved ([b2cfd17](https://github.com/gwyntel/hermes-clm/commit/b2cfd177a550c06908d0df9d258b455ee75c131f))
+* distinguish released behavior from benchmark evidence ([da08751](https://github.com/gwyntel/hermes-clm/commit/da087513d1eafaeac75fb5c2774c87e581dae19d))
+* record the post-remediation test total ([fdbb145](https://github.com/gwyntel/hermes-clm/commit/fdbb145a6ecceeeaa0edb889968065274df801dd))
+* teach the cheap paths and name both reclaimable classes ([64c9c74](https://github.com/gwyntel/hermes-clm/commit/64c9c74ef5302df626904a37ab3f691cad605bee))
+
 ## [0.2.0](https://github.com/gwyntel/hermes-clm/compare/v0.1.0...v0.2.0) (2026-11-13)
 
 
